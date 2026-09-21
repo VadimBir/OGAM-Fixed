@@ -104,8 +104,3 @@ docs/wire-captures/
 /dist/OGAM-release.apk
 /dist/chat/
 /OLD_BUILD/app-release.apk
-
-# checked-in APK artifacts (rebuild locally/CI, do not commit)
-apk/
-dist/
-.bigfiles/
