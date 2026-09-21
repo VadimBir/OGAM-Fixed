@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Re-split any tracked big file whose whole copy changed, before pushing parts.
+exec "$(git rev-parse --show-toplevel)/scripts/bigfile.sh" split
