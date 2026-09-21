@@ -28,7 +28,6 @@ import {
   XML_TOOL_CALL_PARAMETER_MARKER,
 } from '../utils/messageContent';
 import {
-  callsWithinToolBudget,
   finalResponseFromToolResults,
   normalizeMaxToolCalls,
   toolLimitFinalAnswerInstruction,
@@ -1562,11 +1561,12 @@ export async function runToolLoop(
       fullResponse,
       toolCalls,
     );
-    const cappedToolCalls = callsWithinToolBudget(
-      effectiveToolCalls,
-      totalToolCalls,
-      maxToolSteps,
-    );
+    // Cap THIS round's requested tool calls to the budget still remaining before maxToolSteps.
+    // `callsWithinToolBudget` is a numeric predicate (count < max), not an array capper — calling it
+    // here (with a 3rd arg it never declared) returned a boolean, so `.length`/`.map` below blew up
+    // with "undefined is not a function" AFTER the stream, and the no-tools final answer never emitted.
+    const remainingToolBudget = Math.max(0, maxToolSteps - totalToolCalls);
+    const cappedToolCalls = effectiveToolCalls.slice(0, remainingToolBudget);
 
     // No tool calls → model gave a final text response
     if (cappedToolCalls.length === 0) {
