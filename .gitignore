@@ -104,3 +104,6 @@ docs/wire-captures/
 /dist/OGAM-release.apk
 /dist/chat/
 /OLD_BUILD/app-release.apk
+
+# Transient Claude Code agent worktrees — never commit
+.claude/worktrees/
