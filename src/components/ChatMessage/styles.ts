@@ -213,6 +213,33 @@ const createBubbleStyles = (colors: ThemeColors, shadows: ThemeShadows) => ({
     width: '100%' as const,
     borderRadius: 12,
   },
+  // Assistant reply laid out as [avatar][bubble]. The bubble body keeps its own container padding,
+  // so the avatar column sits just inside the screen edge with the bubble indented beside it.
+  assistantRow: {
+    flexDirection: 'row' as const,
+    alignItems: 'flex-start' as const,
+  },
+  assistantRowBody: {
+    flex: 1,
+  },
+  assistantAvatar: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    marginLeft: 8,
+    marginTop: 10,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: 'center' as const,
+    justifyContent: 'center' as const,
+    overflow: 'hidden' as const,
+  },
+  assistantAvatarImg: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+  },
 });
 
 const createThinkingStyles = (colors: ThemeColors, shadows: ThemeShadows) => ({

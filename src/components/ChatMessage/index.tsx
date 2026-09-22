@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
-import { View, Text, TouchableOpacity, Clipboard } from 'react-native';
+import { View, Text, Image, TouchableOpacity, Clipboard } from 'react-native';
 import type { StyleProp, ViewStyle } from 'react-native';
 import { useTheme, useThemedStyles } from '../../theme';
+import { useActiveCharacterAvatarUri } from '../../hooks/useActiveCharacterAvatar';
 import { callHook, HOOKS } from '../../bootstrap/hookRegistry';
 import Icon from 'react-native-vector-icons/Feather';
 import {
@@ -380,6 +381,25 @@ const MessageBubble: React.FC<MessageBubbleProps> = ({
   );
 };
 
+// Small character avatar shown to the LEFT of an assistant reply. Uses the active conversation's
+// character (Project) avatar, falling back to a neutral bot glyph. Its own leaf subscription keeps
+// the memoized message list from re-rendering when the avatar changes.
+const AssistantAvatar: React.FC<{
+  styles: ReturnType<typeof createStyles>;
+  colors: ReturnType<typeof useTheme>['colors'];
+}> = ({ styles, colors }) => {
+  const avatarUri = useActiveCharacterAvatarUri();
+  return (
+    <View style={styles.assistantAvatar}>
+      {avatarUri ? (
+        <Image source={{ uri: avatarUri }} style={styles.assistantAvatarImg} />
+      ) : (
+        <Icon name="cpu" size={15} color={colors.textMuted} />
+      )}
+    </View>
+  );
+};
+
 export const ChatMessage: React.FC<ChatMessageProps> = ({
   message,
   supportingContext,
@@ -569,12 +589,22 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
     />
   );
 
+  const animatedBody = animateEntry ? (
+    <AnimatedEntry index={0}>{messageBody}</AnimatedEntry>
+  ) : (
+    messageBody
+  );
+
   return (
     <>
-      {animateEntry ? (
-        <AnimatedEntry index={0}>{messageBody}</AnimatedEntry>
+      {isUser ? (
+        animatedBody
       ) : (
-        messageBody
+        // Assistant reply: small character-avatar circle on the left (SillyTavern-style).
+        <View style={styles.assistantRow}>
+          <AssistantAvatar styles={styles} colors={colors} />
+          <View style={styles.assistantRowBody}>{animatedBody}</View>
+        </View>
       )}
 
       <MessageOverlays

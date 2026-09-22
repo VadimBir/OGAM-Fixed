@@ -48,6 +48,15 @@ type OnboardingChecklist = {
 
 export type AppSettings = {
   systemPrompt: string;
+  /**
+   * User PERSONA (SillyTavern {user}) — who the person chatting IS. Distinct from the character
+   * (the AI, {char}). `personaName` substitutes {user}/{{user}} in prompts; `personaPrompt` is a
+   * free-form description folded into the system prompt as "who the user is"; `personaAvatarUri`
+   * is an optional image for the persona. All optional — unset ⇒ no persona block, behaves as before.
+   */
+  personaName?: string;
+  personaPrompt?: string;
+  personaAvatarUri?: string;
   temperature: number;
   maxTokens: number;
   /** Emergency ceiling for tool calls made by one response. Shared by every text engine and UI. */

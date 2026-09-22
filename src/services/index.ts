@@ -15,7 +15,7 @@ export type { QueuedMessage } from './generationService';
 export { imageGenerationService } from './imageGenerationService';
 export type { ImageGenerationState } from './imageGenerationService';
 export { documentService } from './documentService';
-export { buildToolSystemPromptHint } from './tools';
+export { buildToolSystemPromptHint, buildCustomSkillPromptHint } from './tools';
 export { contextCompactionService } from './contextCompaction';
 export { ragService, retrievalService } from './rag';
 // Providers

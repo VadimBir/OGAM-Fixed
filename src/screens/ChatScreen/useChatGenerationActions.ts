@@ -11,10 +11,12 @@ import {
   onnxImageGeneratorService,
   ImageGenerationState,
   buildToolSystemPromptHint,
+  buildCustomSkillPromptHint,
   contextCompactionService,
   ragService,
   retrievalService,
 } from '../../services';
+import { composeCharacterPersonaPrompt } from '../../services/personaComposition';
 import { getToolExtensions } from '../../services/tools/extensions';
 import {
   invalidateActiveConversation,
@@ -690,10 +692,20 @@ function resolveToolsAndPrompt(
   // The user enables KB search explicitly when they want it.
   const enabledTools = canUseTools ? deps.settings.enabledTools || [] : [];
 
-  const rawPrompt =
+  const characterPrompt =
     project?.systemPrompt ||
     deps.settings.systemPrompt ||
     APP_CONFIG.defaultSystemPrompt;
+  // Fold the user PERSONA ({user}) into the CHARACTER prompt ({char}) and substitute both name
+  // macros. Character = the active Project; persona = the user identity on AppSettings. Pure logic
+  // lives in personaComposition; this is the SINGLE composition site (send + regenerate both here).
+  // Persona reads from the store (deps.settings is a narrowed projection without persona fields).
+  const appSettings = useAppStore.getState().settings;
+  const rawPrompt = composeCharacterPersonaPrompt(characterPrompt, {
+    characterName: project?.name,
+    userName: appSettings.personaName,
+    personaDescription: appSettings.personaPrompt,
+  });
   return { enabledTools, rawPrompt, localToolSupport };
 }
 export async function startGenerationFn(
@@ -748,10 +760,15 @@ export async function startGenerationFn(
   // in the tool loop (covers every engine + tool path). Do NOT add them here too, or
   // the hint lands in the system prompt twice. Only the built-in-tools text hint is
   // added here, and only when the model lacks native Jinja tool calling.
+  // Custom-skill guidance is prompt-only and must reach EVERY engine (native tool-calling or not),
+  // so it is appended here unconditionally — separate from the tool-list text hint, which is only
+  // for engines lacking native tool calling. (Previously both rode buildToolSystemPromptHint and
+  // native/remote engines never saw enabled custom skills.)
+  const promptWithSkills = `${basePrompt}${buildCustomSkillPromptHint()}`;
   const systemPrompt = applyGemma4ThinkToken(
     useTextHint
-      ? `${basePrompt}${buildToolSystemPromptHint(activeTools)}`
-      : basePrompt,
+      ? `${promptWithSkills}${buildToolSystemPromptHint(activeTools)}`
+      : promptWithSkills,
     deps.activeModel,
     { isRemote },
   );
@@ -1207,10 +1224,12 @@ export async function regenerateResponseFn(
   const useTextHint = !isRemote && !localToolSupport && activeTools.length > 0;
   // MCP/extension hints come solely from augmentSystemPromptForTools in the tool loop
   // (see the send path above) — adding them here too would double-inject.
+  // Custom-skill guidance is prompt-only and injected on every engine (see send path rationale).
+  const promptWithSkills = `${basePrompt}${buildCustomSkillPromptHint()}`;
   const systemPrompt = applyGemma4ThinkToken(
     useTextHint
-      ? `${basePrompt}${buildToolSystemPromptHint(activeTools)}`
-      : basePrompt,
+      ? `${promptWithSkills}${buildToolSystemPromptHint(activeTools)}`
+      : promptWithSkills,
     deps.activeModel,
     { isRemote },
   );

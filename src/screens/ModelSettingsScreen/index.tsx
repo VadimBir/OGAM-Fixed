@@ -15,6 +15,8 @@ import { useTheme, useThemedStyles } from '../../theme';
 import { useAppStore } from '../../stores';
 import { createStyles } from './styles';
 import { SystemPromptSection } from './SystemPromptSection';
+import { CharacterSection } from './CharacterSection';
+import { PersonaSection } from './PersonaSection';
 import { ImageGenerationSection } from './ImageGenerationSection';
 import { TextGenerationSection } from './TextGenerationSection';
 import { VoiceTurnSettings } from '../../components/settings/voiceSections';
@@ -33,6 +35,8 @@ export const ModelSettingsScreen: React.FC = () => {
   const [alertState, setAlertState] = useState<AlertState>(initialAlertState);
 
   const [promptOpen, setPromptOpen] = useState(false);
+  const [characterOpen, setCharacterOpen] = useState(false);
+  const [personaOpen, setPersonaOpen] = useState(false);
   const [imageOpen, setImageOpen] = useState(false);
   const [textOpen, setTextOpen] = useState(false);
   const [ttsOpen, setTtsOpen] = useState(false);
@@ -95,6 +99,36 @@ export const ModelSettingsScreen: React.FC = () => {
             />
           </TouchableOpacity>
         {promptOpen && <SystemPromptSection />}
+
+        <TouchableOpacity
+          style={styles.accordionHeader}
+          onPress={() => setCharacterOpen(!characterOpen)}
+          activeOpacity={0.7}
+          testID="character-accordion"
+        >
+          <Text style={styles.accordionTitle}>Character</Text>
+          <Icon
+            name={characterOpen ? 'chevron-up' : 'chevron-down'}
+            size={16}
+            color={colors.textMuted}
+          />
+        </TouchableOpacity>
+        {characterOpen && <CharacterSection />}
+
+        <TouchableOpacity
+          style={styles.accordionHeader}
+          onPress={() => setPersonaOpen(!personaOpen)}
+          activeOpacity={0.7}
+          testID="persona-accordion"
+        >
+          <Text style={styles.accordionTitle}>Persona (You)</Text>
+          <Icon
+            name={personaOpen ? 'chevron-up' : 'chevron-down'}
+            size={16}
+            color={colors.textMuted}
+          />
+        </TouchableOpacity>
+        {personaOpen && <PersonaSection />}
 
         <TouchableOpacity
           style={styles.accordionHeader}

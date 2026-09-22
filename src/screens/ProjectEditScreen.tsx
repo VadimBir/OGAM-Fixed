@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import {
   View,
   Text,
+  Image,
   ScrollView,
   TouchableOpacity,
   TextInput,
@@ -9,6 +10,7 @@ import {
   Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import Icon from 'react-native-vector-icons/Feather';
 import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { CustomAlert, showAlert, hideAlert, AlertState, initialAlertState } from '../components/CustomAlert';
@@ -16,6 +18,8 @@ import { useTheme, useThemedStyles } from '../theme';
 import type { ThemeColors, ThemeShadows } from '../theme';
 import { TYPOGRAPHY, SPACING } from '../constants';
 import { useProjectStore } from '../stores';
+import { pickAvatarImage } from '../utils/pickAvatarImage';
+import logger from '../utils/logger';
 import { RootStackParamList } from '../navigation/types';
 
 type NavigationProp = NativeStackNavigationProp<RootStackParamList, 'ProjectEdit'>;
@@ -37,6 +41,11 @@ export const ProjectEditScreen: React.FC = () => {
     name: '',
     description: '',
     systemPrompt: '',
+    avatarUri: undefined as string | undefined,
+    personality: '',
+    scenario: '',
+    firstMessage: '',
+    exampleDialogue: '',
   });
 
   useEffect(() => {
@@ -45,9 +54,24 @@ export const ProjectEditScreen: React.FC = () => {
         name: existingProject.name,
         description: existingProject.description,
         systemPrompt: existingProject.systemPrompt,
+        avatarUri: existingProject.avatarUri,
+        personality: existingProject.personality ?? '',
+        scenario: existingProject.scenario ?? '',
+        firstMessage: existingProject.firstMessage ?? '',
+        exampleDialogue: existingProject.exampleDialogue ?? '',
       });
     }
   }, [existingProject]);
+
+  const handlePickAvatar = async () => {
+    try {
+      const uri = await pickAvatarImage('character_avatars');
+      if (uri) setFormData(prev => ({ ...prev, avatarUri: uri }));
+    } catch (e) {
+      logger.warn('[ProjectEdit] avatar pick failed', e);
+      setAlertState(showAlert('Image error', 'Could not load that image. Try a PNG or JPG.'));
+    }
+  };
 
   const handleSave = () => {
     if (!formData.name.trim()) {
@@ -59,18 +83,22 @@ export const ProjectEditScreen: React.FC = () => {
       return;
     }
 
+    const orUndef = (v: string) => (v.trim() ? v.trim() : undefined);
+    const cardFields = {
+      name: formData.name.trim(),
+      description: formData.description.trim(),
+      systemPrompt: formData.systemPrompt.trim(),
+      avatarUri: formData.avatarUri,
+      personality: orUndef(formData.personality),
+      scenario: orUndef(formData.scenario),
+      firstMessage: orUndef(formData.firstMessage),
+      exampleDialogue: orUndef(formData.exampleDialogue),
+    };
+
     if (existingProject) {
-      updateProject(existingProject.id, {
-        name: formData.name.trim(),
-        description: formData.description.trim(),
-        systemPrompt: formData.systemPrompt.trim(),
-      });
+      updateProject(existingProject.id, cardFields);
     } else {
-      createProject({
-        name: formData.name.trim(),
-        description: formData.description.trim(),
-        systemPrompt: formData.systemPrompt.trim(),
-      });
+      createProject(cardFields);
     }
 
     navigation.goBack();
@@ -100,6 +128,28 @@ export const ProjectEditScreen: React.FC = () => {
           contentContainerStyle={styles.contentContainer}
           keyboardShouldPersistTaps="handled"
         >
+          {/* Avatar */}
+          <View style={styles.avatarRow}>
+            <TouchableOpacity
+              style={styles.avatarCircle}
+              onPress={handlePickAvatar}
+              activeOpacity={0.8}
+              testID="project-edit-avatar"
+            >
+              {formData.avatarUri ? (
+                <Image source={{ uri: formData.avatarUri }} style={styles.avatarImg} />
+              ) : (
+                <Icon name="user" size={28} color={colors.textMuted} />
+              )}
+              <View style={styles.avatarBadge}>
+                <Icon name="camera" size={12} color="#fff" />
+              </View>
+            </TouchableOpacity>
+            <Text style={styles.avatarHint}>
+              Tap to set an avatar. Shown as a small circle next to this character's replies in chat.
+            </Text>
+          </View>
+
           {/* Name */}
           <Text style={styles.label}>Name *</Text>
             <TextInput
@@ -125,13 +175,14 @@ export const ProjectEditScreen: React.FC = () => {
           {/* System Prompt */}
           <Text style={styles.label}>System Prompt *</Text>
           <Text style={styles.hint}>
-            This context is sent to the AI at the start of every chat in this project.
+            Sent to the AI at the start of every chat with this character. Use {'{char}'} for this
+            character's name and {'{user}'} for the user persona — both are substituted at send time.
           </Text>
           <TextInput
             style={[styles.input, styles.textArea]}
             value={formData.systemPrompt}
             onChangeText={(text) => setFormData({ ...formData, systemPrompt: text })}
-            placeholder="Enter the instructions or context for the AI..."
+            placeholder="You are {char}. Stay in character at all times..."
             placeholderTextColor={colors.textMuted}
             multiline
             textAlignVertical="top"
@@ -141,6 +192,56 @@ export const ProjectEditScreen: React.FC = () => {
           <Text style={styles.tip}>
             Tip: Be specific about what you want the AI to do, how it should respond, and any context it needs.
           </Text>
+
+          {/* Character-card fields (SillyTavern-style). All optional; folded into the prompt. */}
+          <Text style={styles.label}>Personality</Text>
+          <TextInput
+            style={[styles.input, styles.textAreaSmall]}
+            value={formData.personality}
+            onChangeText={(text) => setFormData({ ...formData, personality: text })}
+            placeholder="Traits, tone, mannerisms..."
+            placeholderTextColor={colors.textMuted}
+            multiline
+            textAlignVertical="top"
+            testID="project-edit-personality"
+          />
+
+          <Text style={styles.label}>Scenario</Text>
+          <TextInput
+            style={[styles.input, styles.textAreaSmall]}
+            value={formData.scenario}
+            onChangeText={(text) => setFormData({ ...formData, scenario: text })}
+            placeholder="The setting or situation of the conversation..."
+            placeholderTextColor={colors.textMuted}
+            multiline
+            textAlignVertical="top"
+            testID="project-edit-scenario"
+          />
+
+          <Text style={styles.label}>First message</Text>
+          <Text style={styles.hint}>Greeting the character opens a new chat with. Supports {'{char}'}/{'{user}'}.</Text>
+          <TextInput
+            style={[styles.input, styles.textAreaSmall]}
+            value={formData.firstMessage}
+            onChangeText={(text) => setFormData({ ...formData, firstMessage: text })}
+            placeholder="Hello {user}, I'm {char}..."
+            placeholderTextColor={colors.textMuted}
+            multiline
+            textAlignVertical="top"
+            testID="project-edit-first-message"
+          />
+
+          <Text style={styles.label}>Example dialogue</Text>
+          <TextInput
+            style={[styles.input, styles.textAreaSmall]}
+            value={formData.exampleDialogue}
+            onChangeText={(text) => setFormData({ ...formData, exampleDialogue: text })}
+            placeholder="Few-shot examples of how the character speaks..."
+            placeholderTextColor={colors.textMuted}
+            multiline
+            textAlignVertical="top"
+            testID="project-edit-example-dialogue"
+          />
 
           <View style={styles.bottomPadding} />
         </ScrollView>
@@ -216,6 +317,50 @@ const createStyles = (colors: ThemeColors, shadows: ThemeShadows) => ({
     minHeight: 180,
     maxHeight: 280,
     textAlignVertical: 'top' as const,
+  },
+  textAreaSmall: {
+    minHeight: 80,
+    maxHeight: 200,
+    textAlignVertical: 'top' as const,
+  },
+  avatarRow: {
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    marginTop: SPACING.md,
+    gap: SPACING.md,
+  },
+  avatarCircle: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    backgroundColor: colors.surface,
+    alignItems: 'center' as const,
+    justifyContent: 'center' as const,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  avatarImg: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+  },
+  avatarBadge: {
+    position: 'absolute' as const,
+    right: -2,
+    bottom: -2,
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: colors.primary,
+    alignItems: 'center' as const,
+    justifyContent: 'center' as const,
+    borderWidth: 2,
+    borderColor: colors.background,
+  },
+  avatarHint: {
+    ...TYPOGRAPHY.bodySmall,
+    color: colors.textSecondary,
+    flex: 1,
   },
   tip: {
     ...TYPOGRAPHY.bodySmall,

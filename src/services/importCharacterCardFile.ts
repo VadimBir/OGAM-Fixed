@@ -6,23 +6,22 @@ import { generateId } from '../utils/generateId';
 import {
   parseCharacterCardFromPngBase64,
   cardToProjectFields,
+  type ParsedCharacterCard,
 } from './characterCardImport';
 import { useProjectStore } from '../stores/projectStore';
 import { Project } from '../types';
 import logger from '../utils/logger';
 
 /**
- * RN glue for SillyTavern PNG import: pick a PNG, read its bytes, parse the embedded card
- * (pure logic in `characterCardImport`), persist the PNG as the avatar, and create a character
- * Project. Returns the created character, or null if the user cancelled the picker.
+ * Pick a SillyTavern PNG, parse its embedded card, and persist the PNG as an avatar. Returns the
+ * parsed fields + avatar URI, or null if the user cancelled. Does NOT persist a Project — callers
+ * decide what to do with the fields (create a character, or fill the user persona).
  *
- * Throws `CharacterCardParseError` (from the parser) when the chosen PNG has no readable card, so
- * the caller can surface a precise message.
+ * @throws CharacterCardParseError when the chosen PNG has no readable card.
  */
-export async function importSillyTavernCardFromFile(): Promise<Project | null> {
-  // SillyTavern cards are PNGs with an embedded `chara` text chunk. We don't constrain the
-  // picker MIME here (option shape varies by picker version); the parser rejects non-card PNGs
-  // and non-PNG files with a precise error.
+export async function pickAndParseSillyTavernCard(): Promise<
+  { parsed: ParsedCharacterCard; avatarUri?: string } | null
+> {
   const picked =
     Platform.OS === 'android'
       ? await pick({ mode: 'open', allowMultiSelection: false })
@@ -34,10 +33,9 @@ export async function importSillyTavernCardFromFile(): Promise<Project | null> {
   const localPath = await resolvePickedFileUri(file.uri, fileName);
   const base64 = await RNFS.readFile(localPath, 'base64');
 
-  // Parse first — if this throws, we never create a half-formed avatar/character.
+  // Parse first — if this throws, we never create a half-formed avatar.
   const parsed = parseCharacterCardFromPngBase64(base64);
 
-  // Persist the source PNG as the character's avatar in a stable owned directory.
   let avatarUri: string | undefined;
   try {
     const avatarDir = `${RNFS.DocumentDirectoryPath}/character_avatars`;
@@ -46,10 +44,22 @@ export async function importSillyTavernCardFromFile(): Promise<Project | null> {
     await RNFS.writeFile(avatarPath, base64, 'base64');
     avatarUri = `file://${avatarPath}`;
   } catch (e) {
-    // A missing avatar is non-fatal — the character still imports with its text.
     logger.warn('[ST-import] failed to persist avatar; importing without image', e);
   }
+  return { parsed, avatarUri };
+}
 
-  const fields = cardToProjectFields(parsed, avatarUri);
+/**
+ * RN glue for SillyTavern PNG import: pick a PNG, read its bytes, parse the embedded card
+ * (pure logic in `characterCardImport`), persist the PNG as the avatar, and create a character
+ * Project. Returns the created character, or null if the user cancelled the picker.
+ *
+ * Throws `CharacterCardParseError` (from the parser) when the chosen PNG has no readable card, so
+ * the caller can surface a precise message.
+ */
+export async function importSillyTavernCardFromFile(): Promise<Project | null> {
+  const result = await pickAndParseSillyTavernCard();
+  if (!result) return null;
+  const fields = cardToProjectFields(result.parsed, result.avatarUri);
   return useProjectStore.getState().createProject(fields);
 }

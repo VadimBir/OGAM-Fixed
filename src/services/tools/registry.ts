@@ -186,23 +186,32 @@ export function getToolsAsOpenAISchema(enabledToolIds: readonly string[]) {
     }));
 }
 
+/**
+ * Text listing of the ENABLED TOOLS for engines that lack native tool-calling (llama without Jinja).
+ * Native-tool engines (LiteRT / remote) receive the tools structurally, so this text is suppressed
+ * for them by the caller to avoid a double-inject.
+ *
+ * NOTE: custom-skill text is intentionally NOT here — see `buildCustomSkillPromptHint`. Custom skills
+ * are prompt-only guidance (never callable tools), so they must reach EVERY engine regardless of
+ * native tool support; bundling them here dropped them silently on LiteRT/remote (the model "never
+ * saw" an enabled custom skill).
+ */
 export function buildToolSystemPromptHint(enabledToolIds: string[]): string {
   const enabledTools = AVAILABLE_TOOLS.filter(t => enabledToolIds.includes(t.id));
-  const activeCustom = customSkills.filter(s => s.enabled && s.description.trim());
-  if (enabledTools.length === 0 && activeCustom.length === 0) return '';
+  if (enabledTools.length === 0) return '';
+  const toolList = enabledTools
+    .map(t => `- ${t.name}: ${effectiveToolDescription(t)}`)
+    .join('\n');
+  return `\n\nTools available:\n${toolList}\nUse these tools proactively and precisely — call the right tool at the right moment rather than guessing or saying you cannot help.`;
+}
 
-  const parts: string[] = [];
-  if (enabledTools.length > 0) {
-    const toolList = enabledTools
-      .map(t => `- ${t.name}: ${effectiveToolDescription(t)}`)
-      .join('\n');
-    parts.push(
-      `Tools available:\n${toolList}\nUse these tools proactively and precisely — call the right tool at the right moment rather than guessing or saying you cannot help.`,
-    );
-  }
-  if (activeCustom.length > 0) {
-    const skillList = activeCustom.map(s => `- ${s.name}: ${s.description}`).join('\n');
-    parts.push(`Additional skills:\n${skillList}`);
-  }
-  return `\n\n${parts.join('\n\n')}`;
+/**
+ * Text of the ENABLED custom skills (prompt-only guidance the user authored in Tools & Skills).
+ * Injected on EVERY engine so a native-tool model still receives the guidance. Empty when none.
+ */
+export function buildCustomSkillPromptHint(): string {
+  const activeCustom = customSkills.filter(s => s.enabled && s.description.trim());
+  if (activeCustom.length === 0) return '';
+  const skillList = activeCustom.map(s => `- ${s.name}: ${s.description}`).join('\n');
+  return `\n\nAdditional skills:\n${skillList}`;
 }
