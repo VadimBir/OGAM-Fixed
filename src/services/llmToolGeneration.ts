@@ -173,6 +173,34 @@ export async function generateWithToolsImpl(
     };
     logger.log('[LLM-Tools] === INPUT ===');
     logger.log(JSON.stringify(completionParams, null, 2));
+    // Diagnostic: log the ACTUAL templated prompt the model receives (after the GGUF chat template
+    // runs), so we can confirm the system instruction (persona/character/caveats/skills) and tool
+    // schemas survive the template — some templates (e.g. older Gemma) drop the system role, which
+    // looks like "the model doesn't see the injection" even though our side passed it correctly.
+    // Gated on showGenerationDetails so it never re-templates on a normal turn.
+    if (settings.showGenerationDetails) {
+      try {
+        const ctxAny = deps.context as any;
+        if (typeof ctxAny.getFormattedChat === 'function') {
+          const formatted = await ctxAny.getFormattedChat(oaiMessages, undefined, {
+            jinja: true,
+            tools: options.tools,
+            tool_choice: 'auto',
+          });
+          const promptText =
+            typeof formatted === 'string' ? formatted : formatted?.prompt ?? JSON.stringify(formatted);
+          logger.log(
+            `[WIRE-TEMPLATED-PROMPT] len=${promptText.length} ` +
+              `systemSurvived=${/<character|user_persona|Tools available|Additional skills|<caveats|character_caveats/i.test(promptText)}\n` +
+              promptText.slice(0, 4000),
+          );
+        } else {
+          logger.log('[WIRE-TEMPLATED-PROMPT] getFormattedChat unavailable on this context');
+        }
+      } catch (e) {
+        logger.warn('[WIRE-TEMPLATED-PROMPT] failed to render templated prompt', e);
+      }
+    }
     const completionResult: any = await safeCompletion(deps.context, () => deps.context.completion(completionParams as any, (data: any) => {
       if (!generating) return;
       if (data.tool_calls) {
