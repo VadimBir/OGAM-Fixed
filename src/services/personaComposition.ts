@@ -1,22 +1,28 @@
 /**
- * Character + user-persona prompt composition (SillyTavern-style).
+ * Character + user-persona prompt composition (SillyTavern-style), assembled ONCE into the system
+ * instruction — not injected per message.
  *
- * Two card concepts:
- *  - CHARACTER = who the AI is ({char}). Today a `Project` (name + systemPrompt + card metadata).
- *  - PERSONA   = who the USER is ({user}). Stored on `AppSettings` (personaName + personaPrompt).
+ * Two card concepts, each with a separate INSTRUCTION and CAVEATS field:
+ *  - CHARACTER = who the AI is ({char}). Instruction + caveats live on a `Project`.
+ *  - PERSONA   = who the USER is ({user}). Instruction + caveats live on `AppSettings`.
  *
- * The model FOLLOWS the character card while CONSIDERING the user persona. This module is PURE
- * (strings in → string out) so it is unit-testable with no store/native dependency; the store glue
- * lives at the single generation composition site (useChatGenerationActions).
+ * The output is a single role-tagged system instruction: a short framing preamble stating the
+ * purpose (who is who, follow the character, honor caveats, consider the persona) followed by the
+ * character and user-persona sections. The model FOLLOWS the character while CONSIDERING the user
+ * persona. Pure (strings in → string out) so it is unit-testable with no store/native dependency.
  */
 
 export interface PersonaContext {
-  /** The character's name → replaces {char}/{{char}}. Falls back to a neutral noun. */
+  /** Character name → replaces {char}/{{char}}. */
   characterName?: string;
-  /** The user's persona name → replaces {user}/{{user}}. Falls back to a neutral noun. */
+  /** Character caveats (hard constraints / what NOT to do). */
+  characterCaveats?: string;
+  /** User-persona name → replaces {user}/{{user}}. */
   userName?: string;
-  /** Free-form user-persona description. When present, a "who the user is" block is appended. */
+  /** User-persona instruction (who the user is). */
   personaDescription?: string;
+  /** User-persona caveats. */
+  personaCaveats?: string;
 }
 
 const CHAR_FALLBACK = 'the assistant';
@@ -39,34 +45,53 @@ export function substituteCardPlaceholders(
 }
 
 /**
- * Compose the final base system prompt from the raw character prompt + the user persona.
- * - Substitutes {char}/{user} in the character prompt.
- * - Appends a persona block describing WHO THE USER IS, with an explicit instruction to stay in
- *   character as {char} while treating that block as the user's identity.
- * Returns the raw prompt unchanged (only substituted) when no persona is configured.
+ * Compose the single system instruction from the character instruction + its caveats and the user
+ * persona + its caveats. `characterInstruction` is the character's main prompt ({char}).
+ *
+ * When neither a persona nor character caveats are configured, returns the character instruction
+ * with only macro substitution applied (behaviour-neutral for a plain, persona-less setup).
  */
 export function composeCharacterPersonaPrompt(
-  rawPrompt: string,
+  characterInstruction: string,
   ctx: PersonaContext,
 ): string {
   const char = (ctx.characterName ?? '').trim() || CHAR_FALLBACK;
   const user = (ctx.userName ?? '').trim() || USER_FALLBACK;
+  const sub = (t?: string) => substituteCardPlaceholders((t ?? '').trim(), char, user);
 
-  const base = substituteCardPlaceholders(rawPrompt ?? '', char, user);
+  const charInstr = sub(characterInstruction);
+  const charCaveats = sub(ctx.characterCaveats);
+  const personaInstr = sub(ctx.personaDescription);
+  const personaCaveats = sub(ctx.personaCaveats);
 
-  const persona = (ctx.personaDescription ?? '').trim();
-  const hasNamedUser = !!(ctx.userName ?? '').trim();
+  const hasPersona = !!(personaInstr || (ctx.userName ?? '').trim() || personaCaveats);
+  const hasCharCaveats = !!charCaveats;
 
-  if (!persona && !hasNamedUser) return base;
+  // No caveats and no persona → keep the plain (substituted) instruction, unchanged in shape.
+  if (!hasPersona && !hasCharCaveats) return charInstr;
 
-  const personaBody = persona
-    ? `${substituteCardPlaceholders(persona, char, user)}`
-    : '';
+  const preamble =
+    `You are ${char}. Follow your CHARACTER instruction below and always honor your CHARACTER ` +
+    `caveats.` +
+    (hasPersona
+      ? ` You are speaking with ${user}; the USER PERSONA below describes who they are — consider ` +
+        `it and address them accordingly, but never adopt ${user}'s identity or break character.`
+      : '');
 
-  const block = persona
-    ? `\n\nAbout the person you are talking to (${user}):\n${personaBody}\n` +
-      `Stay in character as ${char}. Treat the description above as who ${user} is, and address them accordingly — never adopt ${user}'s identity yourself.`
-    : `\n\nYou are talking to ${user}. Stay in character as ${char}.`;
+  const parts: string[] = [preamble];
 
-  return `${base}${block}`;
+  parts.push(`<character name="${char}">\n${charInstr}\n</character>`);
+  if (hasCharCaveats) {
+    parts.push(`<character_caveats>\n${charCaveats}\n</character_caveats>`);
+  }
+  if (hasPersona) {
+    parts.push(
+      `<user_persona name="${user}">\n${personaInstr || `${user} (no further description provided).`}\n</user_persona>`,
+    );
+    if (personaCaveats) {
+      parts.push(`<user_persona_caveats>\n${personaCaveats}\n</user_persona_caveats>`);
+    }
+  }
+
+  return parts.join('\n\n');
 }

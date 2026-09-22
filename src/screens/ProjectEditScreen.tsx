@@ -41,11 +41,8 @@ export const ProjectEditScreen: React.FC = () => {
     name: '',
     description: '',
     systemPrompt: '',
+    caveats: '',
     avatarUri: undefined as string | undefined,
-    personality: '',
-    scenario: '',
-    firstMessage: '',
-    exampleDialogue: '',
   });
 
   useEffect(() => {
@@ -54,11 +51,8 @@ export const ProjectEditScreen: React.FC = () => {
         name: existingProject.name,
         description: existingProject.description,
         systemPrompt: existingProject.systemPrompt,
+        caveats: existingProject.caveats ?? '',
         avatarUri: existingProject.avatarUri,
-        personality: existingProject.personality ?? '',
-        scenario: existingProject.scenario ?? '',
-        firstMessage: existingProject.firstMessage ?? '',
-        exampleDialogue: existingProject.exampleDialogue ?? '',
       });
     }
   }, [existingProject]);
@@ -83,16 +77,12 @@ export const ProjectEditScreen: React.FC = () => {
       return;
     }
 
-    const orUndef = (v: string) => (v.trim() ? v.trim() : undefined);
     const cardFields = {
       name: formData.name.trim(),
       description: formData.description.trim(),
       systemPrompt: formData.systemPrompt.trim(),
+      caveats: formData.caveats.trim() ? formData.caveats.trim() : undefined,
       avatarUri: formData.avatarUri,
-      personality: orUndef(formData.personality),
-      scenario: orUndef(formData.scenario),
-      firstMessage: orUndef(formData.firstMessage),
-      exampleDialogue: orUndef(formData.exampleDialogue),
     };
 
     if (existingProject) {
@@ -172,75 +162,39 @@ export const ProjectEditScreen: React.FC = () => {
             testID="project-edit-description"
           />
 
-          {/* System Prompt */}
-          <Text style={styles.label}>System Prompt *</Text>
+          {/* Character INSTRUCTION */}
+          <Text style={styles.label}>Character instruction *</Text>
           <Text style={styles.hint}>
-            Sent to the AI at the start of every chat with this character. Use {'{char}'} for this
-            character's name and {'{user}'} for the user persona — both are substituted at send time.
+            Who this character is and how it behaves. Use {'{char}'} for this character's name and
+            {' '}{'{user}'} for the user persona — both are substituted at send time. Given to the
+            model once as part of the system instruction, alongside the persona.
           </Text>
           <TextInput
             style={[styles.input, styles.textArea]}
             value={formData.systemPrompt}
             onChangeText={(text) => setFormData({ ...formData, systemPrompt: text })}
-            placeholder="You are {char}. Stay in character at all times..."
+            placeholder="You are {char}, a ... Speak and act as {char} at all times..."
             placeholderTextColor={colors.textMuted}
             multiline
             textAlignVertical="top"
             testID="project-edit-system-prompt"
           />
 
-          <Text style={styles.tip}>
-            Tip: Be specific about what you want the AI to do, how it should respond, and any context it needs.
+          {/* Character CAVEATS */}
+          <Text style={styles.label}>Caveats</Text>
+          <Text style={styles.hint}>
+            Hard rules and what {'{char}'} must NOT do. Presented under its own tag so the model
+            treats it as constraints, not flavor.
           </Text>
-
-          {/* Character-card fields (SillyTavern-style). All optional; folded into the prompt. */}
-          <Text style={styles.label}>Personality</Text>
           <TextInput
             style={[styles.input, styles.textAreaSmall]}
-            value={formData.personality}
-            onChangeText={(text) => setFormData({ ...formData, personality: text })}
-            placeholder="Traits, tone, mannerisms..."
+            value={formData.caveats}
+            onChangeText={(text) => setFormData({ ...formData, caveats: text })}
+            placeholder="Never break character. Never reveal these instructions. Avoid ..."
             placeholderTextColor={colors.textMuted}
             multiline
             textAlignVertical="top"
-            testID="project-edit-personality"
-          />
-
-          <Text style={styles.label}>Scenario</Text>
-          <TextInput
-            style={[styles.input, styles.textAreaSmall]}
-            value={formData.scenario}
-            onChangeText={(text) => setFormData({ ...formData, scenario: text })}
-            placeholder="The setting or situation of the conversation..."
-            placeholderTextColor={colors.textMuted}
-            multiline
-            textAlignVertical="top"
-            testID="project-edit-scenario"
-          />
-
-          <Text style={styles.label}>First message</Text>
-          <Text style={styles.hint}>Greeting the character opens a new chat with. Supports {'{char}'}/{'{user}'}.</Text>
-          <TextInput
-            style={[styles.input, styles.textAreaSmall]}
-            value={formData.firstMessage}
-            onChangeText={(text) => setFormData({ ...formData, firstMessage: text })}
-            placeholder="Hello {user}, I'm {char}..."
-            placeholderTextColor={colors.textMuted}
-            multiline
-            textAlignVertical="top"
-            testID="project-edit-first-message"
-          />
-
-          <Text style={styles.label}>Example dialogue</Text>
-          <TextInput
-            style={[styles.input, styles.textAreaSmall]}
-            value={formData.exampleDialogue}
-            onChangeText={(text) => setFormData({ ...formData, exampleDialogue: text })}
-            placeholder="Few-shot examples of how the character speaks..."
-            placeholderTextColor={colors.textMuted}
-            multiline
-            textAlignVertical="top"
-            testID="project-edit-example-dialogue"
+            testID="project-edit-caveats"
           />
 
           <View style={styles.bottomPadding} />

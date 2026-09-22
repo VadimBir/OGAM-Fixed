@@ -465,7 +465,14 @@ export interface Project {
   provenance?: RecordProvenance;
   name: string;
   description: string;
+  /** Character INSTRUCTION — the main "who this character is / how it behaves" prompt ({char}). */
   systemPrompt: string;
+  /**
+   * Character CAVEATS — hard constraints / what the character must NOT do. Kept separate from the
+   * instruction so it can be presented under its own tag in the assembled system instruction and
+   * edited independently. Optional.
+   */
+  caveats?: string;
   /** A hex COLOR string used as a fallback tile color (NOT an image). See `avatarUri` for images. */
   icon?: string;
   /**

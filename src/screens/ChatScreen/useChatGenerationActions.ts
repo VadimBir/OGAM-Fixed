@@ -703,8 +703,10 @@ function resolveToolsAndPrompt(
   const appSettings = useAppStore.getState().settings;
   const rawPrompt = composeCharacterPersonaPrompt(characterPrompt, {
     characterName: project?.name,
+    characterCaveats: project?.caveats,
     userName: appSettings.personaName,
     personaDescription: appSettings.personaPrompt,
+    personaCaveats: appSettings.personaCaveats,
   });
   return { enabledTools, rawPrompt, localToolSupport };
 }

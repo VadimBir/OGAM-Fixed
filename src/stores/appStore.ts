@@ -55,7 +55,10 @@ export type AppSettings = {
    * is an optional image for the persona. All optional — unset ⇒ no persona block, behaves as before.
    */
   personaName?: string;
+  /** Persona INSTRUCTION — free-form "who the user is". */
   personaPrompt?: string;
+  /** Persona CAVEATS — constraints about the user / how to treat them. Kept separate like the char. */
+  personaCaveats?: string;
   personaAvatarUri?: string;
   temperature: number;
   maxTokens: number;

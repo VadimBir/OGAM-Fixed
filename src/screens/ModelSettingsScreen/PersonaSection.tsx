@@ -28,6 +28,7 @@ export const PersonaSection: React.FC = () => {
   const styles = useThemedStyles(createStyles);
   const personaName = useAppStore(s => s.settings.personaName);
   const personaPrompt = useAppStore(s => s.settings.personaPrompt);
+  const personaCaveats = useAppStore(s => s.settings.personaCaveats);
   const personaAvatarUri = useAppStore(s => s.settings.personaAvatarUri);
   const updateSettings = useAppStore(s => s.updateSettings);
   const [alertState, setAlertState] = useState<AlertState>(initialAlertState);
@@ -120,9 +121,10 @@ export const PersonaSection: React.FC = () => {
         testID="persona-name"
       />
 
-      <Text style={styles.label}>About you</Text>
+      <Text style={styles.label}>Persona instruction</Text>
       <Text style={styles.hint}>
-        Folded into the system prompt as who the user is. Supports {'{char}'}/{'{user}'}.
+        Who you are. Given to the model once inside the system instruction, alongside the character.
+        Supports {'{char}'}/{'{user}'}.
       </Text>
       <TextInput
         style={[styles.input, styles.textArea]}
@@ -133,6 +135,21 @@ export const PersonaSection: React.FC = () => {
         multiline
         textAlignVertical="top"
         testID="persona-prompt"
+      />
+
+      <Text style={styles.label}>Caveats</Text>
+      <Text style={styles.hint}>
+        Constraints about you / how {'{char}'} should treat you. Presented under its own tag.
+      </Text>
+      <TextInput
+        style={[styles.input, styles.textAreaSmall]}
+        value={personaCaveats ?? ''}
+        onChangeText={t => updateSettings({ personaCaveats: t })}
+        placeholder="Do not give medical advice. Always answer in English..."
+        placeholderTextColor={colors.textMuted}
+        multiline
+        textAlignVertical="top"
+        testID="persona-caveats"
       />
 
       <CustomAlert {...alertState} onClose={() => setAlertState(hideAlert())} />
@@ -191,4 +208,5 @@ const createStyles = (colors: ThemeColors, _shadows: ThemeShadows) => ({
     color: colors.text,
   },
   textArea: { minHeight: 120, maxHeight: 220, textAlignVertical: 'top' as const },
+  textAreaSmall: { minHeight: 70, maxHeight: 160, textAlignVertical: 'top' as const },
 });
