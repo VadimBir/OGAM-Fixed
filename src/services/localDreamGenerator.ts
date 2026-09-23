@@ -152,6 +152,8 @@ class LocalDreamGeneratorService {
       // Default OFF: the on-device GPU VAE only decodes cleanly at 512x512; at smaller sizes it
       // shears into a rainbow (native gates it to 512x512, but keep the default conservative).
       useOpenCL: params.useOpenCL ?? false,
+      // Sampler: the core only knows 'dpm' (default) and 'euler_a'; anything else is not sent.
+      ...(params.sampler === 'dpm' || params.sampler === 'euler_a' ? { scheduler: params.sampler } : {}),
       // img2img: only attach when a reference image is present, so a plain request stays txt2img.
       ...(params.initImage
         ? {

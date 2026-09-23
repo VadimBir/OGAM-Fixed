@@ -17,6 +17,7 @@ import {
   DownloadedModel,
   ModelRecommendation,
   ONNXImageModel,
+  ImageLora,
   ImageGenerationMode,
   AutoDetectMethod,
   CacheType,
@@ -80,6 +81,12 @@ export type AppSettings = {
   imageUseOpenCL: boolean;
   /** img2img denoise strength 0..1: how much a reference image is changed (low = closer to ref). */
   imageDenoiseStrength: number;
+  /** Sampler; '' = engine default. sd.cpp takes any sd.cpp name, LocalDream only dpm/euler_a. */
+  imageSampler?: string;
+  /** Noise schedule for stable-diffusion.cpp models; '' = model default. */
+  imageScheduler?: string;
+  /** LoRA adapters for stable-diffusion.cpp models (enabled ones apply to every generation). */
+  imageLoras?: ImageLora[];
   enhanceImagePrompts: boolean;
   enableGpu: boolean;
   gpuLayers: number;

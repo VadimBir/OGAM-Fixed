@@ -10,6 +10,7 @@ import {
   MAX_IMAGE_STEPS,
   SWEET_SPOT_SIZE,
 } from '../../utils/imageGenAdvice';
+import { ImageEngineSettings } from '../ImageEngineSettings';
 import { createStyles } from './styles';
 
 const ClearGPUCacheButton: React.FC = () => {
@@ -32,7 +33,9 @@ const ClearGPUCacheButton: React.FC = () => {
 
 /** Basic controls: Image Steps + Image Size */
 export const ImageQualityBasicSliders: React.FC = () => {
-  const { settings, updateSettings } = useAppStore();
+  const { settings, updateSettings, downloadedImageModels, activeImageModelId } = useAppStore();
+  // stable-diffusion.cpp checkpoints take free W×H (ImageEngineSettings); the square slider is LocalDream's.
+  const isSdCpp = downloadedImageModels.find(m => m.id === activeImageModelId)?.backend === 'sdcpp';
 
   return (
     <>
@@ -46,7 +49,7 @@ export const ImageQualityBasicSliders: React.FC = () => {
         onChange={(value) => updateSettings({ imageSteps: value })}
       />
 
-      <SliderSetting
+      {!isSdCpp && <SliderSetting
         testID="image-size"
         compact
         label="Image Size"
@@ -55,7 +58,9 @@ export const ImageQualityBasicSliders: React.FC = () => {
         min={SWEET_SPOT_SIZE} max={512} step={64}
         formatValue={(v) => `${v}x${v}`}
         onChange={(value) => updateSettings({ imageWidth: value, imageHeight: value })}
-      />
+      />}
+
+      <ImageEngineSettings compact />
     </>
   );
 };

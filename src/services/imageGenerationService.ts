@@ -1,5 +1,5 @@
 import { Alert } from 'react-native';
-import { localDreamGeneratorService as onnxImageGeneratorService } from './localDreamGenerator';
+import { imageEngineRouter as onnxImageGeneratorService } from './imageEngineRouter';
 import { activeModelService } from './activeModelService';
 import { useAppStore } from '../stores';
 import { GeneratedImage } from '../types';
@@ -8,6 +8,7 @@ import { generateId } from '../utils/generateId';
 import { useRemoteServerStore } from '../stores/remoteServerStore';
 import { runRemoteImageGeneration } from './remoteImageGeneration';
 import { resolveMobileImageParameters } from './imageParameterPolicy';
+import { resolveEngineImageRequest } from './imageEngineParams';
 import {
   generationProgressStatus,
   imagePhaseTransitionLog,
@@ -228,6 +229,7 @@ class ImageGenerationService {
       imageWidth,
       imageHeight,
       useOpenCL,
+      engineOptions,
     } = opts;
 
     // The first generation for a model compiles/warms the backend and takes ~120s.
@@ -270,6 +272,8 @@ class ImageGenerationService {
           height: imageHeight,
           previewInterval: params.previewInterval ?? 2,
           useOpenCL,
+          // Format-selected engine knobs (sampler/scheduler/LoRA) resolved by resolveEngineImageRequest.
+          ...engineOptions,
           // img2img: forward a reference image + the configurable denoise strength from settings
           // (per-request override wins). Dormant for plain txt2img (no initImage) — the native
           // body only becomes img2img when init_img is present.
@@ -395,8 +399,16 @@ class ImageGenerationService {
       params,
     );
     const { steps, guidanceScale } = imageParameters;
-    const imageWidth = imageParameters.size;
-    const imageHeight = imageParameters.size;
+    const {
+      width: imageWidth,
+      height: imageHeight,
+      engineOptions,
+    } = resolveEngineImageRequest(
+      activeImageModel,
+      settings,
+      params,
+      imageParameters.size,
+    );
 
     this.updateState({
       phase: settings.enhanceImagePrompts ? 'enhancing' : 'loading',
@@ -461,6 +473,7 @@ class ImageGenerationService {
       imageWidth,
       imageHeight,
       useOpenCL: settings.imageUseOpenCL ?? true,
+      engineOptions,
     });
   }
 

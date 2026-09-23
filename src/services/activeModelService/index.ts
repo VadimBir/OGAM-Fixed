@@ -2,7 +2,7 @@
 import { llmService } from '../llm';
 import { liteRTService } from '../litert';
 import { getActiveEngineService } from '../engines';
-import { localDreamGeneratorService as onnxImageGeneratorService } from '../localDreamGenerator';
+import { imageEngineRouter as onnxImageGeneratorService } from '../imageEngineRouter';
 import { hardwareService } from '../hardware';
 import { modelResidencyManager } from '../modelResidency';
 import { OverridableMemoryError, ImageModelIncompleteError } from '../modelLoadErrors';

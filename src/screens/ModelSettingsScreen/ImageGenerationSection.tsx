@@ -12,6 +12,7 @@ import {
   MAX_IMAGE_STEPS,
   SWEET_SPOT_SIZE,
 } from '../../utils/imageGenAdvice';
+import { ImageEngineSettings } from '../../components/ImageEngineSettings';
 import { createStyles } from './styles';
 
 // ─── Advanced Sub-Components ─────────────────────────────────────────────────
@@ -164,8 +165,10 @@ const ImageAdvancedSection: React.FC = () => {
 export const ImageGenerationSection: React.FC = () => {
   const { colors } = useTheme();
   const styles = useThemedStyles(createStyles);
-  const { settings, updateSettings } = useAppStore();
+  const { settings, updateSettings, downloadedImageModels, activeImageModelId } = useAppStore();
   const [showAdvanced, setShowAdvanced] = useState(false);
+  // stable-diffusion.cpp checkpoints take free W×H (ImageEngineSettings); the square slider is LocalDream's.
+  const isSdCpp = downloadedImageModels.find(m => m.id === activeImageModelId)?.backend === 'sdcpp';
 
   const isAutoMode = settings?.imageGenerationMode === 'auto';
   const trackColor = { false: colors.surfaceLight, true: `${colors.primary}80` };
@@ -211,7 +214,7 @@ export const ImageGenerationSection: React.FC = () => {
         onChange={(value) => updateSettings({ imageSteps: value })}
       />
 
-      <SliderSetting
+      {!isSdCpp && <SliderSetting
         testID="image-size"
         label="Image Size"
         description="Output resolution (smaller = faster, larger = more detail)"
@@ -222,7 +225,9 @@ export const ImageGenerationSection: React.FC = () => {
         min={SWEET_SPOT_SIZE} max={512} step={64}
         formatValue={(v) => `${v}x${v}`}
         onChange={(value) => updateSettings({ imageWidth: value, imageHeight: value })}
-      />
+      />}
+
+      <ImageEngineSettings />
 
       <AdvancedToggle isExpanded={showAdvanced} onPress={() => setShowAdvanced(!showAdvanced)} testID="image-advanced-toggle" />
 

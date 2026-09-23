@@ -741,7 +741,9 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
         val reqHeight = clampDimension(if (params.hasKey("height")) params.getInt("height") else 512)
         put("width", reqWidth)
         put("height", reqHeight)
-        put("scheduler", "dpm")
+        // The SD core's sampler set is {dpm, euler_a}; default stays dpm when JS sends nothing.
+        val scheduler = if (params.hasKey("scheduler")) params.getString("scheduler") else null
+        put("scheduler", if (scheduler == "euler_a") "euler_a" else "dpm")
         // Preview contract: the known-good build requests JPEG previews; the preview decoder reads
         // them via BitmapFactory (carries its own dimensions, so it never shears). Restored here to
         // match the known-good request contract.

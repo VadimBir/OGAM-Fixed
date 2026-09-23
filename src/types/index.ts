@@ -373,8 +373,21 @@ export interface ONNXImageModel {
   downloadedAt: string;
   size: number;
   style?: string;
-  backend?: 'mnn' | 'qnn' | 'coreml';
+  /** 'sdcpp' = raw SD checkpoint (.safetensors/.ckpt) run directly by stable-diffusion.cpp. */
+  backend?: 'mnn' | 'qnn' | 'coreml' | 'sdcpp';
   attentionVariant?: 'split_einsum' | 'original';
+  /** sdcpp only: architecture read from the checkpoint's tensor keys (sd1 / sd2 / sdxl / ...). */
+  sdFamily?: string;
+}
+
+/** A LoRA adapter applied by the stable-diffusion.cpp image engine (ignored by QNN/MNN/Core ML). */
+export interface ImageLora {
+  id: string;
+  name: string;
+  path: string;
+  /** Multiplier; 1 = full strength, negative inverts. */
+  weight: number;
+  enabled: boolean;
 }
 
 // NOTE: the authoritative ImageGenerationState lives in
@@ -453,6 +466,17 @@ export interface ImageGenerationParams {
   denoiseStrength?: number;
   /** Optional inpainting mask as base64 (same encoding as initImage). */
   maskImage?: string;
+  /**
+   * Sampler. stable-diffusion.cpp: any sd.cpp name (euler_a, dpm++2m, ...). LocalDream (QNN/MNN):
+   * only 'dpm' | 'euler_a'. Empty/undefined = the engine's default.
+   */
+  sampler?: string;
+  /** Noise schedule (stable-diffusion.cpp only: discrete, karras, exponential, ays, ...). */
+  scheduler?: string;
+  /** LoRA adapters (stable-diffusion.cpp only). */
+  loras?: Array<{ path: string; weight: number }>;
+  /** CLIP skip (stable-diffusion.cpp only); <=0 = model default. */
+  clipSkip?: number;
 }
 export interface ImageGenerationProgress {
   step: number;

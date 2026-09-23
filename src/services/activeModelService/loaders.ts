@@ -10,7 +10,7 @@ import { llmService } from '../llm';
 import { effectiveCacheType } from '../llmHelpers';
 import { liteRTService } from '../litert';
 import { unloadAllTextEngines } from '../engines';
-import { localDreamGeneratorService as onnxImageGeneratorService } from '../localDreamGenerator';
+import { imageEngineRouter as onnxImageGeneratorService } from '../imageEngineRouter';
 import { modelManager } from '../modelManager';
 import { hardwareService } from '../hardware';
 import { modelResidencyManager } from '../modelResidency';
@@ -295,7 +295,9 @@ export async function doLoadImageModel(ctx: ImageLoadContext): Promise<void> {
           ctx.model.modelPath,
           ctx.imageThreads,
           {
-            backend: 'auto',
+            // Format-selected engine: a raw SD checkpoint runs on stable-diffusion.cpp,
+            // everything else stays on LocalDream exactly as before.
+            backend: ctx.model.backend === 'sdcpp' ? 'sdcpp' : 'auto',
             cpuOnly: ctx.cpuOnly,
             attentionVariant: ctx.model.attentionVariant,
             preferGpu: ctx.preferGpu,

@@ -18,6 +18,8 @@ import { getDirectorySize } from './utils';
 import { useTextModels } from './useTextModels';
 import { useImageModels } from './useImageModels';
 import { importGgufFiles, getErrorMessage } from './importHelpers';
+import { importSdCheckpointOrLora } from './importSdCheckpoint';
+import { isSdCppCandidateFileName } from '../../services/sdCppModelDetection';
 import { isPickerStuck } from '../../utils/pickerErrorUtils';
 import { isLiteRTFileName } from '../../utils/modelHelpers';
 
@@ -122,7 +124,8 @@ export function useModelsScreen() {
     }
     const allGguf = resolvedFiles.every(f => f.name.toLowerCase().endsWith('.gguf'));
     const singleZip = resolvedFiles.length === 1 && resolvedFiles[0].name.toLowerCase().endsWith('.zip');
-    if (!allGguf && !singleZip && !singleLitert) return 'invalid_format';
+    const singleSd = resolvedFiles.length === 1 && isSdCppCandidateFileName(resolvedFiles[0].name);
+    if (!allGguf && !singleZip && !singleLitert && !singleSd) return 'invalid_format';
     if (resolvedFiles.length > 2) return 'too_many';
     return null;
   };
@@ -151,7 +154,7 @@ export function useModelsScreen() {
           'Invalid File',
           resolvedFiles.length > 1
             ? 'When selecting multiple files, all must be .gguf files (main model + mmproj projector).'
-            : 'Supported formats: .gguf (text models), .litertlm (LiteRT models), and .zip (image models).',
+            : 'Supported formats: .gguf (text models), .litertlm (LiteRT models), .zip (image models), and .safetensors/.ckpt (Stable Diffusion checkpoints or LoRAs).',
         ));
         return;
       }
@@ -167,6 +170,13 @@ export function useModelsScreen() {
       const singleZip = resolvedFiles.length === 1 && resolvedFiles[0].name.toLowerCase().endsWith('.zip');
       if (singleZip) {
         await handleImportImageModelZip(firstUri, firstFileName);
+        return;
+      }
+      if (resolvedFiles.length === 1 && isSdCppCandidateFileName(firstFileName)) {
+        await importSdCheckpointOrLora(
+          { uri: firstUri, name: firstFileName, size: resolvedFiles[0].size },
+          { addDownloadedImageModel, activeImageModelId, setActiveImageModelId, setImportProgress, setAlertState },
+        );
         return;
       }
 

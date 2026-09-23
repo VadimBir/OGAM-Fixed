@@ -61,6 +61,20 @@ export interface GenerateImageParams {
   denoiseStrength?: number;
   /** Optional inpainting mask (base64). */
   maskImage?: string;
+  /** Per-request sampler override (wins over settings.imageSampler). */
+  sampler?: string;
+  /** Per-request noise-schedule override, stable-diffusion.cpp only (wins over settings.imageScheduler). */
+  scheduler?: string;
+  /** Per-request size override, stable-diffusion.cpp only (LocalDream keeps its square size policy). */
+  width?: number;
+  height?: number;
+}
+
+/** Engine-specific knobs resolved once per request and forwarded to the format-selected engine. */
+export interface EngineImageOptions {
+  sampler?: string;
+  scheduler?: string;
+  loras?: Array<{ path: string; weight: number }>;
 }
 
 export interface ActiveImageModel {
@@ -79,4 +93,5 @@ export interface RunGenerationOptions {
   imageWidth: number;
   imageHeight: number;
   useOpenCL: boolean;
+  engineOptions: EngineImageOptions;
 }

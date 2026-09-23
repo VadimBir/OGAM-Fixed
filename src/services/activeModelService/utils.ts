@@ -6,7 +6,7 @@ import { useAppStore } from '../../stores';
 import { hardwareService } from '../hardware';
 import { llmService } from '../llm';
 import { liteRTService } from '../litert';
-import { localDreamGeneratorService as onnxImageGeneratorService } from '../localDreamGenerator';
+import { imageEngineRouter as onnxImageGeneratorService } from '../imageEngineRouter';
 import { ResourceUsage } from './types';
 
 export async function getResourceUsage(): Promise<ResourceUsage> {
