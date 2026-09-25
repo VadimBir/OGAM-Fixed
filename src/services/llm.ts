@@ -424,7 +424,10 @@ class LLMService {
     let fullResponse = '';
     const ctx = this.context;
     const completionWork = safeCompletion(ctx, () => ctx.completion(
-      { messages: oaiMessages, ...buildCompletionParams(settings, { disableCtxShift: this.shouldDisableCtxShift() }), n_predict: maxTokens },
+      // Internal utility pass (summary / tool routing): always a hard thinking-off. Without these
+      // params llama.rn defaults enable_thinking to true, so a reasoning model spent the whole
+      // n_predict (64 for tool routing) inside <think> regardless of the chat Thinking toggle.
+      { messages: oaiMessages, ...buildCompletionParams(settings, { disableCtxShift: this.shouldDisableCtxShift() }), n_predict: maxTokens, ...buildThinkingCompletionParams(false, this.isGemma4Model()) },
       (data) => { if (this.isGenerating && data.token) fullResponse += data.token; },
     ), 'generateWithMaxTokens');
     this.activeCompletionPromise = completionWork.then(() => { }, () => { });

@@ -1,1 +1,1 @@
-23f0950e4b7514bcaaaa1ad5e369faa5cf6634fe0fca3cf6de2ad20a649740e6  OGAM-release.apk
+cdd06e22a03a1e154e5988a040aa37c5942bdbae48a9c462d56449f27cf58978  OGAM-release.apk
