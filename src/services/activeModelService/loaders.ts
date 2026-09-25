@@ -11,6 +11,8 @@ import { effectiveCacheType } from '../llmHelpers';
 import { liteRTService } from '../litert';
 import { unloadAllTextEngines } from '../engines';
 import { imageEngineRouter as onnxImageGeneratorService } from '../imageEngineRouter';
+import { sdCppLoadConfigFromSettings } from '../sdCppGenerator';
+import { estimateImageModelRamBytes } from '../imageModelMemory';
 import { modelManager } from '../modelManager';
 import { hardwareService } from '../hardware';
 import { modelResidencyManager } from '../modelResidency';
@@ -301,6 +303,7 @@ export async function doLoadImageModel(ctx: ImageLoadContext): Promise<void> {
             cpuOnly: ctx.cpuOnly,
             attentionVariant: ctx.model.attentionVariant,
             preferGpu: ctx.preferGpu,
+            sdcpp: sdCppLoadConfigFromSettings(ctx.store.settings ?? {}),
           },
         ),
         timeoutPromise,
@@ -348,7 +351,7 @@ export async function checkImageModelCanLoad(
       key: 'image',
       type: 'image',
       modelId: model.id,
-      sizeMB: Math.round((hardwareService.estimateImageModelRam(model) || 0) / (1024 * 1024)),
+      sizeMB: Math.round(estimateImageModelRamBytes(model) / (1024 * 1024)),
       // CoreML/ONNX image weights are dirty (jetsam-counted) memory → gate on real free RAM.
       dirtyMemory: true,
     },

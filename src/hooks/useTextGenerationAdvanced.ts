@@ -17,8 +17,10 @@ export const CACHE_TYPE_OPTIONS: CacheType[] = ['f16', 'q8_0', 'q4_0'];
 export function useTextGenerationAdvanced() {
   const { settings, updateSettings } = useAppStore();
 
-  const isFlashAttnOn = settings?.flashAttn ?? true;
   const isQuantizedCache = (settings?.cacheType ?? 'q8_0') !== 'f16';
+  // A quantized KV cache always runs with flash attention (llama.cpp requires it for a quantized
+  // V cache; the loader enables it), so the toggle reads ON whatever the stored flag says.
+  const isFlashAttnOn = (settings?.flashAttn ?? true) || isQuantizedCache;
   const currentCacheType: CacheType = settings?.cacheType ?? 'q8_0';
   const gpuLayersEffective = Math.min(settings?.gpuLayers ?? 1, GPU_LAYERS_MAX);
   const defaultBackend = Platform.OS === 'ios' ? INFERENCE_BACKENDS.METAL : INFERENCE_BACKENDS.CPU;
@@ -42,12 +44,11 @@ export function useTextGenerationAdvanced() {
     ? (resolvedThreadCount != null ? `Auto (${resolvedThreadCount})` : 'Auto')
     : String(cpuThreadsSliderValue);
 
+  /** The quantized cache is never dropped for flash attention: while the cache is q8_0/q4_0,
+   *  Flash Attention stays on (switch the cache to f16 first to turn it off). */
   const handleFlashAttnToggle = (flashAttn: boolean) => {
-    if (!flashAttn && isQuantizedCache) {
-      updateSettings({ flashAttn: false, cacheType: 'f16' });
-    } else {
-      updateSettings({ flashAttn: flashAttn });
-    }
+    if (!flashAttn && isQuantizedCache) return;
+    updateSettings({ flashAttn });
   };
 
   const handleCacheTypeChange = (ct: CacheType) => {

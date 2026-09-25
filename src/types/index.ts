@@ -475,6 +475,8 @@ export interface ImageGenerationParams {
   scheduler?: string;
   /** LoRA adapters (stable-diffusion.cpp only). */
   loras?: Array<{ path: string; weight: number }>;
+  /** sd.cpp only: tiled VAE decode. */
+  vaeTiling?: boolean;
   /** CLIP skip (stable-diffusion.cpp only); <=0 = model default. */
   clipSkip?: number;
 }

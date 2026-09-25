@@ -78,6 +78,8 @@ export interface ModelLoadParams {
    *  user setting). The single source for the memory guard's KV-size estimate — read
    *  this instead of re-deriving from settings.cacheType, which misses the coercion. */
   usesF16Cache: boolean;
+  /** The KV cache type actually sent to llama.cpp (f16 | q8_0 | q4_0). */
+  cacheType: string;
 }
 
 /**
@@ -116,14 +118,16 @@ export function buildModelParams(
   // OpenCL and HTP backends crash with flash attn on — disable for those.
   // CPU (Android/iOS) and Metal both support it; use 'auto' to let llama.cpp decide.
   const gpuBackendIncompatible = backendForcesF16Cache(backend);
-  const flash_attn_type = (settings.flashAttn === false || gpuBackendIncompatible) ? 'off' : 'auto';
+  const flashAttnRequestedOff = settings.flashAttn === false || gpuBackendIncompatible;
   const gpuEnabled = backend ? backend !== INFERENCE_BACKENDS.CPU : settings.enableGpu !== false;
   const nGpuLayers = gpuEnabled ? (settings.gpuLayers ?? DEFAULT_GPU_LAYERS) : 0;
-  const isFlashAttnEffective = flash_attn_type !== 'off';
-  const requestedCache = settings.cacheType || (isFlashAttnEffective ? 'q8_0' : 'f16');
-  // OpenCL init on affected Adreno devices can fail when cache_type_k/v are passed.
+  const requestedCache = settings.cacheType || (flashAttnRequestedOff ? 'f16' : 'q8_0');
   // effectiveCacheType coerces OpenCL/HTP to f16 (single source shared with the UI).
   const cacheType = effectiveCacheType(backend, requestedCache);
+  // The quantized KV cache wins over a Flash-Attn-off setting: llama.cpp refuses a quantized V
+  // cache with flash attention disabled ("quantized V cache requires flash_attn to be enabled"),
+  // which failed BOTH the GPU and CPU init. 'auto' lets llama.cpp enable it for the quantized V.
+  const flash_attn_type = flashAttnRequestedOff && cacheType === 'f16' ? 'off' : 'auto';
   return {
     baseParams: {
       model: modelPath, use_mlock: false, n_batch: nBatch, n_ubatch: nBatch, n_threads: nThreads,
@@ -150,6 +154,7 @@ export function buildModelParams(
     // cacheType is already coerced to 'f16' above for OpenCL/HTP; OpenCL also omits the
     // explicit cache params and llama.cpp defaults to f16 — both are captured here.
     usesF16Cache: cacheType === 'f16',
+    cacheType,
   };
 }
 export interface ContextInitResult {

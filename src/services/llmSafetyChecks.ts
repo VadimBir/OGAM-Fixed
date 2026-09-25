@@ -116,6 +116,10 @@ export interface MemoryCheckArgs {
   contextLength: number;
   getAvailableMemory: () => Promise<{ available: number; total: number }>;
   quantizedCache?: boolean;
+  /** KV + compute bytes from the model's own GGUF metadata (llamaMemoryEstimate). When present it
+   *  replaces the fraction-of-weights heuristic, which over-counts GQA models and under-counts
+   *  wide-KV ones (Qwen3-1.7B at 8K q8: heuristic ~300 MB vs 476 MB real) and omitted compute. */
+  archBytes?: { kvBytes: number; computeBytes: number };
 }
 
 export async function checkMemoryForModel(
@@ -126,7 +130,7 @@ export async function checkMemoryForModel(
   estimatedMB: number;
   availableMB: number;
 }> {
-  const { modelFileSize, contextLength, getAvailableMemory, quantizedCache } =
+  const { modelFileSize, contextLength, getAvailableMemory, quantizedCache, archBytes } =
     args;
   try {
     const { available, total } = await getAvailableMemory();
@@ -138,8 +142,11 @@ export async function checkMemoryForModel(
     const kvFractionPer1k = quantizedCache
       ? KV_FRACTION_PER_1K_QUANT
       : KV_FRACTION_PER_1K_F16;
-    const kvCacheMB = (contextLength / 1024) * modelMB * kvFractionPer1k;
-    const estimatedMB = modelMB + kvCacheMB;
+    const kvCacheMB = archBytes
+      ? archBytes.kvBytes / (1024 * 1024)
+      : (contextLength / 1024) * modelMB * kvFractionPer1k;
+    const computeMB = archBytes ? archBytes.computeBytes / (1024 * 1024) : 0;
+    const estimatedMB = modelMB + kvCacheMB + computeMB;
     // Require at least 200MB headroom after model load for OS and app
     const MIN_HEADROOM_MB = 200;
     const safe = availableMB > estimatedMB + MIN_HEADROOM_MB;
@@ -148,7 +155,7 @@ export async function checkMemoryForModel(
     logger.log(
       `[MEM-SM] checkMemoryForModel modelMB=${Math.round(
         modelMB,
-      )} kvMB=${Math.round(kvCacheMB)} estMB=${Math.round(
+      )} kvMB=${Math.round(kvCacheMB)} computeMB=${Math.round(computeMB)} src=${archBytes ? 'gguf' : 'heuristic'} estMB=${Math.round(
         estimatedMB,
       )} availMB=${Math.round(availableMB)} ctx=${contextLength} safe=${safe}`,
     );
@@ -181,6 +188,7 @@ export async function resolveSafeContext(args: {
   quantizedCache: boolean;
   override?: boolean;
   getAvailableMemory: () => Promise<{ available: number; total: number }>;
+  archBytes?: { kvBytes: number; computeBytes: number };
 }): Promise<{
   ctxLen: number;
   memCheck: Awaited<ReturnType<typeof checkMemoryForModel>>;
@@ -191,12 +199,14 @@ export async function resolveSafeContext(args: {
     quantizedCache,
     override = false,
     getAvailableMemory: getMem,
+    archBytes,
   } = args;
   const memCheck = await checkMemoryForModel({
     modelFileSize: fileSize,
     contextLength: requestedCtx,
     getAvailableMemory: getMem,
     quantizedCache,
+    archBytes,
   });
   if (!memCheck.safe && !override) {
     throw new OverridableMemoryError(

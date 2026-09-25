@@ -53,6 +53,7 @@ object SdCppNative {
         sampler: String,
         scheduler: String,
         clipSkip: Int,
+        vaeTiling: Boolean,
         loraPaths: Array<String>,
         loraMultipliers: FloatArray,
         outNames: Array<String?>,

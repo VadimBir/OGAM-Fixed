@@ -169,7 +169,7 @@ extern "C" JNIEXPORT jbyteArray JNICALL
 Java_ai_offgridmobile_sdcpp_SdCppNative_nativeGenerate(
     JNIEnv* env, jclass, jlong handle, jstring jPrompt, jstring jNegative, jint width,
     jint height, jint steps, jfloat cfg, jlong seed, jstring jSampler, jstring jScheduler,
-    jint clipSkip, jobjectArray jLoraPaths, jfloatArray jLoraMults, jobjectArray outNames,
+    jint clipSkip, jboolean vaeTiling, jobjectArray jLoraPaths, jfloatArray jLoraMults, jobjectArray outNames,
     jobject listener) {
   auto* ctx = reinterpret_cast<sd_ctx_t*>(handle);
   if (ctx == nullptr) {
@@ -215,6 +215,8 @@ Java_ai_offgridmobile_sdcpp_SdCppNative_nativeGenerate(
   gp.seed = seed;
   gp.batch_count = 1;
   gp.clip_skip = clipSkip > 0 ? clipSkip : -1;
+  // Defaults from sd_img_gen_params_init: 32-latent (256 px) tiles, 0.5 overlap.
+  gp.vae_tiling_params.enabled = vaeTiling == JNI_TRUE;
   gp.loras = loras.empty() ? nullptr : loras.data();
   gp.lora_count = static_cast<uint32_t>(loras.size());
   gp.sample_params.sample_steps = steps;
@@ -235,9 +237,9 @@ Java_ai_offgridmobile_sdcpp_SdCppNative_nativeGenerate(
     env->DeleteLocalRef(s);
   }
 
-  LOGI("generate %dx%d steps=%d cfg=%.2f seed=%lld sampler=%s scheduler=%s loras=%d clip_skip=%d",
+  LOGI("generate %dx%d steps=%d cfg=%.2f seed=%lld sampler=%s scheduler=%s loras=%d clip_skip=%d vae_tiling=%d",
        width, height, steps, cfg, (long long)seed, sd_sample_method_name(method),
-       sd_scheduler_name(sched), (int)loras.size(), gp.clip_skip);
+       sd_scheduler_name(sched), (int)loras.size(), gp.clip_skip, (int)gp.vae_tiling_params.enabled);
 
   if (listener != nullptr) {
     jclass cls = env->GetObjectClass(listener);

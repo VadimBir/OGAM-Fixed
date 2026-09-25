@@ -196,6 +196,8 @@ class SdCppImageModule(reactContext: ReactApplicationContext) :
         val sampler = params.getString("sampler") ?: ""
         val scheduler = params.getString("scheduler") ?: ""
         val clipSkip = if (params.hasKey("clipSkip")) params.getInt("clipSkip") else -1
+        // Tiled VAE decode (256 px tiles): caps the largest compute buffer at any resolution.
+        val vaeTiling = !params.hasKey("vaeTiling") || params.getBoolean("vaeTiling")
         val loraPaths = ArrayList<String>()
         val loraMults = ArrayList<Float>()
         params.getArray("loras")?.let { arr ->
@@ -226,7 +228,7 @@ class SdCppImageModule(reactContext: ReactApplicationContext) :
                 }
                 val out = SdCppNative.nativeGenerate(
                     handle, prompt, negative, width, height, steps, cfg, seed, sampler, scheduler,
-                    clipSkip, loraPaths.toTypedArray(), loraMults.toFloatArray(), names, listener,
+                    clipSkip, vaeTiling, loraPaths.toTypedArray(), loraMults.toFloatArray(), names, listener,
                 ) ?: throw IllegalStateException("stable-diffusion.cpp returned no image")
                 val hdr = ByteBuffer.wrap(out, 0, 12).order(ByteOrder.LITTLE_ENDIAN)
                 val w = hdr.int
@@ -237,7 +239,7 @@ class SdCppImageModule(reactContext: ReactApplicationContext) :
                 val outPath = File(dir, "$imageId.png").absolutePath
                 savePixelsToPng(out, 12, w, h, c, outPath)
                 val ms = System.currentTimeMillis() - t0
-                Log.i(TAG, "[SDCPP-GEN] ${w}x$h sampler=${names[0]} scheduler=${names[1]} steps=$steps seed=$seed loras=${loraPaths.size} in $ms ms")
+                Log.i(TAG, "[SDCPP-GEN] ${w}x$h sampler=${names[0]} scheduler=${names[1]} steps=$steps seed=$seed loras=${loraPaths.size} vaeTiling=$vaeTiling in $ms ms")
                 resolve(promise, Arguments.createMap().apply {
                     putString("id", imageId)
                     putString("imagePath", outPath)

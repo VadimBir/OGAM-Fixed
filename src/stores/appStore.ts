@@ -37,6 +37,7 @@ import {
 } from '../utils/modelSelectorFilters';
 import { migratePersistedState } from './appStoreMigrations';
 import { defaultImageSteps, SWEET_SPOT_SIZE } from '../utils/imageGenAdvice';
+import type { SdWeightType } from '../services/sdCppMemory';
 
 type OnboardingChecklist = {
   downloadedModel: boolean;
@@ -87,6 +88,12 @@ export type AppSettings = {
   imageScheduler?: string;
   /** LoRA adapters for stable-diffusion.cpp models (enabled ones apply to every generation). */
   imageLoras?: ImageLora[];
+  /** sd.cpp: weight type converted to at load (the file is not rewritten); 'auto' keeps the file's. */
+  imageSdWeightType?: SdWeightType;
+  /** sd.cpp: flash attention in the UNet (streams attention scores instead of materialising them). */
+  imageSdFlashAttn?: boolean;
+  /** sd.cpp: decode the VAE in 256 px tiles — caps the largest compute buffer at any resolution. */
+  imageSdVaeTiling?: boolean;
   enhanceImagePrompts: boolean;
   enableGpu: boolean;
   gpuLayers: number;
@@ -271,6 +278,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
   imageHeight: Platform.OS === 'android' ? 512 : SWEET_SPOT_SIZE,
   imageUseOpenCL: false,
   imageDenoiseStrength: 0.6,
+  imageSdWeightType: 'auto' as SdWeightType,
+  imageSdFlashAttn: true,
+  imageSdVaeTiling: true,
   enhanceImagePrompts: false,
   enableGpu: Platform.OS === 'ios',
   inferenceBackend:

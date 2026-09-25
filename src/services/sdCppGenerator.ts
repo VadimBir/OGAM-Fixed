@@ -6,6 +6,7 @@ import {
 } from '../types';
 import { generateRandomSeed } from '../utils/generateId';
 import logger from '../utils/logger';
+import type { SdWeightType } from './sdCppMemory';
 import {
   classifySafetensorsKeys,
   type SafetensorsClassification,
@@ -14,6 +15,19 @@ import {
 const { SdCppImageModule } = NativeModules;
 
 type ProgressCallback = (progress: ImageGenerationProgress) => void;
+
+/** Load-time sd.cpp options; a change requires a reload (weights are converted at load). */
+export interface SdCppLoadConfig {
+  weightType: SdWeightType;
+  flashAttn: boolean;
+}
+
+export function sdCppLoadConfigFromSettings(settings: {
+  imageSdWeightType?: SdWeightType;
+  imageSdFlashAttn?: boolean;
+}): SdCppLoadConfig {
+  return { weightType: settings.imageSdWeightType ?? 'auto', flashAttn: settings.imageSdFlashAttn ?? true };
+}
 
 /** Sampler names stable-diffusion.cpp accepts ('' = the checkpoint's default). */
 export const SDCPP_SAMPLERS = [
@@ -34,6 +48,7 @@ export const SDCPP_SCHEDULERS = [
  */
 class SdCppGeneratorService {
   private loadedThreads: number | null = null;
+  private loadedConfig: SdCppLoadConfig | null = null;
   private generating = false;
   private eventEmitter: NativeEventEmitter | null = null;
 
@@ -79,15 +94,24 @@ class SdCppGeneratorService {
     return result;
   }
 
-  async loadModel(modelPath: string, threads?: number): Promise<boolean> {
+  /** True when the loaded context was created with a different weight type / flash attention. */
+  loadConfigDiffers(config: SdCppLoadConfig): boolean {
+    const c = this.loadedConfig;
+    return c != null && (c.weightType !== config.weightType || c.flashAttn !== config.flashAttn);
+  }
+
+  async loadModel(modelPath: string, threads?: number, config: SdCppLoadConfig = { weightType: 'auto', flashAttn: true }): Promise<boolean> {
     if (!this.isAvailable()) {
       throw new Error('stable-diffusion.cpp image generation is not available on this platform');
     }
-    const params: { modelPath: string; threads?: number; mmap: boolean } = { modelPath, mmap: true };
+    const params: { modelPath: string; threads?: number; mmap: boolean; weightType: string; flashAttn: boolean } = {
+      modelPath, mmap: true, weightType: config.weightType, flashAttn: config.flashAttn,
+    };
     if (typeof threads === 'number') params.threads = threads;
     logger.log(`[SDCPP-LOAD] ${JSON.stringify(params)}`);
     const result = await SdCppImageModule.loadModel(params);
     this.loadedThreads = typeof threads === 'number' ? threads : this.loadedThreads;
+    this.loadedConfig = { ...config };
     return result;
   }
 
@@ -100,6 +124,7 @@ class SdCppGeneratorService {
       return false;
     } finally {
       this.loadedThreads = null;
+      this.loadedConfig = null;
     }
   }
 
@@ -116,6 +141,7 @@ class SdCppGeneratorService {
       scheduler: params.scheduler || '',
       clipSkip: params.clipSkip ?? -1,
       loras: (params.loras ?? []).map(l => ({ path: l.path, weight: l.weight })),
+      vaeTiling: params.vaeTiling ?? true,
     };
     logger.log(`[WIRE-IMAGE-PARAMS] ${JSON.stringify({ engine: 'sdcpp', native: { ...np, prompt: undefined } })}`); // [WIRE] settings→native image params
     return np;

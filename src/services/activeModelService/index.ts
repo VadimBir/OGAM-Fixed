@@ -3,6 +3,8 @@ import { llmService } from '../llm';
 import { liteRTService } from '../litert';
 import { getActiveEngineService } from '../engines';
 import { imageEngineRouter as onnxImageGeneratorService } from '../imageEngineRouter';
+import { sdCppLoadConfigFromSettings } from '../sdCppGenerator';
+import { estimateImageModelRamBytes } from '../imageModelMemory';
 import { hardwareService } from '../hardware';
 import { modelResidencyManager } from '../modelResidency';
 import { OverridableMemoryError, ImageModelIncompleteError } from '../modelLoadErrors';
@@ -285,9 +287,12 @@ class ActiveModelService {
     await hardwareService.getDeviceInfo();
     const store = useAppStore.getState();
     const imageThreads = store.settings?.imageThreads ?? 4;
+    // A thread change or an sd.cpp load-time option change (weight type / flash attention —
+    // weights are converted at load) both need a fresh native context.
     const needsThreadReload =
       this.loadedImageModelId === modelId &&
-      this.loadedImageModelThreads !== imageThreads;
+      (this.loadedImageModelThreads !== imageThreads ||
+        onnxImageGeneratorService.sdCppConfigDiffers(sdCppLoadConfigFromSettings(store.settings ?? {})));
     if (this.loadedImageModelId === modelId) {
       const isLoaded = await onnxImageGeneratorService.isModelLoaded();
       if (isLoaded && !needsThreadReload) {
@@ -333,7 +338,7 @@ class ActiveModelService {
           // os_proc RAM (budgetForSpec dirty-pressure), or a sidecar stacks onto its
           // generation spike and jetsams the app. Without this flag the resident-dirty
           // arm of the gate is a no-op.
-          { key: 'image', type: 'image', dirtyMemory: true, sizeMB: Math.round((hardwareService.estimateImageModelRam(model) || 0) / (1024 * 1024)) },
+          { key: 'image', type: 'image', dirtyMemory: true, sizeMB: Math.round(estimateImageModelRamBytes(model) / (1024 * 1024)) },
           () => this.doUnloadImageModelLocked(true), // eviction keeps the selection
         );
       },

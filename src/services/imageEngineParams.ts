@@ -21,6 +21,7 @@ export interface EngineImageSettings {
   imageSampler?: string;
   imageScheduler?: string;
   imageLoras?: ImageLora[];
+  imageSdVaeTiling?: boolean;
 }
 
 export interface EngineImageRequest {
@@ -56,6 +57,7 @@ export function resolveEngineImageRequest(
         sampler,
         scheduler: (params.scheduler ?? settings.imageScheduler ?? '').trim(),
         loras,
+        vaeTiling: settings.imageSdVaeTiling ?? true,
       },
     };
   }

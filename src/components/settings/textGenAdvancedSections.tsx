@@ -131,15 +131,18 @@ export { SpeculativeDecodingToggle } from './SpeculativeDecodingToggle';
 
 export const FlashAttentionToggle: React.FC = () => {
   const { updateSettings } = useAppStore();
-  const { isFlashAttnOn, handleFlashAttnToggle } = useTextGenerationAdvanced();
+  const { isFlashAttnOn, isQuantizedCache, handleFlashAttnToggle } = useTextGenerationAdvanced();
   return (
     <SegmentedRow<'off' | 'on'>
       label="Flash Attention"
-      description="Faster inference and lower memory. Required for quantized KV cache (q8_0/q4_0). Requires model reload."
+      description={isQuantizedCache
+        ? 'Locked on: the quantized KV cache (q8_0/q4_0) requires it. Set KV Cache Type to f16 to turn it off.'
+        : 'Faster inference and lower memory. Required for quantized KV cache (q8_0/q4_0). Requires model reload.'}
       options={BOOL_OPTIONS}
       current={isFlashAttnOn ? 'on' : 'off'}
       onSelect={(id) => (id === 'on' ? updateSettings({ flashAttn: true }) : handleFlashAttnToggle(false))}
       testIdFor={(id) => `flash-attn-${id}-button`}
+      isDisabled={(id) => id === 'off' && isQuantizedCache}
     />
   );
 };

@@ -1,5 +1,6 @@
 import { Alert } from 'react-native';
 import { imageEngineRouter as onnxImageGeneratorService } from './imageEngineRouter';
+import { sdCppLoadConfigFromSettings } from './sdCppGenerator';
 import { activeModelService } from './activeModelService';
 import { useAppStore } from '../stores';
 import { GeneratedImage } from '../types';
@@ -184,7 +185,10 @@ class ImageGenerationService {
     const loadedPath = await onnxImageGeneratorService.getLoadedModelPath();
     const loadedThreads = onnxImageGeneratorService.getLoadedThreads();
     const needsThreadReload =
-      loadedThreads == null || loadedThreads !== opts.desiredThreads;
+      loadedThreads == null || loadedThreads !== opts.desiredThreads ||
+      onnxImageGeneratorService.sdCppConfigDiffers(
+        sdCppLoadConfigFromSettings(useAppStore.getState().settings ?? {}),
+      );
     if (
       isImageModelLoaded &&
       loadedPath === activeImageModel.modelPath &&

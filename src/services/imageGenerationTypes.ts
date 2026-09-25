@@ -75,6 +75,8 @@ export interface EngineImageOptions {
   sampler?: string;
   scheduler?: string;
   loras?: Array<{ path: string; weight: number }>;
+  /** sd.cpp: decode the VAE in tiles (bounded memory at any resolution). */
+  vaeTiling?: boolean;
 }
 
 export interface ActiveImageModel {

@@ -6,6 +6,7 @@
 import { DownloadedModel, ONNXImageModel } from '../../types';
 import { loadLlamaModelInfo } from 'llama.rn';
 import { buildModelParams } from '../llmHelpers';
+import { estimateLlamaMemory } from '../llamaMemoryEstimate';
 import { hardwareService } from '../hardware';
 import { llmService } from '../llm';
 import { liteRTService } from '../litert';
@@ -17,6 +18,7 @@ import {
   IMAGE_MODEL_OVERHEAD_MULTIPLIER,
 } from './types';
 import { useAppStore } from '../../stores';
+import { estimateImageModelRamBytes } from '../imageModelMemory';
 import { modelMemoryBudgetMB, modelWarningThresholdMB, LoadPolicy } from '../memoryBudget';
 
 // ---------------------------------------------------------------------------
@@ -50,32 +52,14 @@ export async function estimateTextModelMemoryMB(model: DownloadedModel): Promise
   if (model.engine !== 'llama') return Math.ceil(fallback / (1024 * 1024));
   try {
     const metadata = await loadLlamaModelInfo(model.filePath) as Record<string, unknown>;
-    const architecture = metadata['general.architecture'];
-    if (typeof architecture !== 'string') return Math.ceil(fallback / (1024 * 1024));
-    const number = (field: string): number | undefined => {
-      const value = metadata[`${architecture}.${field}`];
-      const parsed = typeof value === 'number' || typeof value === 'string' ? Number(value) : NaN;
-      return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
-    };
-    const blocks = number('block_count');
-    const heads = number('attention.head_count');
-    const kvHeads = number('attention.head_count_kv') ?? heads;
-    const embedding = number('embedding_length');
-    const keyLength = number('attention.key_length') ?? (embedding && heads ? embedding / heads : undefined);
-    const valueLength = number('attention.value_length') ?? keyLength;
-    const vocabulary = number('vocab_size');
-    if (!blocks || !kvHeads || !embedding || !keyLength || !valueLength) {
-      return Math.ceil(fallback / (1024 * 1024));
-    }
     const params = buildModelParams(model.filePath, settings);
-    const context = Math.min(params.ctxLen, number('attention.sliding_window') ?? params.ctxLen);
-    const cacheType = params.usesF16Cache ? 'f16' : settings.cacheType;
-    const bytesPerElement = cacheType === 'q4_0' ? 18 / 32
-      : cacheType === 'q8_0' ? 34 / 32 : 2;
-    const kvBytes = blocks * context * kvHeads * (keyLength + valueLength) * bytesPerElement;
-    const computeBytes = ((vocabulary ?? 0) + embedding) * params.nBatch * 4;
-    const totalBytes = Math.ceil((model.fileSize + (model.mmProjFileSize ?? 0) + kvBytes + computeBytes) * 1.1);
-    return Math.ceil(totalBytes / (1024 * 1024));
+    // params.cacheType is the type actually sent (an unset setting resolves to q8_0, not f16).
+    const estimate = estimateLlamaMemory(metadata, {
+      ctxLen: params.ctxLen, cacheType: params.cacheType, nBatch: params.nBatch,
+      weightsBytes: model.fileSize + (model.mmProjFileSize ?? 0),
+    });
+    if (!estimate) return Math.ceil(fallback / (1024 * 1024));
+    return Math.ceil(estimate.totalBytes / (1024 * 1024));
   } catch {
     return Math.ceil(fallback / (1024 * 1024));
   }
@@ -87,8 +71,11 @@ async function estimateModelMemoryGB(
 ): Promise<number> {
   if (type === 'text') return (await estimateTextModelMemoryMB(model as DownloadedModel)) / 1024;
   const imageModel = model as ONNXImageModel;
-  // The image load gate remains the owner of its existing estimate.
-  const estimate = hardwareService.estimateImageModelRam?.(imageModel);
+  // sd.cpp: architecture estimate (weight type, flash attention, VAE tiling, W×H); others keep
+  // the image load gate's file-size multiplier.
+  const estimate = imageModel.backend === 'sdcpp'
+    ? estimateImageModelRamBytes(imageModel)
+    : hardwareService.estimateImageModelRam?.(imageModel);
   if (estimate != null) return estimate / (1024 * 1024 * 1024);
   const sizeGB = (imageModel.size || 0) / (1024 * 1024 * 1024);
   return sizeGB * IMAGE_MODEL_OVERHEAD_MULTIPLIER;

@@ -102,7 +102,7 @@ describe('resolveEngineImageRequest (param signature per engine)', () => {
     expect(r).toEqual({
       width: 128,
       height: 768,
-      engineOptions: { sampler: 'dpm++2m', scheduler: 'karras', loras: [{ path: '/l/a.safetensors', weight: 0.8 }] },
+      engineOptions: { sampler: 'dpm++2m', scheduler: 'karras', loras: [{ path: '/l/a.safetensors', weight: 0.8 }], vaeTiling: true },
     });
   });
 
@@ -152,9 +152,9 @@ describe('imageEngineRouter', () => {
   });
 
   it('sdcpp load frees LocalDream, then every call goes to sd.cpp; switching back frees sd.cpp', async () => {
-    await router.loadModel('/sd/model.safetensors', 6, { backend: 'sdcpp' });
+    await router.loadModel('/sd/model.safetensors', 6, { backend: 'sdcpp', sdcpp: { weightType: 'q4_0', flashAttn: true } });
     expect(mockLocalDream.unloadModel).toHaveBeenCalledTimes(1);
-    expect(mockSdCpp.loadModel).toHaveBeenCalledWith('/sd/model.safetensors', 6);
+    expect(mockSdCpp.loadModel).toHaveBeenCalledWith('/sd/model.safetensors', 6, { weightType: 'q4_0', flashAttn: true });
     expect(await router.getLoadedModelPath()).toBe('/sd/model.safetensors');
     expect(router.getLoadedThreads()).toBe(6);
     expect(await router.hasKernelCache('/sd/model.safetensors')).toBe(true);

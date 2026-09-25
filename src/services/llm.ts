@@ -1,4 +1,4 @@
-import { LlamaContext, RNLlamaOAICompatibleMessage } from 'llama.rn';
+import { LlamaContext, RNLlamaOAICompatibleMessage, loadLlamaModelInfo } from 'llama.rn';
 import { Platform } from 'react-native';
 import RNFS from 'react-native-fs';
 import { statFile } from '../utils/fileStat';
@@ -24,6 +24,7 @@ import type { ToolCall } from './tools/types';
 import type { MultimodalSupport, LLMPerformanceSettings, LLMPerformanceStats } from './llmTypes';
 import logger from '../utils/logger';
 import { resolveSpeculative } from './mtpDetection';
+import { estimateLlamaMemory } from './llamaMemoryEstimate';
 import type { StreamToken } from './llmStreamTypes';
 export type { StreamToken };
 type StreamCallback = (data: StreamToken) => void;
@@ -95,15 +96,29 @@ class LLMService {
       });
       return { ...raw, available: availableMB * 1024 * 1024 };
     };
-    let memCheck = await checkMemoryForModel({ modelFileSize: fileSize, contextLength: params.ctxLen, getAvailableMemory: getMem, quantizedCache });
+    const archBytes = await this.readArchBytes(modelPath, params, fileSize);
+    let memCheck = await checkMemoryForModel({ modelFileSize: fileSize, contextLength: params.ctxLen, getAvailableMemory: getMem, quantizedCache, archBytes });
     if (!memCheck.safe) {
       // Keep the selected context. A failed estimate asks for Load Anyway; an explicit
       // override passes the selected value to native init even when memory is tight.
-      const decision = await resolveSafeContext({ fileSize, requestedCtx: params.ctxLen, quantizedCache, override, getAvailableMemory: getMem });
+      const decision = await resolveSafeContext({ fileSize, requestedCtx: params.ctxLen, quantizedCache, override, getAvailableMemory: getMem, archBytes });
       memCheck = decision.memCheck;
     }
     logger.log(`[LLM] Memory check: estimatedMB=${memCheck.estimatedMB.toFixed(0)}, availableMB=${memCheck.availableMB.toFixed(0)}, safe=${memCheck.safe}, ctx=${params.ctxLen}`);
     return { fileSize, memCheck, params };
+  }
+  /** KV + compute bytes from the GGUF header (layers, KV heads, head dims, SWA, vocab); undefined
+   *  when the header can't be read, in which case the fit check keeps its heuristic. */
+  private async readArchBytes(modelPath: string, params: ReturnType<typeof buildModelParams>, fileSize: number): Promise<{ kvBytes: number; computeBytes: number } | undefined> {
+    try {
+      const metadata = await loadLlamaModelInfo(modelPath) as Record<string, unknown>;
+      const est = estimateLlamaMemory(metadata, { ctxLen: params.ctxLen, cacheType: params.cacheType, nBatch: params.nBatch, weightsBytes: fileSize });
+      if (!est) return undefined;
+      logger.log(`[LLM] KV estimate: ctx=${est.context} cache=${params.cacheType} kvMB=${Math.round(est.kvBytes / 1048576)} computeMB=${Math.round(est.computeBytes / 1048576)}`);
+      return { kvBytes: est.kvBytes, computeBytes: est.computeBytes };
+    } catch {
+      return undefined;
+    }
   }
   private async applyLoadedContext(opts: { context: LlamaContext; actualLength: number; gpuAttemptFailed: boolean; nGpuLayers: number; requestedGpuLayers: number; modelPath: string; mmProjPath?: string }): Promise<void> {
     const { context, actualLength, gpuAttemptFailed, nGpuLayers, requestedGpuLayers, modelPath, mmProjPath } = opts;

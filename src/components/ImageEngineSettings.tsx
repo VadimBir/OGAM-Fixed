@@ -5,7 +5,9 @@ import { SliderSetting } from './SliderSetting';
 import { useTheme, useThemedStyles } from '../theme';
 import type { ThemeColors } from '../theme';
 import { useAppStore } from '../stores';
-import { ImageLora } from '../types';
+import { ImageLora, ONNXImageModel } from '../types';
+import { SD_WEIGHT_TYPES, type SdWeightType } from '../services/sdCppMemory';
+import { estimateSdCppModelMemory } from '../services/imageModelMemory';
 import { SDCPP_SAMPLERS, SDCPP_SCHEDULERS } from '../services/sdCppGenerator';
 import {
   LOCALDREAM_SAMPLERS,
@@ -27,6 +29,7 @@ const createStyles = (colors: ThemeColors) => ({
   loraRow: { flexDirection: 'row' as const, alignItems: 'center' as const, justifyContent: 'space-between' as const, marginTop: 8 },
   loraName: { color: colors.text, fontSize: 13, flex: 1 },
   remove: { color: colors.error, fontSize: 12, marginRight: 10 },
+  estimate: { color: colors.text, fontSize: 12, marginTop: 8, fontVariant: ['tabular-nums' as const] },
 });
 type Styles = ReturnType<typeof createStyles>;
 
@@ -100,6 +103,80 @@ const LoraList: React.FC<{ styles: Styles }> = ({ styles }) => {
         </View>
       ))}
     </View>
+  );
+};
+
+const SwitchRow: React.FC<{
+  label: string; desc: string; value: boolean; onChange: (v: boolean) => void; styles: Styles; testID: string;
+}> = ({ label, desc, value, onChange, styles, testID }) => {
+  const { colors } = useTheme();
+  return (
+    <View style={styles.group}>
+      <View style={styles.loraRow}>
+        <Text style={styles.label}>{label}</Text>
+        <Switch
+          testID={testID}
+          value={value}
+          onValueChange={onChange}
+          trackColor={{ false: colors.surfaceLight, true: colors.primary }}
+          thumbColor={colors.surface}
+        />
+      </View>
+      <Text style={styles.desc}>{desc}</Text>
+    </View>
+  );
+};
+
+/** sd.cpp memory knobs: load-time weight quantization + flash attention, per-image VAE tiling,
+ *  with the resulting RAM estimate (the same number the load gate uses). */
+const SdCppMemoryControls: React.FC<{ model: ONNXImageModel; styles: Styles }> = ({ model, styles }) => {
+  const { settings, updateSettings } = useAppStore();
+  const weightType = settings.imageSdWeightType ?? 'auto';
+  const est = estimateSdCppModelMemory(model);
+  return (
+    <>
+      <View style={styles.group}>
+        <Text style={styles.label}>Weight quantization</Text>
+        <Text style={styles.desc}>
+          Converted in memory at load (file untouched; reloads the model). UNet attention/linear and
+          text-encoder weights convert; 3x3 convs and the VAE keep the file's precision.
+        </Text>
+        <View style={styles.chips}>
+          {SD_WEIGHT_TYPES.map(wt => {
+            const active = weightType === wt;
+            return (
+              <TouchableOpacity
+                key={wt}
+                testID={`sdcpp-wtype-${wt}`}
+                style={[styles.chip, active && styles.chipActive]}
+                onPress={() => updateSettings({ imageSdWeightType: wt as SdWeightType })}
+              >
+                <Text style={[styles.chipText, active && styles.chipTextActive]}>{wt === 'auto' ? 'file (auto)' : wt}</Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+      </View>
+      <SwitchRow
+        testID="sdcpp-flash-attn"
+        styles={styles}
+        label="Flash attention"
+        desc="Streams UNet attention instead of materialising the score matrix (reloads the model)."
+        value={settings.imageSdFlashAttn ?? true}
+        onChange={v => updateSettings({ imageSdFlashAttn: v })}
+      />
+      <SwitchRow
+        testID="sdcpp-vae-tiling"
+        styles={styles}
+        label="VAE tiling"
+        desc="Decodes in 256 px tiles: the VAE buffer stays ~0.5 GB at any size instead of ~2 GB at 512 px."
+        value={settings.imageSdVaeTiling ?? true}
+        onChange={v => updateSettings({ imageSdVaeTiling: v })}
+      />
+      <Text style={styles.estimate} testID="sdcpp-ram-estimate">
+        {`Est. RAM ~${(est.totalMB / 1024).toFixed(2)} GB = weights ${est.weightsMB} MB + max(UNet ${est.unetComputeMB}, VAE ${est.vaeComputeMB}) MB + overhead`}
+      </Text>
+    </>
   );
 };
 
@@ -179,6 +256,7 @@ export const ImageEngineSettings: React.FC<{ compact?: boolean }> = ({ compact }
         formatValue={v => `${v}px`}
         onChange={v => updateSettings({ imageHeight: v })}
       />
+      <SdCppMemoryControls model={model} styles={styles} />
       <LoraList styles={styles} />
     </>
   );

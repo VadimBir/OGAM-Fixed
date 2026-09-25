@@ -1,5 +1,5 @@
 import { localDreamGeneratorService } from './localDreamGenerator';
-import { sdCppGeneratorService } from './sdCppGenerator';
+import { sdCppGeneratorService, type SdCppLoadConfig } from './sdCppGenerator';
 import { ImageGenerationParams, ImageGenerationProgress, GeneratedImage } from '../types';
 import logger from '../utils/logger';
 
@@ -10,6 +10,8 @@ type LoadOpts = {
   cpuOnly?: boolean;
   attentionVariant?: 'split_einsum' | 'original';
   preferGpu?: boolean;
+  /** sd.cpp load-time options (weight type, flash attention). */
+  sdcpp?: SdCppLoadConfig;
 };
 export type ImageEngineId = 'localdream' | 'sdcpp';
 
@@ -51,12 +53,17 @@ class ImageEngineRouter {
       if (this.active !== 'sdcpp') await localDreamGeneratorService.unloadModel();
       this.active = 'sdcpp';
       logger.log(`[IMG-ENGINE] sdcpp <- ${modelPath}`);
-      return sdCppGeneratorService.loadModel(modelPath, threads);
+      return sdCppGeneratorService.loadModel(modelPath, threads, opts.sdcpp);
     }
     if (this.active === 'sdcpp') await sdCppGeneratorService.unloadModel();
     this.active = 'localdream';
-    const { backend, ...rest } = opts;
+    const { backend, sdcpp: _sdcpp, ...rest } = opts;
     return localDreamGeneratorService.loadModel(modelPath, threads, { ...rest, backend: backend ?? 'auto' });
+  }
+
+  /** sd.cpp is loaded with other load-time options than `config` → a reload is needed. */
+  sdCppConfigDiffers(config: SdCppLoadConfig): boolean {
+    return this.active === 'sdcpp' && sdCppGeneratorService.loadConfigDiffers(config);
   }
 
   unloadModel(): Promise<boolean> {
