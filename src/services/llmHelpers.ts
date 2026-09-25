@@ -312,6 +312,9 @@ export function supportsNativeThinking(context: LlamaContext | null): boolean {
 }
 export function buildThinkingCompletionParams(enableThinking: boolean, isGemma4: boolean = false, reasoningBudget?: number): { enable_thinking: boolean; reasoning_format: 'none' | 'auto' | 'deepseek'; thinking_budget_tokens?: number } {
   if (!enableThinking) return { enable_thinking: false, reasoning_format: 'none' };
+  // Budget 0 = "no thinking": template switch off, plus a 0-token cap that force-closes the block
+  // for models that think regardless of enable_thinking (llama.rn accepts thinking_budget_tokens >= 0).
+  if (reasoningBudget === 0) return { enable_thinking: false, reasoning_format: 'none', thinking_budget_tokens: 0 };
   // Native-first (parse-once at the runtime boundary): Gemma 4 uses its own
   // <|channel>thought\n...<channel|> format, not DeepSeek's <think> tags. reasoning_format:'auto'
   // lets llama.cpp detect the model's chat_format and parse reasoning + tool calls NATIVELY —

@@ -133,11 +133,13 @@ export type AppSettings = {
   voiceSpeakerDrainMs: number;
   enabledTools: string[];
   thinkingEnabled: boolean;
-  /** Cap on the tokens the model may spend thinking per reply. REASONING_BUDGET_AUTO (0) sends no
-   *  cap so the model reasons for as long as it wants. Applies only while Thinking is on; the
-   *  answer still streams after the cap closes the thinking block. Optional so installs persisted
-   *  before this setting read as auto. */
+  /** Cap on the tokens the model may spend thinking per reply. REASONING_BUDGET_AUTO (-1) sends no
+   *  cap; 0 = no thinking; N > 0 = exact cap. Applies only while Thinking is on; the answer still
+   *  streams after the cap closes the thinking block. Optional so old installs read as auto. */
   reasoningBudget?: number;
+  /** Set once the persisted reasoningBudget uses the "0 = no thinking" scale (older builds stored
+   *  0 for Auto; the migration maps that 0 to Auto exactly once). */
+  reasoningBudgetZeroIsOff?: boolean;
   inferenceBackend: InferenceBackend;
   /** True once the user has explicitly picked an inference backend in Settings.
    *  While false, the boot-time backendSync may upgrade the default to the GPU
@@ -304,6 +306,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   enabledTools: ['web_search', 'read_url', 'search_knowledge_base', 'generate_image'],
   thinkingEnabled: false,
   reasoningBudget: REASONING_BUDGET_AUTO,
+  reasoningBudgetZeroIsOff: true,
   liteRTBackend: 'gpu',
   liteRTTemperature: 0.7,
   liteRTTopP: 0.9,

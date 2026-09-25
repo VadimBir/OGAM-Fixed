@@ -112,14 +112,16 @@ describe('model settings surface parity', () => {
     fireEvent.press(chatSettings.getByText('TEXT GENERATION'));
     expect(chatSettings.getByText('Auto (up to Max Tokens)')).toBeTruthy();
     fireEvent(chatSettings.getByTestId('setting-maxTokens-slider'), 'slidingComplete', 4096);
-    fireEvent(chatSettings.getByTestId('thinking-budget-slider'), 'slidingComplete', 4);
-    expect(chatSettings.getByText('4K tokens')).toBeTruthy();
+    fireEvent(chatSettings.getByTestId('thinking-budget-slider'), 'slidingComplete', 1000);
+    expect(chatSettings.getByText('1000 tokens')).toBeTruthy();
     chatSettings.unmount();
 
     const modelSettings = renderModelSettings();
     fireEvent.press(modelSettings.getByTestId('text-generation-accordion'));
-    expect(modelSettings.getByText('4K tokens')).toBeTruthy();
+    expect(modelSettings.getByText('1000 tokens')).toBeTruthy();
     fireEvent(modelSettings.getByTestId('thinking-budget-slider'), 'slidingComplete', 0);
+    expect(modelSettings.getByText('None (no thinking)')).toBeTruthy();
+    fireEvent(modelSettings.getByTestId('thinking-budget-slider'), 'slidingComplete', 4096);
     expect(modelSettings.getByText('Auto (up to Max Tokens)')).toBeTruthy();
   });
 
@@ -129,13 +131,13 @@ describe('model settings surface parity', () => {
     fireEvent(chatSettings.getByTestId('setting-maxTokens-slider'), 'slidingComplete', 3000);
 
     const budgetSlider = chatSettings.getByTestId('thinking-budget-slider');
-    fireEvent(budgetSlider, 'slidingComplete', budgetSlider.props.maximumValue);
-    expect(useAppStore.getState().settings.reasoningBudget).toBe(3008);
-    expect(chatSettings.getByText('3008 tokens')).toBeTruthy();
+    const max = budgetSlider.props.maximumValue;
+    fireEvent(budgetSlider, 'slidingComplete', max - 1);
+    expect(useAppStore.getState().settings.reasoningBudget).toBe(max - 1);
 
     fireEvent(chatSettings.getByTestId('setting-maxTokens-slider'), 'slidingComplete', 2048);
-    expect(chatSettings.getByTestId('thinking-budget-slider').props.maximumValue).toBe(3);
-    expect(chatSettings.getByText('2K tokens')).toBeTruthy();
+    expect(chatSettings.getByTestId('thinking-budget-slider').props.maximumValue).toBe(2048);
+    expect(chatSettings.getByText('Auto (up to Max Tokens)')).toBeTruthy();
   });
 
   it('shows Context Length, Max Tokens, then Thinking Budget on both surfaces', () => {

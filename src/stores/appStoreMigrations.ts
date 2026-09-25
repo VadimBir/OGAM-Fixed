@@ -105,11 +105,24 @@ export function migratePersistedState<TState>(
     !Object.values(merged.onboardingChecklist).every(Boolean)
   )
     merged.checklistDismissed = false;
+  migrateReasoningBudgetScale(merged, persistedState);
   migrateEnabledTools(merged);
   migrateBoostedContext(merged, defaultSettings);
   migrateGeneratedImageTimestamps(merged);
   migrateGeneratedImagePaths(merged, documentsPath);
   return merged as TState;
+}
+
+/** Older builds stored reasoningBudget 0 for Auto; 0 now means "no thinking". Map once. */
+function migrateReasoningBudgetScale(merged: any, persistedState: any): void {
+  const persisted = persistedState?.settings;
+  if (!persisted || persisted.reasoningBudgetZeroIsOff) return;
+  const legacyAuto = persisted.reasoningBudget == null || persisted.reasoningBudget <= 0;
+  merged.settings = {
+    ...merged.settings,
+    ...(legacyAuto ? { reasoningBudget: -1 } : {}),
+    reasoningBudgetZeroIsOff: true,
+  };
 }
 
 /** Keep generated-image paths valid when iOS gives the app a new container UUID on install. */

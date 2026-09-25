@@ -74,7 +74,7 @@ export function useTextGenerationSettings() {
 
   const temperature = settings.temperature ?? DEFAULT_SETTINGS.temperature;
   const maxTokens = settings.maxTokens ?? DEFAULT_SETTINGS.maxTokens;
-  const reasoningBudget = settings.reasoningBudget ?? 0;
+  const reasoningBudget = settings.reasoningBudget ?? -1;
   const maxToolCalls = settings.maxToolCalls ?? DEFAULT_SETTINGS.maxToolCalls;
   const contextLength =
     settings.contextLength ?? DEFAULT_SETTINGS.contextLength;
@@ -92,7 +92,8 @@ export function useTextGenerationSettings() {
     if (isLiteRT) return;
     const nextContext = selectedModelLimit ? Math.min(contextLength, selectedModelLimit) : contextLength;
     const nextMaxTokens = Math.min(maxTokens, nextContext);
-    const nextBudget = reasoningBudget > 0 ? Math.min(reasoningBudget, nextMaxTokens) : reasoningBudget;
+    // A cap at or above Max Tokens is Auto (the slider's top position).
+    const nextBudget = reasoningBudget >= nextMaxTokens ? -1 : reasoningBudget;
     if (nextContext !== contextLength || nextMaxTokens !== maxTokens || nextBudget !== reasoningBudget) {
       updateSettings({
         ...(nextContext !== contextLength ? { contextLength: nextContext } : {}),

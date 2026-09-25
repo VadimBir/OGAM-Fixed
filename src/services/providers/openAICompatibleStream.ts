@@ -282,7 +282,7 @@ export async function generateOllamaChatImpl(
   const { options, callbacks, signal, endpoint, modelId, abort } = req;
   const thinkingEnabled = options.enableThinking !== false;
   const think = req.thinkingLevelsOnly
-    ? !options.reasoningBudget ? 'medium'
+    ? options.reasoningBudget == null || options.reasoningBudget < 0 ? 'medium'
       : options.reasoningBudget <= 1024 ? 'low'
         : options.reasoningBudget <= 4096 ? 'medium' : 'high'
     : thinkingEnabled;

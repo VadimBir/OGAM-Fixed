@@ -48,7 +48,7 @@ export async function generateRemoteResponseImpl(
     stopSequences: [],
     enableThinking:
       provider.capabilities.supportsThinking &&
-      (provider.capabilities.thinkingLevelsOnly || thinkingEnabled),
+      (provider.capabilities.thinkingLevelsOnly || (thinkingEnabled && reasoningBudget !== 0)),
     reasoningBudget,
   };
 

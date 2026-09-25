@@ -24,11 +24,10 @@ import {
 import { hardwareService } from '../../services/hardware';
 import {
   REASONING_BUDGET_AUTO,
-  REASONING_BUDGET_OPTIONS,
-  reasoningBudgetLabel,
 } from '@offgrid/models';
 import { HTP_ENABLED as HTP_UI_ENABLED } from '../../config/featureFlags';
 import { createTextGenAdvancedStyles } from './textGenAdvancedStyles';
+import { budgetToSliderValue, sliderValueToBudget } from '../../utils/thinkingBudget';
 import { SegmentedRow, BOOL_OPTIONS, type PillOption } from './segmentedRow';
 
 const isAndroid = Platform.OS === 'android';
@@ -218,23 +217,15 @@ export const ModelLoadingModeSelector: React.FC = () => {
 
 // ─── Thinking Budget ─────────────────────────────────────────────────────────
 
-/** llama.rn path only: the cap rides the completion request as thinking_budget_tokens
- *  (shared rule: @offgrid/models thinkingBudgetPayload). LiteRT has no thinking channel. */
+/** 1-token steps: 0 = no thinking, 1..maxTokens-1 = exact cap, top position = Auto. */
 export const ThinkingBudgetSelector: React.FC<{ compact?: boolean }> = ({ compact = false }) => {
   const styles = useThemedStyles(createTextGenAdvancedStyles);
   const { settings, updateSettings } = useAppStore();
   const maxTokens = Math.max(1, settings.maxTokens);
-  const steps = [
-    REASONING_BUDGET_AUTO,
-    ...REASONING_BUDGET_OPTIONS.filter(value => value < maxTokens),
-    maxTokens,
-  ];
   const budget = settings.reasoningBudget ?? REASONING_BUDGET_AUTO;
-  const shownBudget = budget > 0 ? Math.min(budget, maxTokens) : REASONING_BUDGET_AUTO;
-  const selectedStep = steps.indexOf(shownBudget);
 
   useEffect(() => {
-    if (budget > maxTokens) updateSettings({ reasoningBudget: maxTokens });
+    if (budget >= maxTokens) updateSettings({ reasoningBudget: REASONING_BUDGET_AUTO });
   }, [budget, maxTokens, updateSettings]);
   return (
     <View style={[styles.container, compact && styles.compactContainer]}>
@@ -242,16 +233,14 @@ export const ThinkingBudgetSelector: React.FC<{ compact?: boolean }> = ({ compac
         testID="thinking-budget"
         compact={compact}
         label="Thinking Budget"
-        description="Auto uses up to Max Tokens. A cap ends thinking earlier so the answer arrives sooner. Applies when Thinking is on."
-        value={Math.max(0, selectedStep)}
-        min={0} max={steps.length - 1} step={1}
-        formatValue={(step) => steps[Math.round(step)] === REASONING_BUDGET_AUTO
-          ? 'Auto (up to Max Tokens)'
-          : steps[Math.round(step)] % 1024 !== 0 && steps[Math.round(step)] >= 1024
-            ? `${steps[Math.round(step)]} tokens`
-            : reasoningBudgetLabel(steps[Math.round(step)] ?? REASONING_BUDGET_AUTO)}
-        allowValueEditing={false}
-        onChange={(step) => updateSettings({ reasoningBudget: steps[step] })}
+        description="0 = no thinking. 1 to Max Tokens - 1 = exact cap in tokens. Far right = Auto (up to Max Tokens). Tap the value to type an exact number. Applies when Thinking is on."
+        value={budgetToSliderValue(budget, maxTokens)}
+        min={0} max={maxTokens} step={1}
+        formatValue={(v) => {
+          const b = sliderValueToBudget(v, maxTokens);
+          return b === REASONING_BUDGET_AUTO ? 'Auto (up to Max Tokens)' : b === 0 ? 'None (no thinking)' : `${b} tokens`;
+        }}
+        onChange={(v) => updateSettings({ reasoningBudget: sliderValueToBudget(v, maxTokens) })}
       />
     </View>
   );

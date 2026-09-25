@@ -508,7 +508,8 @@ function remoteGenerateOnce(
     maxTokens: settings.maxTokens,
     topP: settings.topP,
     tools,
-    enableThinking: thinkingEnabled,
+    // Budget 0 = no thinking (Thinking Budget slider's left end).
+    enableThinking: thinkingEnabled && settings.reasoningBudget !== 0,
     reasoningBudget: settings.reasoningBudget,
   };
   let _fullContent = '';
