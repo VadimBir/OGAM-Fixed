@@ -498,4 +498,55 @@ class LocalDreamModuleTest {
         assertEquals(0xFF0000FF.toInt(), BitmapFactory.decodeFile(out.absolutePath).getPixel(0, 0))
     }
 
+
+    // ── NPU resolution patches (sub-512 rainbow) ─────────────────────────────
+
+    @Test
+    fun `resolvePatchFile returns null at 512 and when no patch exists`() {
+        val dir = tmp.newFolder("npu1")
+        assertNull(LocalDreamModule.resolvePatchFile(dir, 512, 512))
+        assertNull(LocalDreamModule.resolvePatchFile(dir, 384, 384))
+    }
+
+    @Test
+    fun `resolvePatchFile prefers square W patch then WxH, non-square only WxH`() {
+        val dir = tmp.newFolder("npu2")
+        File(dir, "384x384.patch").writeText("x")
+        assertEquals("384x384.patch", LocalDreamModule.resolvePatchFile(dir, 384, 384)?.name)
+        File(dir, "384.patch").writeText("x")
+        assertEquals("384.patch", LocalDreamModule.resolvePatchFile(dir, 384, 384)?.name)
+        File(dir, "256x512.patch").writeText("x")
+        assertEquals("256x512.patch", LocalDreamModule.resolvePatchFile(dir, 256, 512)?.name)
+        assertNull(LocalDreamModule.resolvePatchFile(dir, 512, 256))
+    }
+
+    @Test
+    fun `availableQnnSizes lists 512 plus patches`() {
+        val dir = tmp.newFolder("npu3")
+        File(dir, "768.patch").writeText("x")
+        File(dir, "256x512.patch").writeText("x")
+        File(dir, "unet.bin").writeText("x")
+        val sizes = LocalDreamModule.availableQnnSizes(dir).toSet()
+        assertEquals(setOf(512 to 512, 768 to 768, 256 to 512), sizes)
+    }
+
+    @Test
+    fun `buildCommand QNN passes --patch only when given, CPU never`() {
+        val npu = tmp.newFolder("npu4")
+        val patch = File(npu, "384.patch").apply { writeText("x") }
+        val exe = makeExecutable()
+        val rt = makeRuntimeDir()
+        val withPatch = LocalDreamModule.buildCommand(exe, npu, rt, isCpu = false, patchFile = patch)
+        assertEquals(patch.absolutePath, withPatch[withPatch.indexOf("--patch") + 1])
+        assertFalse(LocalDreamModule.buildCommand(exe, npu, rt, isCpu = false).contains("--patch"))
+        assertFalse(LocalDreamModule.buildCommand(exe, makeCpuModelDir(), rt, isCpu = true, patchFile = patch).contains("--patch"))
+    }
+
+    @Test
+    fun `snapMnnSize keeps upstream square 128 to 512 on the 64 grid`() {
+        assertEquals(128, LocalDreamModule.snapMnnSize(64))
+        assertEquals(256, LocalDreamModule.snapMnnSize(256))
+        assertEquals(384, LocalDreamModule.snapMnnSize(360))
+        assertEquals(512, LocalDreamModule.snapMnnSize(1024))
+    }
 }

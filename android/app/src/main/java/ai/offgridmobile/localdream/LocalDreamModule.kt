@@ -49,6 +49,7 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
         private const val SERVER_PORT = 18081
 
         private const val MNN_OPENCL_TUNING_MODE = "WIDE"
+        private const val QNN_BASE_SIZE = 512
         private const val EVENT_PROGRESS = "LocalDreamProgress"
         private const val EVENT_ERROR = "LocalDreamError"
 
@@ -88,11 +89,41 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
             return "768"
         }
 
+        /** NPU (QNN) UNets are compiled for ONE latent shape (512x512 → 64x64). Any other size needs a
+         *  zstd resolution patch applied at server start (`--patch`), named like upstream local-dream
+         *  (BackendService): square "<W>.patch" then "<W>x<H>.patch"; non-square "<W>x<H>.patch".
+         *  Without it the core feeds a W/8 x H/8 latent into the fixed 64x64 graph → rainbow. */
+        internal fun resolvePatchFile(modelDir: File, width: Int, height: Int): File? {
+            if (width == QNN_BASE_SIZE && height == QNN_BASE_SIZE) return null
+            val candidates = if (width == height) {
+                listOf(File(modelDir, "$width.patch"), File(modelDir, "${width}x$height.patch"))
+            } else {
+                listOf(File(modelDir, "${width}x$height.patch"))
+            }
+            return candidates.firstOrNull { it.isFile }
+        }
+
+        /** Sizes an NPU model can actually render: 512 plus every patch in its directory. */
+        internal fun availableQnnSizes(modelDir: File): List<Pair<Int, Int>> {
+            val square = Regex("""^(\d+)\.patch$""")
+            val rect = Regex("""^(\d+)x(\d+)\.patch$""")
+            val found = modelDir.listFiles()?.mapNotNull { f ->
+                square.matchEntire(f.name)?.let { m -> m.groupValues[1].toInt().let { it to it } }
+                    ?: rect.matchEntire(f.name)?.let { m -> m.groupValues[1].toInt() to m.groupValues[2].toInt() }
+            } ?: emptyList()
+            return (listOf(QNN_BASE_SIZE to QNN_BASE_SIZE) + found).distinct()
+        }
+
+        /** MNN (CPU) SD1.5: upstream offers square 128..512 on a 64 grid (the UNet downsamples the
+         *  W/8 latent 3x, so W must be a multiple of 64). */
+        internal fun snapMnnSize(px: Int): Int = ((px + 32) / 64 * 64).coerceIn(128, 512)
+
         internal fun buildCommand(
             executable: File,
             modelDir: File,
             runtimeDir: File,
             isCpu: Boolean,
+            patchFile: File? = null,
         ): List<String> {
             val embeddingSize = detectTextEmbeddingSize(modelDir, isCpu)
             Log.d(TAG, "Detected text_embedding_size: $embeddingSize")
@@ -137,6 +168,7 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
                     "--port", SERVER_PORT.toString(),
                     "--text_embedding_size", embeddingSize,
                 ).also { cmd ->
+                    if (patchFile != null) cmd.addAll(listOf("--patch", patchFile.absolutePath))
                     if (hasMnnClip) {
                         cmd.add("--use_cpu_clip")
                     }
@@ -277,6 +309,9 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
     private var serverProcess: Process? = null
     private var currentModelPath: String? = null
     private var currentBackend: String? = null
+    /** Resolved model dir of the running server + the resolution patch it was started with. */
+    private var currentModelDir: File? = null
+    private var currentPatchFile: File? = null
     private var isServerReady = false
     private val coroutineScope = CoroutineScope(Dispatchers.Default + Job())
     private var monitorJob: Job? = null
@@ -493,7 +528,8 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
         modelPath: String,
         modelDir: File,
         backend: String,
-        isCpu: Boolean
+        isCpu: Boolean,
+        patchFile: File? = null,
     ): StartResult {
         val runtimeDir = prepareRuntimeDir()
 
@@ -523,7 +559,7 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
         }
 
         // Build command based on backend
-        val command = buildCommand(executableFile, modelDir, runtimeDir, isCpu)
+        val command = buildCommand(executableFile, modelDir, runtimeDir, isCpu, if (isCpu) null else patchFile)
 
         // Build environment
         val env = buildEnvironment(runtimeDir)
@@ -543,6 +579,8 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
         serverProcess = processBuilder.start()
         currentModelPath = modelPath
         currentBackend = backend
+        currentModelDir = modelDir
+        currentPatchFile = if (isCpu) null else patchFile
         isServerReady = false
 
         // Start monitoring stdout
@@ -660,6 +698,8 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
         serverProcess = null
         currentModelPath = null
         currentBackend = null
+        currentModelDir = null
+        currentPatchFile = null
         isServerReady = false
     }
 
@@ -728,7 +768,43 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
         return (safe / 8) * 8
     }
 
-    private fun buildGenerationBody(params: ReadableMap, forceCpuCompute: Boolean = false): JSONObject = JSONObject().apply {
+    /**
+     * The size the running backend can really render for this request, restarting an NPU server
+     * with the matching resolution patch when needed. NPU without a patch for the size → 512x512
+     * (a wrong-shaped latent into the fixed graph is the rainbow). MNN → upstream's 64 grid.
+     */
+    private suspend fun resolveRenderSize(params: ReadableMap): Pair<Int, Int> {
+        val reqW = clampDimension(if (params.hasKey("width")) params.getInt("width") else 512)
+        val reqH = clampDimension(if (params.hasKey("height")) params.getInt("height") else 512)
+        val dir = currentModelDir
+        val modelPath = currentModelPath
+        if (currentBackend != "qnn" || dir == null || modelPath == null) {
+            val side = snapMnnSize(minOf(reqW, reqH))
+            if (side != reqW || side != reqH) Log.i(TAG, "[IMG-SIZE] mnn ${reqW}x$reqH -> ${side}x$side (square 128..512, 64 grid)")
+            return side to side
+        }
+        val wanted = resolvePatchFile(dir, reqW, reqH)
+        val (w, h) = when {
+            reqW == QNN_BASE_SIZE && reqH == QNN_BASE_SIZE -> QNN_BASE_SIZE to QNN_BASE_SIZE
+            wanted != null -> reqW to reqH
+            else -> {
+                Log.w(TAG, "[IMG-SIZE] npu has no patch for ${reqW}x$reqH (available: ${availableQnnSizes(dir)}) -> 512x512")
+                QNN_BASE_SIZE to QNN_BASE_SIZE
+            }
+        }
+        val patch = if (w == QNN_BASE_SIZE && h == QNN_BASE_SIZE) null else wanted
+        if (patch?.absolutePath != currentPatchFile?.absolutePath) {
+            Log.i(TAG, "[IMG-SIZE] npu restart for ${w}x$h patch=${patch?.name ?: "none"}")
+            stopServer()
+            val r = tryStartServer(modelPath, dir, "qnn", false, patch)
+            if (!r.success) throw java.io.IOException("NPU restart for ${w}x$h failed: ${r.error}")
+        }
+        return w to h
+    }
+
+    private fun buildGenerationBody(
+        params: ReadableMap, forceCpuCompute: Boolean = false, size: Pair<Int, Int>? = null,
+    ): JSONObject = JSONObject().apply {
         put("prompt", params.getString("prompt") ?: "")
         put("negative_prompt", params.getString("negativePrompt") ?: "")
         put("steps", (if (params.hasKey("steps")) params.getInt("steps") else 20).coerceIn(1, 100))
@@ -737,8 +813,8 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
         // Clamp dimensions and steps to sane bounds. A corrupt/NaN value marshalled from JS (seen
         // as a ~1e9 dimension) makes the server allocate gigabytes and crash with std::bad_alloc,
         // so a bad value must never reach it. 64..1024 px, multiple of 8 (SD requirement).
-        val reqWidth = clampDimension(if (params.hasKey("width")) params.getInt("width") else 512)
-        val reqHeight = clampDimension(if (params.hasKey("height")) params.getInt("height") else 512)
+        val reqWidth = size?.first ?: clampDimension(if (params.hasKey("width")) params.getInt("width") else 512)
+        val reqHeight = size?.second ?: clampDimension(if (params.hasKey("height")) params.getInt("height") else 512)
         put("width", reqWidth)
         put("height", reqHeight)
         // The SD core's sampler set is {dpm, euler_a}; default stays dpm when JS sends nothing.
@@ -969,7 +1045,7 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
     private suspend fun runOneGeneration(params: ReadableMap, forceCpuCompute: Boolean): SseParseResult {
         var connection: HttpURLConnection? = null
         try {
-            val body = buildGenerationBody(params, forceCpuCompute)
+            val body = buildGenerationBody(params, forceCpuCompute, resolveRenderSize(params))
             Log.d(TAG, "Starting generation (forceCpuCompute=$forceCpuCompute): ${body.toString().take(200)}...")
 
             connection = openGenerationConnection()
