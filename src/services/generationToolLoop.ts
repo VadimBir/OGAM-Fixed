@@ -1201,6 +1201,43 @@ function buildStreamHandler(
   };
 }
 
+/**
+ * The text model was unloaded while tools ran (image-model load evicted it).
+ * - Only generate_image ran: the image card IS the answer, so end the turn without another model
+ *   round. Reloading would evict the image model again and cost a full text-model load for a
+ *   one-line caption (the explicit image path never calls the text model afterwards either).
+ * - Any other tool ran too: reload the selected text model so the loop can use the results.
+ * Returns an outcome to end the turn, or null to continue the loop.
+ */
+async function handleTextModelEvictedByTools(
+  ctx: ToolLoopContext,
+  state: ToolLoopState,
+  info: { toolNames: string[]; anyOk: boolean; displayResponse: string },
+): Promise<ToolLoopOutcome | null> {
+  if (info.toolNames.every(name => name === 'generate_image')) {
+    logger.log('[ToolLoop] text model evicted by the image model; ending the turn after generate_image');
+    state.streamedContent = '';
+    emitFinalResponse(
+      ctx,
+      state,
+      info.displayResponse.trim() ||
+        (info.anyOk ? 'Here is the image.' : 'Image generation failed. See the card above.'),
+    );
+    return { interrupted: false };
+  }
+  const { activeModelService } = require('./activeModelService'); // NOSONAR (cycle-safe lazy import)
+  const textModelId = activeModelService.selectedTextModelId();
+  logger.log(`[ToolLoop] text model evicted during tools (${info.toolNames.join(',')}); reloading ${textModelId}`);
+  if (textModelId) {
+    try {
+      await activeModelService.loadTextModel(textModelId);
+    } catch (e) {
+      logger.error('[ToolLoop] text model reload after tools failed:', e);
+    }
+  }
+  return null;
+}
+
 function emitFinalResponse(
   ctx: ToolLoopContext,
   state: ToolLoopState,
@@ -1636,6 +1673,8 @@ export async function runToolLoop(
     });
     chatStore.addMessage(ctx.conversationId, assistantMsg);
 
+    const localLlamaBeforeTools = !isUsingRemote(ctx.forceRemote) && llmService.isModelLoaded();
+    const okBefore = state.successfulToolResults.length;
     totalToolCalls += await executeToolCalls(ctx, {
       toolCalls: cappedToolCalls,
       loopMessages,
@@ -1645,6 +1684,18 @@ export async function runToolLoop(
 
     if (ctx.isAborted()) {
       return { interrupted: true };
+    }
+
+    // A tool can evict the text model: generate_image loads the image model through the residency
+    // manager, which unloads the llama model when both do not fit (4 GB devices). The next round
+    // then threw the non-retryable "No model loaded" and the turn died after the image was made.
+    if (localLlamaBeforeTools && !llmService.isModelLoaded()) {
+      const outcome = await handleTextModelEvictedByTools(ctx, state, {
+        toolNames: cappedToolCalls.map(tc => tc.name),
+        anyOk: state.successfulToolResults.length > okBefore,
+        displayResponse,
+      });
+      if (outcome) return outcome;
     }
 
     if (totalToolCalls >= maxToolSteps) {
