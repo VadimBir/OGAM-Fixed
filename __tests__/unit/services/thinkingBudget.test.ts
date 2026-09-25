@@ -31,11 +31,16 @@ describe('Thinking Budget slider scale', () => {
 });
 
 describe('buildThinkingCompletionParams budget mapping', () => {
-  it('0 = no thinking (template off + 0-token cap), N = exact cap, Auto = no cap', () => {
-    expect(buildThinkingCompletionParams(true, false, 0)).toEqual({ enable_thinking: false, reasoning_format: 'none', thinking_budget_tokens: 0 });
+  const hardOff = { enable_thinking: false, reasoning_format: 'none', thinking_budget_tokens: 0, thinking_start_tag: '<think>', thinking_end_tag: '</think>' };
+  it('toggle OFF is a hard off: template switch + 0-token budget sampler with think tags', () => {
+    expect(buildThinkingCompletionParams(false, false, 3)).toEqual(hardOff);
+    expect(buildThinkingCompletionParams(false, false, undefined)).toEqual(hardOff);
+    expect(buildThinkingCompletionParams(false, true)).toMatchObject({ thinking_budget_tokens: 0, thinking_start_tag: '<|channel>thought', thinking_end_tag: '<channel|>' });
+  });
+  it('budget 0 = same hard off; N = exact cap; Auto = no cap', () => {
+    expect(buildThinkingCompletionParams(true, false, 0)).toEqual(hardOff);
     expect(buildThinkingCompletionParams(true, false, 3)).toMatchObject({ enable_thinking: true, thinking_budget_tokens: 3 });
     expect(buildThinkingCompletionParams(true, false, -1)).not.toHaveProperty('thinking_budget_tokens');
-    expect(buildThinkingCompletionParams(false, false, 3)).toEqual({ enable_thinking: false, reasoning_format: 'none' });
   });
 });
 

@@ -36,6 +36,13 @@ else
 fi
 [ -f "$APK" ] || { echo "release: APK not found at $APK"; exit 1; }
 
+# Reclaim disk BEFORE signing/splitting: app/build/intermediates (~3 GB, incl. ~1.5 GB unstripped
+# native libs) is dead once the APK exists; a near-full disk made apksigner fail (v24 run).
+# Old chat-part dirs (gitignored) are dropped too; only this version's are written below.
+rm -rf "$ROOT/android/app/build/intermediates" "$ROOT/android/app/build/tmp" 2>/dev/null || true
+find "$ROOT/dist/chat" -mindepth 1 -maxdepth 1 -type d ! -name "$VER" -exec rm -rf {} + 2>/dev/null || true
+echo "   free: $(df -h "$ROOT" | awk 'NR==2{print $4}')"
+
 echo "== [2/6] sign v2+v3 =="
 "$SIGNER" sign --ks "$KS" --ks-pass pass:android --key-pass pass:android --ks-key-alias androiddebugkey \
   --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true "$APK" >/dev/null 2>&1
@@ -50,11 +57,6 @@ echo "   sha256=$SHA"
 echo "== [4b] round-trip verify =="
 "$ROOT/scripts/apkpack.sh" merge "apk/$VER" "/tmp/${VER}-rt.apk" 2>&1 | grep -iE "OK|MISMATCH" || true
 rm -f "/tmp/${VER}-rt.apk"
-
-# Reclaim disk before writing more parts: the ~1.5 GB unstripped native libs under
-# build/intermediates are no longer needed once the APK exists, and stale chat dirs pile up.
-rm -rf "$ROOT/android/app/build/intermediates/merged_native_libs" \
-       "$ROOT/android/app/build/intermediates/stripped_native_libs" 2>/dev/null || true
 
 echo "== [5/6] chat parts -> dist/chat/$VER (28 MiB) =="
 CHAT="$ROOT/dist/chat/$VER"; rm -rf "$CHAT"; mkdir -p "$CHAT"

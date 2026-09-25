@@ -147,10 +147,13 @@ describe('buildThinkingCompletionParams', () => {
     });
   });
 
-  it('uses none format when thinking disabled', () => {
+  it('thinking disabled is a hard off: none format + 0-token budget sampler with think tags', () => {
     expect(buildThinkingCompletionParams(false)).toEqual({
       enable_thinking: false,
       reasoning_format: 'none',
+      thinking_budget_tokens: 0,
+      thinking_start_tag: '<think>',
+      thinking_end_tag: '</think>',
     });
   });
 });

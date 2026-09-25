@@ -310,11 +310,31 @@ export function supportsNativeThinking(context: LlamaContext | null): boolean {
     return false;
   }
 }
-export function buildThinkingCompletionParams(enableThinking: boolean, isGemma4: boolean = false, reasoningBudget?: number): { enable_thinking: boolean; reasoning_format: 'none' | 'auto' | 'deepseek'; thinking_budget_tokens?: number } {
-  if (!enableThinking) return { enable_thinking: false, reasoning_format: 'none' };
-  // Budget 0 = "no thinking": template switch off, plus a 0-token cap that force-closes the block
-  // for models that think regardless of enable_thinking (llama.rn accepts thinking_budget_tokens >= 0).
-  if (reasoningBudget === 0) return { enable_thinking: false, reasoning_format: 'none', thinking_budget_tokens: 0 };
+export interface ThinkingCompletionParams {
+  enable_thinking: boolean;
+  reasoning_format: 'none' | 'auto' | 'deepseek';
+  thinking_budget_tokens?: number;
+  thinking_start_tag?: string;
+  thinking_end_tag?: string;
+}
+/** Thinking OFF (toggle off, caller-forced off, or budget 0). enable_thinking:false is only a
+ *  template hint: templates that force the block open (R1 distills, QwQ, "-Thinking" variants) or
+ *  ignore the kwarg, and the non-jinja path, still think. thinking_budget_tokens:0 arms llama.cpp's
+ *  reasoning-budget sampler, which forces the end tag as soon as the block opens (immediately when
+ *  the template forced it open). The sampler needs the tags: llama.rn copies the jinja result's
+ *  tags over these when the template reports them; these defaults cover templates that don't. */
+function thinkingOffParams(isGemma4: boolean): ThinkingCompletionParams {
+  return {
+    enable_thinking: false,
+    reasoning_format: 'none',
+    thinking_budget_tokens: 0,
+    thinking_start_tag: isGemma4 ? '<|channel>thought' : '<think>',
+    thinking_end_tag: isGemma4 ? '<channel|>' : '</think>',
+  };
+}
+export function buildThinkingCompletionParams(enableThinking: boolean, isGemma4: boolean = false, reasoningBudget?: number): ThinkingCompletionParams {
+  // Budget 0 = "no thinking" (Thinking Budget slider's left end) = same hard-off as the toggle.
+  if (!enableThinking || reasoningBudget === 0) return thinkingOffParams(isGemma4);
   // Native-first (parse-once at the runtime boundary): Gemma 4 uses its own
   // <|channel>thought\n...<channel|> format, not DeepSeek's <think> tags. reasoning_format:'auto'
   // lets llama.cpp detect the model's chat_format and parse reasoning + tool calls NATIVELY —
