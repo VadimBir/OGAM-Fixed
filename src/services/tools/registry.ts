@@ -198,6 +198,42 @@ export function effectiveToolDescription(tool: ToolDefinition): string {
   return (o?.description && o.description.trim()) ? o.description : tool.description;
 }
 
+const isBlockMode = (r: RepeatSettings | undefined): boolean => r?.repeatMode === 'block';
+
+/** Tool description as written INSIDE the tool definition (schema / text list): 'content' mode
+ *  repeats it there; 'block' mode keeps it single and repeats standalone system blocks instead. */
+export function toolDefinitionDescription(tool: ToolDefinition): string {
+  const o = skillOverrides[tool.id];
+  const desc = effectiveToolDescription(tool);
+  return isBlockMode(o) ? desc : repeatContent(desc, o?.repeat);
+}
+
+/** One standalone system block for a built-in tool in 'block' mode. */
+export function toolInstructionBlock(name: string, desc: string): string {
+  return `<tool name="${name.replaceAll('"', "'")}">\n${desc}\n</tool>`;
+}
+
+/**
+ * 'block'-mode tools: N standalone `<tool>` blocks in the SYSTEM prompt, on EVERY engine (native
+ * tool calling included). Native engines only receive the JSON schema, and a schema cannot hold a
+ * function twice, so this is the only place a repeated whole block can exist. Empty when no enabled
+ * tool uses block mode.
+ */
+export function buildToolBlockPromptHint(enabledToolIds: readonly string[]): string {
+  const blocks = AVAILABLE_TOOLS
+    .filter(t => enabledToolIds.includes(t.id) && isBlockMode(skillOverrides[t.id]))
+    .map(t => {
+      const n = clampRepeat(skillOverrides[t.id]?.repeat);
+      const block = toolInstructionBlock(t.name, effectiveToolDescription(t));
+      return Array.from({ length: n }, () => block).join('\n');
+    });
+  if (blocks.length === 0) return '';
+  return (
+    '\n\n<tool_instructions>\nStanding SYSTEM instructions for how to use these tools. Follow them ' +
+    `every time the tool is relevant.\n${blocks.join('\n')}\n</tool_instructions>`
+  );
+}
+
 export function getToolsAsOpenAISchema(enabledToolIds: readonly string[]) {
   return AVAILABLE_TOOLS
     .filter(tool => enabledToolIds.includes(tool.id))
@@ -205,8 +241,9 @@ export function getToolsAsOpenAISchema(enabledToolIds: readonly string[]) {
       type: 'function' as const,
       function: {
         name: tool.name,
-        // Multiplier: duplicate functions are invalid in a tool schema, so always 'content' here.
-        description: repeatContent(effectiveToolDescription(tool), skillOverrides[tool.id]?.repeat),
+        // 'content' repeats the text here; 'block' keeps it single (duplicate functions are invalid)
+        // and repeats standalone system blocks via buildToolBlockPromptHint.
+        description: toolDefinitionDescription(tool),
         parameters: {
           type: 'object',
           properties: Object.fromEntries(
@@ -241,7 +278,7 @@ export function buildToolSystemPromptHint(enabledToolIds: string[]): string {
   const enabledTools = AVAILABLE_TOOLS.filter(t => enabledToolIds.includes(t.id));
   if (enabledTools.length === 0) return '';
   const toolList = enabledTools
-    .map(t => applyRepeat(effectiveToolDescription(t), d => `- ${t.name}: ${d}`, skillOverrides[t.id]))
+    .map(t => `- ${t.name}: ${toolDefinitionDescription(t)}`)
     .join('\n');
   return `\n\nTools available:\n${toolList}\nUse these tools proactively and precisely — call the right tool at the right moment rather than guessing or saying you cannot help.`;
 }

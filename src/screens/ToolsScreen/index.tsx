@@ -12,6 +12,7 @@ import {
   applyRepeat,
   clampRepeat,
   repeatContent,
+  toolInstructionBlock,
   type RepeatMode,
 } from '../../services/tools/registry';
 import { useAppStore, useSkillStore } from '../../stores';
@@ -87,8 +88,13 @@ export const ToolsScreen: React.FC = () => {
   const schemaPreview = (toolId: string, desc: string): string => {
     const schema = getToolsAsOpenAISchema([toolId])[0];
     if (!schema) return '{}';
-    const withDraft = { ...schema, function: { ...schema.function, description: repeatContent(desc, draftRepeat) } };
-    return JSON.stringify(withDraft, null, 2);
+    const inSchema = draftMode === 'block' ? desc : repeatContent(desc, draftRepeat);
+    const withDraft = { ...schema, function: { ...schema.function, description: inSchema } };
+    const json = JSON.stringify(withDraft, null, 2);
+    if (draftMode !== 'block') return json;
+    const block = toolInstructionBlock(schema.function.name, desc);
+    const blocks = Array.from({ length: clampRepeat(draftRepeat) }, () => block).join('\n');
+    return `${json}\n\n+ system prompt (every engine):\n<tool_instructions>\n${blocks}\n</tool_instructions>`;
   };
 
   const openCustomEditor = (id: string | 'new') => {
@@ -414,7 +420,7 @@ const RepeatControl: React.FC<{
       <Text style={styles.editorLabel}>
         {`Sends this instruction ${count}× (max ${MAX_SKILL_REPEAT}). `}
         {isTool
-          ? 'The tool JSON always repeats the text; "whole block" applies to the text tool list used by models without native tool calling.'
+          ? 'Text: repeats the description inside the tool definition. Whole block: definition once + N separate <tool> blocks in the system prompt (every engine).'
           : 'Each copy costs context tokens.'}
       </Text>
     </View>

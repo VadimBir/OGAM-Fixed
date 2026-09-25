@@ -18,6 +18,7 @@ import ai.offgridmobile.downloads.SyncDownloadsPackage
 import ai.offgridmobile.sync.BlobChannelPackage
 import ai.offgridmobile.screenshot.SyncScreenshotPackage
 import ai.offgridmobile.sync.MeshResidencyPackage
+import ai.offgridmobile.keepalive.ModelKeepAlivePackage
 
 class MainApplication : Application(), ReactApplication {
 
@@ -36,6 +37,7 @@ class MainApplication : Application(), ReactApplication {
           add(SyncClipboardPackage())
           add(SyncDirectorySourcePackage())
           add(MeshResidencyPackage())
+          add(ModelKeepAlivePackage())
           add(SyncScreenshotPackage())
           add(SyncDownloadsPackage())
           add(BlobChannelPackage())

@@ -2,6 +2,7 @@ import {
   getToolsAsOpenAISchema,
   buildToolSystemPromptHint,
   buildCustomSkillPromptHint,
+  buildToolBlockPromptHint,
   setSkillOverrides,
   clampRepeat,
 } from '../../../../src/services/tools/registry';
@@ -72,18 +73,29 @@ describe('skill-card overrides (editable tool text the model receives)', () => {
     expect(hint.match(/<skills>/g)).toHaveLength(1);
   });
 
-  it('tool multiplier: schema description always content-repeated (no duplicate functions)', () => {
-    setSkillOverrides({ web_search: { description: 'S', repeat: 2, repeatMode: 'block' } }, []);
+  it("tool 'content': description repeated inside the schema + text list; no system blocks", () => {
+    setSkillOverrides({ web_search: { description: 'S', repeat: 2 } }, []);
     const schema = getToolsAsOpenAISchema(['web_search']);
     expect(schema).toHaveLength(1);
     expect(schema[0].function.description).toBe('S\nS');
+    expect(buildToolSystemPromptHint(['web_search'])).toContain('- web_search: S\nS\n');
+    expect(buildToolBlockPromptHint(['web_search'])).toBe('');
   });
 
-  it('tool multiplier in the text hint: content vs block', () => {
-    setSkillOverrides({ web_search: { description: 'S', repeat: 2 } }, []);
-    expect(buildToolSystemPromptHint(['web_search'])).toContain('- web_search: S\nS\n');
+  it("tool 'block': schema/text list once + N standalone <tool> system blocks (every engine)", () => {
     setSkillOverrides({ web_search: { description: 'S', repeat: 2, repeatMode: 'block' } }, []);
-    expect(buildToolSystemPromptHint(['web_search'])).toContain('- web_search: S\n- web_search: S\n');
+    const schema = getToolsAsOpenAISchema(['web_search']);
+    expect(schema).toHaveLength(1); // never a duplicate function
+    expect(schema[0].function.description).toBe('S');
+    expect(buildToolSystemPromptHint(['web_search'])).toContain('- web_search: S\nUse these tools');
+    const hint = buildToolBlockPromptHint(['web_search']);
+    expect(hint).toContain('<tool_instructions>');
+    expect(hint.match(/<tool name="web_search">\nS\n<\/tool>/g)).toHaveLength(2);
+  });
+
+  it('block hint only for ENABLED tools in block mode', () => {
+    setSkillOverrides({ web_search: { description: 'S', repeat: 3, repeatMode: 'block' } }, []);
+    expect(buildToolBlockPromptHint([])).toBe('');
   });
 
   it('clampRepeat bounds the multiplier to 1..5', () => {

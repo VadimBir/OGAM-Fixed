@@ -193,14 +193,26 @@ export const ModelLoadingModeSelector: React.FC = () => {
   const current: ModelLoadingMode =
     settings.modelLoadingMode ?? (settings.aggressiveModelLoading ? 'aggressive' : 'balanced');
   return (
-    <SegmentedRow<ModelLoadingMode>
-      label="Model Loading"
-      description="Lean keeps ONE model in memory at a time. Balanced keeps models loaded together when they fit and swaps when they do not. Aggressive commits a larger share of RAM so bigger models load. You can always Load Anyway if a model is refused."
-      options={MODE_OPTIONS}
-      current={current}
-      onSelect={(id) => updateSettings({ modelLoadingMode: id })}
-      testIdFor={(id) => `model-loading-mode-${id}-button`}
-    />
+    <>
+      <SegmentedRow<ModelLoadingMode>
+        label="Model Loading"
+        description="Lean keeps ONE model in memory at a time. Balanced keeps models loaded together when they fit and swaps when they do not. Aggressive commits a larger share of RAM so bigger models load. You can always Load Anyway if a model is refused."
+        options={MODE_OPTIONS}
+        current={current}
+        onSelect={(id) => updateSettings({ modelLoadingMode: id })}
+        testIdFor={(id) => `model-loading-mode-${id}-button`}
+      />
+      {Platform.OS === 'android' && (
+        <SegmentedRow<'off' | 'on'>
+          label="Keep Model Alive"
+          description="While a model is loaded, runs a silent foreground service (ongoing notification) so Android kills background apps before this one. It cannot stop a kill when the whole device is out of memory."
+          options={BOOL_OPTIONS}
+          current={(settings.keepModelsAlive ?? true) ? 'on' : 'off'}
+          onSelect={(id) => updateSettings({ keepModelsAlive: id === 'on' })}
+          testIdFor={(id) => `keep-model-alive-${id}-button`}
+        />
+      )}
+    </>
   );
 };
 

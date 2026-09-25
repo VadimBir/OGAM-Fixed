@@ -2,8 +2,11 @@
 # release.sh — ONE command: build → sign(v2+v3) → verify → split (apk/vN) →
 # round-trip check → chat parts (28 MiB) → refresh central bigfile APK.
 #
-# Usage:  scripts/release.sh <vN>        e.g. scripts/release.sh v7
-#         scripts/release.sh v7 --no-build   (reuse the already-built APK)
+# Usage:  scripts/release.sh <vN|next>        e.g. scripts/release.sh v7 | scripts/release.sh next
+#         scripts/release.sh next --no-build   (reuse the already-built APK)
+#         COMMIT_MSG="..." scripts/release.sh next   → also git add -A, commit, push (same call)
+#
+# `next` = highest existing apk/vN + 1. An existing apk/<vN> is NEVER overwritten.
 #
 # Output:
 #   apk/<vN>/            45 MiB repo parts + SHA256.txt + (write your own README)
@@ -12,8 +15,14 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VER="${1:?usage: scripts/release.sh <vN> [--no-build]}"
+VER="${1:?usage: scripts/release.sh <vN|next> [--no-build]}"
 NOBUILD="${2:-}"
+if [ "$VER" = "next" ]; then
+  last=$(ls -d "$ROOT"/apk/v* 2>/dev/null | sed 's#.*/v##' | grep -E '^[0-9]+$' | sort -n | tail -1)
+  VER="v$(( ${last:-0} + 1 ))"
+fi
+[ -e "$ROOT/apk/$VER" ] && { echo "release: apk/$VER already exists — refusing to overwrite (use next)"; exit 1; }
+cd "$ROOT"
 APK="$ROOT/android/app/build/outputs/apk/release/app-release.apk"
 SIGNER="$(ls "${ANDROID_HOME:-/opt/android-sdk}"/build-tools/*/apksigner 2>/dev/null | sort -V | tail -1)"
 KS="$ROOT/android/app/debug.keystore"
@@ -57,4 +66,21 @@ echo "== [6/6] refresh canonical bigfile APK =="
 cp "$APK" "$ROOT/dist/OGAM-release.apk"
 "$ROOT/scripts/bigfile.sh" split dist/OGAM-release.apk >/dev/null 2>&1 || true
 
+# Free the session disk allowance: the remaining intermediates (~3 GB) are rebuilt on demand.
+rm -rf "$ROOT/android/app/build/intermediates" 2>/dev/null || true
+
 echo "release: $VER done. Repo parts: apk/$VER  Chat parts: dist/chat/$VER  sha256=$SHA"
+
+if [ -n "${COMMIT_MSG:-}" ]; then
+  BRANCH="${BRANCH:-$(git rev-parse --abbrev-ref HEAD)}"
+  echo "== [7/7] commit + push ($BRANCH) =="
+  git add -A
+  git commit -q -m "$COMMIT_MSG" -m "APK: apk/$VER sha256 $SHA"
+  for d in 0 2 4 8 16; do
+    sleep "$d"
+    if git push -u origin "$BRANCH"; then
+      echo "release: pushed $(git rev-parse --short HEAD) to $BRANCH"; exit 0
+    fi
+  done
+  echo "release: push failed after retries"; exit 1
+fi

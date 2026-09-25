@@ -27,6 +27,7 @@ import { hydrateDownloadStore } from './src/services/downloadHydration';
 import { initActiveDownloadPersistence } from './src/services/activeDownloadPersistence';
 import { restoreQueuedDownloads } from './src/services/restoreQueuedDownloads';
 import { startLoadPolicySync } from './src/services/loadPolicySync';
+import { startModelKeepAliveSync } from './src/services/modelKeepAlive';
 import { startNetworkReconnectWatcher, stopNetworkReconnectWatcher } from './src/services/networkReconnect';
 import { registerCoreDownloadProviders } from './src/services/modelDownloadService/registerProviders';
 import { useDownloadListeners } from './src/hooks/useDownloads';
@@ -279,6 +280,8 @@ function App() {
       // manager (single owner of the runtime load policy) now that settings are
       // hydrated, and keep it in sync for the app's lifetime.
       startLoadPolicySync();
+      // Android: foreground-service priority while a model is resident (lmkd reclaims others first).
+      startModelKeepAliveSync();
 
       // Download-state recovery runs OFF the boot gate (fire-and-forget, order preserved
       // inside recoverDownloadState below): with many WorkManager downloads mid-flight the

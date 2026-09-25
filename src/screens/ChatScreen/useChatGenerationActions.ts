@@ -12,6 +12,7 @@ import {
   ImageGenerationState,
   buildToolSystemPromptHint,
   buildCustomSkillPromptHint,
+  buildToolBlockPromptHint,
   contextCompactionService,
   ragService,
   retrievalService,
@@ -766,7 +767,7 @@ export async function startGenerationFn(
   // so it is appended here unconditionally — separate from the tool-list text hint, which is only
   // for engines lacking native tool calling. (Previously both rode buildToolSystemPromptHint and
   // native/remote engines never saw enabled custom skills.)
-  const promptWithSkills = `${basePrompt}${buildCustomSkillPromptHint()}`;
+  const promptWithSkills = `${basePrompt}${buildCustomSkillPromptHint()}${buildToolBlockPromptHint(activeTools)}`;
   const systemPrompt = applyGemma4ThinkToken(
     useTextHint
       ? `${promptWithSkills}${buildToolSystemPromptHint(activeTools)}`
@@ -1227,7 +1228,7 @@ export async function regenerateResponseFn(
   // MCP/extension hints come solely from augmentSystemPromptForTools in the tool loop
   // (see the send path above) — adding them here too would double-inject.
   // Custom-skill guidance is prompt-only and injected on every engine (see send path rationale).
-  const promptWithSkills = `${basePrompt}${buildCustomSkillPromptHint()}`;
+  const promptWithSkills = `${basePrompt}${buildCustomSkillPromptHint()}${buildToolBlockPromptHint(activeTools)}`;
   const systemPrompt = applyGemma4ThinkToken(
     useTextHint
       ? `${promptWithSkills}${buildToolSystemPromptHint(activeTools)}`

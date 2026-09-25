@@ -50,6 +50,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <!-- Personal Mesh keeps a live local-network connection to paired devices. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <!-- Keeps the process at foreground-service priority while a model is resident in RAM. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <!-- Android 13+ needs this to SHOW the ongoing download notification (requested at runtime). -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
@@ -139,6 +141,18 @@
           android:enabled="true"
           android:exported="false"
           android:foregroundServiceType="connectedDevice" />
+
+      <!-- Loaded-model residency: raises the process from cached to perceptible oom_adj while a
+           text/image model is in RAM so Android's low-memory killer reclaims other apps first. -->
+      <service
+          android:name="ai.offgridmobile.keepalive.ModelKeepAliveService"
+          android:enabled="true"
+          android:exported="false"
+          android:foregroundServiceType="specialUse">
+          <property
+              android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+              android:value="Keeps a user-loaded on-device AI model resident in memory between uses" />
+      </service>
 
     </application>
 </manifest>

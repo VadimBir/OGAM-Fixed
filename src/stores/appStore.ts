@@ -111,6 +111,8 @@ export type AppSettings = {
    *  'conservative' = one model at a time; 'balanced' = co-reside within budget;
    *  'aggressive' = co-reside with a larger RAM commitment. */
   modelLoadingMode?: 'conservative' | 'balanced' | 'aggressive';
+  /** Android: run a foreground service while a model is loaded so the OS kills other apps first. */
+  keepModelsAlive?: boolean;
   cacheType: CacheType;
   showGenerationDetails: boolean;
   /**
@@ -289,6 +291,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   flashAttn: true,
   aggressiveModelLoading: false,
   modelLoadingMode: 'balanced',
+  keepModelsAlive: true,
   cacheType: 'q8_0' as CacheType,
   showGenerationDetails: false,
   // Ends on silence by default: a turn that waits for a tap is the thing people ask us to fix.
