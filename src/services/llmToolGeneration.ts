@@ -191,7 +191,7 @@ export async function generateWithToolsImpl(
             typeof formatted === 'string' ? formatted : formatted?.prompt ?? JSON.stringify(formatted);
           logger.log(
             `[WIRE-TEMPLATED-PROMPT] len=${promptText.length} ` +
-              `systemSurvived=${/<character|user_persona|Tools available|Additional skills|<caveats|character_caveats/i.test(promptText)}\n` +
+              `systemSurvived=${/<character|user_persona|Tools available|<skills>|<caveats|character_caveats/i.test(promptText)}\n` +
               promptText.slice(0, 4000),
           );
         } else {

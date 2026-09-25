@@ -4,6 +4,7 @@ import { generateId } from '../utils/generateId';
 import { createHydrationGatedStorage } from '../utils/hydrationGatedStorage';
 import {
   AVAILABLE_TOOLS,
+  clampRepeat,
   setSkillOverrides,
   type SkillOverride,
   type CustomSkill,
@@ -79,6 +80,16 @@ export const useSkillStore = create<SkillState>()(
           if (patch.displayName !== undefined) {
             if (patch.displayName.trim()) next.displayName = patch.displayName;
             else delete next.displayName;
+          }
+          // Multiplier: 1× 'content' is the default, so it is stored as absent.
+          if (patch.repeat !== undefined) {
+            const n = clampRepeat(patch.repeat);
+            if (n > 1) next.repeat = n;
+            else delete next.repeat;
+          }
+          if (patch.repeatMode !== undefined) {
+            if (patch.repeatMode === 'block') next.repeatMode = 'block';
+            else delete next.repeatMode;
           }
           const overrides = { ...state.overrides };
           if (Object.keys(next).length === 0) delete overrides[toolId];

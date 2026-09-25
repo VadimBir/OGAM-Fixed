@@ -1,7 +1,9 @@
 import {
   getToolsAsOpenAISchema,
   buildToolSystemPromptHint,
+  buildCustomSkillPromptHint,
   setSkillOverrides,
+  clampRepeat,
 } from '../../../../src/services/tools/registry';
 
 describe('skill-card overrides (editable tool text the model receives)', () => {
@@ -33,9 +35,60 @@ describe('skill-card overrides (editable tool text the model receives)', () => {
       { id: 's1', name: 'Roleplay', description: 'always narrate in third person', enabled: true },
       { id: 's2', name: 'Secret', description: 'should not appear', enabled: false },
     ]);
-    const hint = buildToolSystemPromptHint(['web_search']);
-    expect(hint).toContain('Roleplay: always narrate in third person');
+    const hint = buildCustomSkillPromptHint();
+    expect(hint).toContain('<skill name="Roleplay">\nalways narrate in third person\n</skill>');
     expect(hint).not.toContain('should not appear');
+    // Custom skills are prompt-only: never in the tool-list hint.
+    expect(buildToolSystemPromptHint(['web_search'])).not.toContain('Roleplay');
+  });
+
+  it('custom skills are framed as standing SYSTEM instructions inside <skills>', () => {
+    setSkillOverrides({}, [{ id: 's1', name: 'A "q"', description: 'do x', enabled: true }]);
+    const hint = buildCustomSkillPromptHint();
+    expect(hint.startsWith('\n\n<skills>\n')).toBe(true);
+    expect(hint).toContain('standing SYSTEM instructions');
+    expect(hint).toContain('<skill name="A \'q\'">');
+    expect(hint.endsWith('</skills>')).toBe(true);
+  });
+
+  it('no enabled custom skill → empty hint', () => {
+    setSkillOverrides({}, [{ id: 's1', name: 'x', description: 'y', enabled: false }]);
+    expect(buildCustomSkillPromptHint()).toBe('');
+  });
+
+  it("multiplier 'content' repeats the text inside ONE <skill> block", () => {
+    setSkillOverrides({}, [{ id: 's1', name: 'R', description: 'obey', enabled: true, repeat: 3 }]);
+    const hint = buildCustomSkillPromptHint();
+    expect(hint.match(/<skill name=/g)).toHaveLength(1);
+    expect(hint).toContain('<skill name="R">\nobey\nobey\nobey\n</skill>');
+  });
+
+  it("multiplier 'block' repeats the whole <skill> block", () => {
+    setSkillOverrides({}, [
+      { id: 's1', name: 'R', description: 'obey', enabled: true, repeat: 2, repeatMode: 'block' },
+    ]);
+    const hint = buildCustomSkillPromptHint();
+    expect(hint.match(/<skill name="R">\nobey\n<\/skill>/g)).toHaveLength(2);
+    expect(hint.match(/<skills>/g)).toHaveLength(1);
+  });
+
+  it('tool multiplier: schema description always content-repeated (no duplicate functions)', () => {
+    setSkillOverrides({ web_search: { description: 'S', repeat: 2, repeatMode: 'block' } }, []);
+    const schema = getToolsAsOpenAISchema(['web_search']);
+    expect(schema).toHaveLength(1);
+    expect(schema[0].function.description).toBe('S\nS');
+  });
+
+  it('tool multiplier in the text hint: content vs block', () => {
+    setSkillOverrides({ web_search: { description: 'S', repeat: 2 } }, []);
+    expect(buildToolSystemPromptHint(['web_search'])).toContain('- web_search: S\nS\n');
+    setSkillOverrides({ web_search: { description: 'S', repeat: 2, repeatMode: 'block' } }, []);
+    expect(buildToolSystemPromptHint(['web_search'])).toContain('- web_search: S\n- web_search: S\n');
+  });
+
+  it('clampRepeat bounds the multiplier to 1..5', () => {
+    expect([clampRepeat(undefined), clampRepeat(0), clampRepeat(2.4), clampRepeat(99), clampRepeat(NaN)])
+      .toEqual([1, 1, 2, 5, 1]);
   });
 
   it('custom skills never leak into the callable tool schema', () => {

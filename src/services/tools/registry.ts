@@ -124,20 +124,60 @@ export const AVAILABLE_TOOLS: ToolDefinition[] = [
  * in the OpenAI tool schema (the model must not call a tool that cannot execute) — they only
  * contribute their text to the system-prompt hint.
  */
-export interface SkillOverride {
+/**
+ * Emphasis multiplier for a card's model-facing text (small models drop instructions they see once).
+ *  - 'content': ONE block/entry whose instruction text is written N times inside it.
+ *  - 'block':   the whole block/entry is emitted N times back to back.
+ * Native tool schemas cannot carry duplicate functions, so a tool's JSON `description` always uses
+ * 'content'; 'block' applies to the tool's text-hint entry (engines without native tool calling).
+ */
+export type RepeatMode = 'block' | 'content';
+export const MAX_SKILL_REPEAT = 5;
+
+export interface RepeatSettings {
+  /** 1 (default) = emitted once; clamped to 1..MAX_SKILL_REPEAT. */
+  repeat?: number;
+  /** Default 'content'. */
+  repeatMode?: RepeatMode;
+}
+
+export interface SkillOverride extends RepeatSettings {
   /** Replaces the model-facing tool description (the "how to use this tool" text). */
   description?: string;
   /** Replaces the human-facing display name. */
   displayName?: string;
 }
 
-export interface CustomSkill {
+export interface CustomSkill extends RepeatSettings {
   id: string;
   /** Short label for the guidance block. */
   name: string;
   /** Free-form instruction injected verbatim into the system-prompt hint. */
   description: string;
   enabled: boolean;
+}
+
+export function clampRepeat(n?: number): number {
+  const v = Math.round(Number(n));
+  return Number.isFinite(v) ? Math.min(MAX_SKILL_REPEAT, Math.max(1, v)) : 1;
+}
+
+/** `text` written `n` times, newline-separated (the 'content' multiplier). */
+export function repeatContent(text: string, n?: number): string {
+  return Array.from({ length: clampRepeat(n) }, () => text).join('\n');
+}
+
+/** Emit a block per the multiplier: 'content' repeats the body inside one block, 'block' repeats the block. */
+export function applyRepeat(
+  body: string,
+  wrap: (body: string) => string,
+  r: RepeatSettings | undefined,
+): string {
+  const n = clampRepeat(r?.repeat);
+  if ((r?.repeatMode ?? 'content') === 'block') {
+    return Array.from({ length: n }, () => wrap(body)).join('\n');
+  }
+  return wrap(repeatContent(body, n));
 }
 
 let skillOverrides: Record<string, SkillOverride> = {};
@@ -165,7 +205,8 @@ export function getToolsAsOpenAISchema(enabledToolIds: readonly string[]) {
       type: 'function' as const,
       function: {
         name: tool.name,
-        description: effectiveToolDescription(tool),
+        // Multiplier: duplicate functions are invalid in a tool schema, so always 'content' here.
+        description: repeatContent(effectiveToolDescription(tool), skillOverrides[tool.id]?.repeat),
         parameters: {
           type: 'object',
           properties: Object.fromEntries(
@@ -200,7 +241,7 @@ export function buildToolSystemPromptHint(enabledToolIds: string[]): string {
   const enabledTools = AVAILABLE_TOOLS.filter(t => enabledToolIds.includes(t.id));
   if (enabledTools.length === 0) return '';
   const toolList = enabledTools
-    .map(t => `- ${t.name}: ${effectiveToolDescription(t)}`)
+    .map(t => applyRepeat(effectiveToolDescription(t), d => `- ${t.name}: ${d}`, skillOverrides[t.id]))
     .join('\n');
   return `\n\nTools available:\n${toolList}\nUse these tools proactively and precisely — call the right tool at the right moment rather than guessing or saying you cannot help.`;
 }
@@ -208,10 +249,23 @@ export function buildToolSystemPromptHint(enabledToolIds: string[]): string {
 /**
  * Text of the ENABLED custom skills (prompt-only guidance the user authored in Tools & Skills).
  * Injected on EVERY engine so a native-tool model still receives the guidance. Empty when none.
+ *
+ * Framed as binding SYSTEM directives in the same tag style as `<character>` / `<user_persona>`
+ * (personaComposition), so the model reads them as standing instructions rather than as reference
+ * context or chat content. Each skill's multiplier applies to its own `<skill>` block.
  */
 export function buildCustomSkillPromptHint(): string {
   const activeCustom = customSkills.filter(s => s.enabled && s.description.trim());
   if (activeCustom.length === 0) return '';
-  const skillList = activeCustom.map(s => `- ${s.name}: ${s.description}`).join('\n');
-  return `\n\nAdditional skills:\n${skillList}`;
+  const blocks = activeCustom
+    .map(s => {
+      const name = s.name.trim().replaceAll('"', "'");
+      return applyRepeat(s.description.trim(), d => `<skill name="${name}">\n${d}\n</skill>`, s);
+    })
+    .join('\n');
+  return (
+    '\n\n<skills>\nThe user configured the skills below as standing SYSTEM instructions. They are not ' +
+    'conversation content. Apply every skill in every reply, together with the instructions above.\n' +
+    `${blocks}\n</skills>`
+  );
 }

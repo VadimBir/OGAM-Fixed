@@ -7,6 +7,13 @@ import IconMC from 'react-native-vector-icons/MaterialCommunityIcons';
 import { useTheme, useThemedStyles } from '../../theme';
 import { FONTS, TYPOGRAPHY, SPACING } from '../../constants';
 import { AVAILABLE_TOOLS, getToolsAsOpenAISchema } from '../../services/tools';
+import {
+  MAX_SKILL_REPEAT,
+  applyRepeat,
+  clampRepeat,
+  repeatContent,
+  type RepeatMode,
+} from '../../services/tools/registry';
 import { useAppStore, useSkillStore } from '../../stores';
 import { useOpenProTools } from '../../hooks/useOpenProTools';
 import type { ThemeColors, ThemeShadows } from '../../theme';
@@ -46,10 +53,14 @@ export const ToolsScreen: React.FC = () => {
   // Which built-in tool's description is being edited, and the working draft.
   const [editingToolId, setEditingToolId] = useState<string | null>(null);
   const [draftDesc, setDraftDesc] = useState('');
+  const [draftRepeat, setDraftRepeat] = useState(1);
+  const [draftMode, setDraftMode] = useState<RepeatMode>('content');
   // Custom-skill editor: 'new' for a fresh card, an id for editing, null when closed.
   const [customEditId, setCustomEditId] = useState<string | 'new' | null>(null);
   const [customName, setCustomName] = useState('');
   const [customBody, setCustomBody] = useState('');
+  const [customRepeat, setCustomRepeat] = useState(1);
+  const [customMode, setCustomMode] = useState<RepeatMode>('content');
 
   const handleToggleTool = (toolId: string) => {
     const cur = useAppStore.getState().settings.enabledTools || [];
@@ -61,9 +72,13 @@ export const ToolsScreen: React.FC = () => {
   const openEditor = (toolId: string) => {
     setEditingToolId(toolId);
     setDraftDesc(getToolDescription(toolId));
+    setDraftRepeat(clampRepeat(overrides[toolId]?.repeat));
+    setDraftMode(overrides[toolId]?.repeatMode ?? 'content');
   };
   const saveEditor = () => {
-    if (editingToolId) setToolOverride(editingToolId, { description: draftDesc });
+    if (editingToolId) {
+      setToolOverride(editingToolId, { description: draftDesc, repeat: draftRepeat, repeatMode: draftMode });
+    }
     setEditingToolId(null);
   };
 
@@ -72,7 +87,7 @@ export const ToolsScreen: React.FC = () => {
   const schemaPreview = (toolId: string, desc: string): string => {
     const schema = getToolsAsOpenAISchema([toolId])[0];
     if (!schema) return '{}';
-    const withDraft = { ...schema, function: { ...schema.function, description: desc } };
+    const withDraft = { ...schema, function: { ...schema.function, description: repeatContent(desc, draftRepeat) } };
     return JSON.stringify(withDraft, null, 2);
   };
 
@@ -80,10 +95,14 @@ export const ToolsScreen: React.FC = () => {
     if (id === 'new') {
       setCustomName('');
       setCustomBody('');
+      setCustomRepeat(1);
+      setCustomMode('content');
     } else {
       const s = customSkills.find(c => c.id === id);
       setCustomName(s?.name ?? '');
       setCustomBody(s?.description ?? '');
+      setCustomRepeat(clampRepeat(s?.repeat));
+      setCustomMode(s?.repeatMode ?? 'content');
     }
     setCustomEditId(id);
   };
@@ -95,9 +114,9 @@ export const ToolsScreen: React.FC = () => {
       return;
     }
     if (customEditId === 'new') {
-      createCustomSkill({ name, description: body, enabled: true });
+      createCustomSkill({ name, description: body, enabled: true, repeat: customRepeat, repeatMode: customMode });
     } else if (customEditId) {
-      updateCustomSkill(customEditId, { name, description: body });
+      updateCustomSkill(customEditId, { name, description: body, repeat: customRepeat, repeatMode: customMode });
     }
     setCustomEditId(null);
   };
@@ -153,7 +172,8 @@ export const ToolsScreen: React.FC = () => {
         {AVAILABLE_TOOLS.map(tool => {
           const isEnabled = enabledTools.includes(tool.id);
           const isEditing = editingToolId === tool.id;
-          const isCustomized = !!overrides[tool.id]?.description;
+          const isCustomized = !!overrides[tool.id];
+          const toolRepeat = clampRepeat(overrides[tool.id]?.repeat);
           const desc = getToolDescription(tool.id);
           return (
             <View key={tool.id} style={styles.toolCard} testID={`tool-picker-row-${tool.id}`}>
@@ -169,6 +189,9 @@ export const ToolsScreen: React.FC = () => {
                     )}
                     {isCustomized && (
                       <Text style={styles.editedBadge}>edited</Text>
+                    )}
+                    {toolRepeat > 1 && (
+                      <Text style={styles.editedBadge}>×{toolRepeat}</Text>
                     )}
                   </View>
                   <Text style={styles.toolDescription}>{desc}</Text>
@@ -219,7 +242,8 @@ export const ToolsScreen: React.FC = () => {
                     placeholderTextColor={colors.textMuted}
                     testID={`tool-edit-input-${tool.id}`}
                   />
-                  <Text style={[styles.editorLabel, { marginTop: 12 }]}>
+                  <RepeatControl count={draftRepeat} setCount={setDraftRepeat} mode={draftMode} setMode={setDraftMode} testID={`tool-${tool.id}`} isTool styles={styles} />
+                  <Text style={[styles.editorLabel, styles.sectionGap]}>
                     Exact tool-call schema sent to the model (name + parameters), with your edited
                     instructions applied:
                   </Text>
@@ -262,7 +286,12 @@ export const ToolsScreen: React.FC = () => {
                   <Icon name="feather" size={20} color={skill.enabled ? colors.primary : colors.textMuted} />
                 </View>
                 <View style={styles.toolInfo}>
-                  <Text style={styles.toolName}>{skill.name}</Text>
+                  <View style={styles.toolNameRow}>
+                    <Text style={styles.toolName}>{skill.name}</Text>
+                    {clampRepeat(skill.repeat) > 1 && (
+                      <Text style={styles.editedBadge}>×{clampRepeat(skill.repeat)}</Text>
+                    )}
+                  </View>
                   <Text style={styles.toolDescription} numberOfLines={3}>{skill.description}</Text>
                 </View>
                 <Switch
@@ -316,6 +345,15 @@ export const ToolsScreen: React.FC = () => {
           placeholderTextColor={colors.textMuted}
           testID="custom-skill-body"
         />
+        <RepeatControl count={customRepeat} setCount={setCustomRepeat} mode={customMode} setMode={setCustomMode} testID="custom-skill" styles={styles} />
+        <Text style={[styles.editorLabel, styles.sectionGap]}>Injected into the system prompt:</Text>
+        <Text style={styles.jsonPreview} selectable testID="custom-skill-preview">
+          {applyRepeat(
+            customBody.trim(),
+            d => `<skill name="${customName.trim().replaceAll('"', "'")}">\n${d}\n</skill>`,
+            { repeat: customRepeat, repeatMode: customMode },
+          )}
+        </Text>
         <View style={styles.editorActions}>
           <TouchableOpacity onPress={() => setCustomEditId(null)} style={styles.btnGhost}>
             <Text style={styles.btnGhostText}>Cancel</Text>
@@ -327,6 +365,60 @@ export const ToolsScreen: React.FC = () => {
       </View>
     );
   }
+};
+
+type ToolsStyles = ReturnType<typeof createStyles>;
+
+const REPEAT_MODES: { id: RepeatMode; label: string }[] = [
+  { id: 'content', label: 'Repeat text in block' },
+  { id: 'block', label: 'Repeat whole block' },
+];
+
+/** Emphasis multiplier: count (1..MAX) + mode (repeat the text inside one block / repeat the block). */
+const RepeatControl: React.FC<{
+  count: number;
+  setCount: (n: number) => void;
+  mode: RepeatMode;
+  setMode: (m: RepeatMode) => void;
+  testID: string;
+  isTool?: boolean;
+  styles: ToolsStyles;
+}> = ({ count, setCount, mode, setMode, testID, isTool, styles }) => {
+  const { colors } = useTheme();
+  return (
+    <View style={styles.repeatBox}>
+      <View style={styles.repeatRow}>
+        <Text style={styles.editorLabel}>Emphasis multiplier</Text>
+        <View style={styles.repeatStepper}>
+          <TouchableOpacity onPress={() => setCount(clampRepeat(count - 1))} testID={`${testID}-repeat-dec`} style={styles.stepBtn}>
+            <Icon name="minus" size={14} color={colors.primary} />
+          </TouchableOpacity>
+          <Text style={styles.repeatCount} testID={`${testID}-repeat-count`}>×{count}</Text>
+          <TouchableOpacity onPress={() => setCount(clampRepeat(count + 1))} testID={`${testID}-repeat-inc`} style={styles.stepBtn}>
+            <Icon name="plus" size={14} color={colors.primary} />
+          </TouchableOpacity>
+        </View>
+      </View>
+      <View style={styles.repeatRow}>
+        {REPEAT_MODES.map(m => (
+          <TouchableOpacity
+            key={m.id}
+            onPress={() => setMode(m.id)}
+            style={[styles.modeChip, mode === m.id && styles.modeChipActive]}
+            testID={`${testID}-repeat-mode-${m.id}`}
+          >
+            <Text style={[styles.modeChipText, mode === m.id && styles.modeChipTextActive]}>{m.label}</Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+      <Text style={styles.editorLabel}>
+        {`Sends this instruction ${count}× (max ${MAX_SKILL_REPEAT}). `}
+        {isTool
+          ? 'The tool JSON always repeats the text; "whole block" applies to the text tool list used by models without native tool calling.'
+          : 'Each copy costs context tokens.'}
+      </Text>
+    </View>
+  );
 };
 
 const createStyles = (colors: ThemeColors, _shadows: ThemeShadows) => ({
@@ -411,6 +503,16 @@ const createStyles = (colors: ThemeColors, _shadows: ThemeShadows) => ({
     gap: SPACING.lg,
     marginBottom: 4,
   },
+  sectionGap: { marginTop: 12 },
+  repeatBox: { marginTop: 12, gap: 6 },
+  repeatRow: { flexDirection: 'row' as const, alignItems: 'center' as const, justifyContent: 'space-between' as const, gap: 6 },
+  repeatStepper: { flexDirection: 'row' as const, alignItems: 'center' as const, gap: 10 },
+  stepBtn: { padding: 6, borderRadius: 6, borderWidth: 1, borderColor: colors.primary },
+  repeatCount: { fontSize: 14, fontFamily: FONTS.mono, color: colors.text, minWidth: 28, textAlign: 'center' as const },
+  modeChip: { flex: 1, paddingVertical: 6, borderRadius: 14, backgroundColor: colors.background, alignItems: 'center' as const },
+  modeChipActive: { backgroundColor: colors.primary },
+  modeChipText: { fontSize: 12, color: colors.text },
+  modeChipTextActive: { color: colors.background, fontWeight: '600' as const },
   linkBtn: { flexDirection: 'row' as const, alignItems: 'center' as const, gap: 4 },
   linkBtnText: { fontSize: 12, color: colors.primary, fontWeight: '500' as const },
   editorBox: {
