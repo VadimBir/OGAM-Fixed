@@ -3,6 +3,7 @@ import DeviceInfo from 'react-native-device-info';
 import { ToolCall, ToolResult } from './types';
 import type { RagSearchResult } from '../rag';
 import logger from '../../utils/logger';
+import { handleAddCalendarEvent } from './calendarTool';
 
 function makeResult(call: ToolCall, start: number, opts: { content: string; error?: string }): ToolResult {
   return { toolCallId: call.id, name: call.name, content: opts.content, error: opts.error, durationMs: Date.now() - start };
@@ -51,6 +52,8 @@ async function dispatchTool(call: ToolCall): Promise<string> {
       if (!prompt) throw new Error('Missing required parameter: prompt');
       return handleGenerateImage(prompt, call);
     }
+    case 'add_calendar_event':
+      return handleAddCalendarEvent(call);
     default:
       throw new Error(`Unknown tool: ${call.name}`);
   }

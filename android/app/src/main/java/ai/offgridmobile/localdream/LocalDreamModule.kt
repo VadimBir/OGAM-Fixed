@@ -769,6 +769,10 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
     }
 
     /**
+     * KNOWN ISSUE — sub-512 rainbow on MNN (CPU/GPU): OPEN, see docs/notes/native-image-sub512-rainbow.md.
+     * The bundled core (upstream local-dream c56cf6c) resizes MNN sessions per request, yet the
+     * device shows rainbow at every size < 512. NPU cause is known and guarded below.
+     *
      * The size the running backend can really render for this request, restarting an NPU server
      * with the matching resolution patch when needed. NPU without a patch for the size → 512x512
      * (a wrong-shaped latent into the fixed graph is the rainbow). MNN → upstream's 64 grid.

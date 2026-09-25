@@ -113,6 +113,8 @@ export type AppSettings = {
   modelLoadingMode?: 'conservative' | 'balanced' | 'aggressive';
   /** Android: run a foreground service while a model is loaded so the OS kills other apps first. */
   keepModelsAlive?: boolean;
+  /** Show the Pro Tools entry (Tools page + chat quick settings). Hidden when false. */
+  showProTools?: boolean;
   cacheType: CacheType;
   showGenerationDetails: boolean;
   /**

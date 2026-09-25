@@ -108,6 +108,22 @@ export const AVAILABLE_TOOLS: ToolDefinition[] = [
       },
     },
   },
+  {
+    id: 'add_calendar_event',
+    name: 'add_calendar_event',
+    displayName: 'Add to Calendar',
+    description: 'Add an event or reminder to the user\'s phone calendar. Call this when the user asks to schedule, remind, book, or put something in the calendar. Resolve relative times ("tomorrow at 5", "in 2 hours") against the current local date and time and pass LOCAL times in ISO format. Make exactly one call per event. Every event created is logged so the user can undo it.',
+    icon: 'calendar',
+    parameters: {
+      title: { type: 'string', description: 'Event name, e.g. "Dentist".', required: true },
+      start: { type: 'string', description: 'Local start, ISO 8601: "2026-09-26T14:30" (or "2026-09-26" for an all-day event).', required: true },
+      end: { type: 'string', description: 'Optional local end, ISO 8601. Default: start + 1 hour.' },
+      reminder_minutes: { type: 'integer', description: 'Optional: notify this many minutes before the start (0 = at start).' },
+      all_day: { type: 'boolean', description: 'Optional: true for an all-day event.' },
+      location: { type: 'string', description: 'Optional location.' },
+      notes: { type: 'string', description: 'Optional notes / description.' },
+    },
+  },
 ];
 
 /**
@@ -274,13 +290,41 @@ export function getToolsAsOpenAISchema(enabledToolIds: readonly string[]) {
  * native tool support; bundling them here dropped them silently on LiteRT/remote (the model "never
  * saw" an enabled custom skill).
  */
+/** `name (type, required) — description` lines, so a text-hint model knows the argument names. */
+function toolParameterLines(tool: ToolDefinition): string {
+  return Object.entries(tool.parameters)
+    .map(([key, p]) => `    ${key} (${p.type}${p.required ? ', required' : ''}${p.enum ? `, one of: ${p.enum.join('|')}` : ''}) — ${p.description}`)
+    .join('\n');
+}
+
+/** A literal call the parser accepts (parseToolCallsFromText: <tool_call>{"name","arguments"}). */
+function toolCallExample(tool: ToolDefinition): string {
+  const args = Object.fromEntries(
+    Object.entries(tool.parameters)
+      .filter(([, p]) => p.required)
+      .map(([key, p]) => [key, p.type === 'integer' || p.type === 'number' ? 1 : '...']),
+  );
+  return `<tool_call>${JSON.stringify({ name: tool.name, arguments: args })}</tool_call>`;
+}
+
 export function buildToolSystemPromptHint(enabledToolIds: string[]): string {
   const enabledTools = AVAILABLE_TOOLS.filter(t => enabledToolIds.includes(t.id));
   if (enabledTools.length === 0) return '';
+  // Without native tool calling the model sees ONLY this text, so it must carry the exact call
+  // syntax, every argument name and a literal example — a bare "- name: description" list left
+  // small models believing they could not act (e.g. "I cannot generate images").
   const toolList = enabledTools
-    .map(t => `- ${t.name}: ${toolDefinitionDescription(t)}`)
+    .map(t => {
+      const params = toolParameterLines(t);
+      return `- ${t.name}: ${toolDefinitionDescription(t)}\n${params ? `  arguments:\n${params}\n` : ''}  example: ${toolCallExample(t)}`;
+    })
     .join('\n');
-  return `\n\nTools available:\n${toolList}\nUse these tools proactively and precisely — call the right tool at the right moment rather than guessing or saying you cannot help.`;
+  return (
+    '\n\nTools available. You CAN use them: to call one, output exactly one line\n' +
+    '<tool_call>{"name": "TOOL_NAME", "arguments": {"ARG": "VALUE"}}</tool_call>\n' +
+    'and nothing else in that turn; the result comes back in the next message.\n' +
+    `${toolList}\nUse these tools proactively and precisely — call the right tool at the right moment rather than guessing or saying you cannot help.`
+  );
 }
 
 /**

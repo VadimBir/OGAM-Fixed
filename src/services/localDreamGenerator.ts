@@ -146,6 +146,8 @@ class LocalDreamGeneratorService {
       steps: params.steps || 8,
       guidanceScale: params.guidanceScale || 7.5,
       seed: params.seed ?? generateRandomSeed(),
+      // KNOWN ISSUE: sizes < 512 render as rainbow noise on the native engine (MNN CPU/GPU still
+      // OPEN; NPU guarded natively). See docs/notes/native-image-sub512-rainbow.md.
       width: params.width || 512,
       height: params.height || 512,
       previewInterval: params.previewInterval ?? 2,

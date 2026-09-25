@@ -17,6 +17,7 @@ import {
 } from '../../services/tools/registry';
 import { useAppStore, useSkillStore } from '../../stores';
 import { useOpenProTools } from '../../hooks/useOpenProTools';
+import { CalendarUndoPanel } from './CalendarUndoPanel';
 import type { ThemeColors, ThemeShadows } from '../../theme';
 
 const TOOL_WARNING_COLOR = '#F59E0B';
@@ -38,6 +39,7 @@ export const ToolsScreen: React.FC = () => {
 
   const enabledTools = useAppStore(st => st.settings.enabledTools) || [];
   const updateSettings = useAppStore(st => st.updateSettings);
+  const showProTools = useAppStore(st => st.settings.showProTools ?? true);
   const toolCountHintDismissed = useAppStore(st => st.toolCountHintDismissed);
   const setToolCountHintDismissed = useAppStore(st => st.setToolCountHintDismissed);
 
@@ -144,8 +146,8 @@ export const ToolsScreen: React.FC = () => {
       </View>
 
       <ScrollView style={styles.container} contentContainerStyle={styles.contentContainer}>
-        {/* Pro Tools always sits on top of the listing. */}
-        <TouchableOpacity
+        {/* Pro Tools sits on top of the listing unless the user hid it (toggle at the bottom). */}
+        {showProTools && <TouchableOpacity
           style={styles.proToolsButton}
           onPress={openProTools}
           activeOpacity={0.75}
@@ -159,7 +161,7 @@ export const ToolsScreen: React.FC = () => {
             <Text style={styles.toolDescription}>Email, calendar and MCP servers</Text>
           </View>
           <Icon name="chevron-right" size={18} color={colors.textMuted} />
-        </TouchableOpacity>
+        </TouchableOpacity>}
 
         {showHint && (
           <View style={[styles.hintBanner, { backgroundColor: colors.surface }]}>
@@ -321,6 +323,22 @@ export const ToolsScreen: React.FC = () => {
           );
         })}
         {customEditId === 'new' && renderCustomEditor('new')}
+
+        <CalendarUndoPanel />
+
+        <View style={[styles.toolRow, styles.sectionGap]}>
+          <View style={styles.toolInfo}>
+            <Text style={styles.toolName}>Show Pro Tools</Text>
+            <Text style={styles.toolDescription}>Pro Tools entry here and in chat quick settings.</Text>
+          </View>
+          <Switch
+            testID="tools-show-pro-toggle"
+            value={showProTools}
+            onValueChange={v => updateSettings({ showProTools: v })}
+            trackColor={{ false: colors.border, true: `${colors.primary}80` }}
+            thumbColor={showProTools ? colors.primary : colors.textMuted}
+          />
+        </View>
 
         <Text style={styles.hint}>
           Enabling more tools can confuse the model and increases latency on first response.

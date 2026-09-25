@@ -120,6 +120,7 @@ export const QuickSettingsPopover: React.FC<QuickSettingsPopoverProps> = ({
   const thinkingEnabled = useAppStore(state => state.settings.thinkingEnabled);
   const updateSettings = useAppStore(state => state.updateSettings);
   const toolCountHintDismissed = useAppStore(state => state.toolCountHintDismissed);
+  const showProTools = useAppStore(state => state.settings.showProTools ?? true);
 
   if (!visible) return null;
 
@@ -212,7 +213,7 @@ export const QuickSettingsPopover: React.FC<QuickSettingsPopoverProps> = ({
                 </View>
               </TouchableOpacity>
 
-              <TouchableOpacity
+              {showProTools && <TouchableOpacity
                 testID="quick-pro-tools"
                 style={popoverStyles.row}
                 onPress={() => {
@@ -228,7 +229,7 @@ export const QuickSettingsPopover: React.FC<QuickSettingsPopoverProps> = ({
                     <Text style={[popoverStyles.badgeText, { color: colors.background }]}>{mcpToolCount}</Text>
                   </View>
                 )}
-              </TouchableOpacity>
+              </TouchableOpacity>}
             </View>
           </TouchableWithoutFeedback>
         </View>

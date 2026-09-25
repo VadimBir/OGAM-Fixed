@@ -16,10 +16,10 @@ describe('Tool Registry', () => {
   // AVAILABLE_TOOLS
   // ========================================================================
   describe('AVAILABLE_TOOLS', () => {
-    it('has exactly 7 tools with correct IDs', () => {
-      // Email + calendar tools are pro-gated and live in the pro package
-      // (EmailCalendarExtension), so they are not part of the core registry.
-      expect(AVAILABLE_TOOLS).toHaveLength(7);
+    it('has exactly 8 tools with correct IDs', () => {
+      // Pro email/calendar tools live in the pro package (EmailCalendarExtension); the free
+      // add_calendar_event (with its undo log) is core and uses a distinct name.
+      expect(AVAILABLE_TOOLS).toHaveLength(8);
 
       const ids = AVAILABLE_TOOLS.map(t => t.id);
       expect(ids).toEqual([
@@ -30,6 +30,7 @@ describe('Tool Registry', () => {
         'search_knowledge_base',
         'read_url',
         'generate_image',
+        'add_calendar_event',
       ]);
     });
 

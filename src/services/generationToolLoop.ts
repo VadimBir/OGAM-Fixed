@@ -909,6 +909,7 @@ const TOOL_BEHAVIOR_GUIDANCE =
 
 /** Tools that need precise time-of-day to resolve relative phrases like "in half an hour". */
 const TIME_SENSITIVE_TOOL_IDS = [
+  'add_calendar_event',
   'create_calendar_event',
   'read_calendar_events',
 ];
