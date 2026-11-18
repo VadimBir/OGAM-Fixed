@@ -78,10 +78,14 @@ export interface SdCppMemoryInput {
   vaeTiling: boolean;
   /** Loader threads (n_threads); sizes the load-time conversion buffers. Default 4. */
   threads?: number;
+  /** Sum of the enabled LoRA file sizes. */
+  loraBytes?: number;
 }
 
 export interface SdCppMemoryEstimate {
   weightsMB: number;
+  /** Enabled LoRA tensors (file size; 0 for a LoRA imported before sizes were recorded). */
+  loraMB: number;
   /** Transient per-thread conversion buffers while loading; 0 when no tensor is converted. */
   loadBufferMB: number;
   unetComputeMB: number;
@@ -129,11 +133,15 @@ export function estimateSdCppMemory(input: SdCppMemoryInput): SdCppMemoryEstimat
   // Floor those at the file size: conservative (ignores a quant override), never under-counts.
   const weightsFloor = FAMILIES[input.family ?? ''] ? 0 : input.fileSizeBytes;
   const weightsMB = Math.max(weightsBytes, weightsFloor) / MB;
+  // Enabled LoRA tensors: resident for the whole run in runtime mode (quantized weights), and held
+  // during the merge in immediate mode (freed after, model_manager.cpp:719), so they count at peak.
+  const loraMB = Math.max(0, input.loraBytes ?? 0) / MB;
   const totalMB = Math.ceil(
-    (weightsMB + loadBufferMB + Math.max(unetComputeMB, vaeComputeMB) + RUNTIME_OVERHEAD_MB) * SAFETY_FACTOR,
+    (weightsMB + loraMB + loadBufferMB + Math.max(unetComputeMB, vaeComputeMB) + RUNTIME_OVERHEAD_MB) * SAFETY_FACTOR,
   );
   return {
     weightsMB: Math.round(weightsMB),
+    loraMB: Math.round(loraMB),
     loadBufferMB,
     unetComputeMB: Math.round(unetComputeMB),
     vaeComputeMB: Math.round(vaeComputeMB),

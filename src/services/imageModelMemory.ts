@@ -23,6 +23,9 @@ export function estimateSdCppModelMemory(model: Pick<ONNXImageModel, 'size' | 's
     flashAttn: true,
     vaeTiling: s.imageSdVaeTiling ?? true,
     threads: s.imageThreads,
+    loraBytes: (s.imageLoras ?? [])
+      .filter(l => l.enabled && l.weight !== 0)
+      .reduce((sum, l) => sum + (l.sizeBytes ?? 0), 0),
   });
 }
 

@@ -393,6 +393,8 @@ export interface ImageLora {
   /** Multiplier; 1 = full strength, negative inverts. */
   weight: number;
   enabled: boolean;
+  /** File size, for the RAM estimate (sdCppMemory loraBytes). Absent on LoRAs imported earlier. */
+  sizeBytes?: number;
 }
 
 // NOTE: the authoritative ImageGenerationState lives in

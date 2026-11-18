@@ -20,6 +20,8 @@ import { useImageModels } from './useImageModels';
 import { importGgufFiles, getErrorMessage } from './importHelpers';
 import { importSdCheckpointOrLora } from './importSdCheckpoint';
 import { isSdCppCandidateFileName } from '../../services/sdCppModelDetection';
+import { textSafetensorsRefusal } from '../../services/textLora';
+import { importPickedTextLora } from '../../services/textLoraActions';
 import { isPickerStuck } from '../../utils/pickerErrorUtils';
 import { isLiteRTFileName } from '../../utils/modelHelpers';
 import logger from '../../utils/logger';
@@ -208,7 +210,7 @@ export function useModelsScreen() {
           'Invalid File',
           resolvedFiles.length > 1
             ? 'When selecting multiple files, all must be .gguf files (main model + mmproj projector).'
-            : 'Supported formats: .gguf (text models), .litertlm (LiteRT models), .zip (image models), and .safetensors/.ckpt (Stable Diffusion checkpoints or LoRAs).',
+            : 'Supported formats: .gguf (text models or text LoRA adapters), .litertlm (LiteRT models), .zip (image models), and .safetensors/.ckpt (Stable Diffusion checkpoints or LoRAs).',
         ));
         return;
       }
@@ -227,11 +229,28 @@ export function useModelsScreen() {
         return;
       }
       if (resolvedFiles.length === 1 && isSdCppCandidateFileName(firstFileName)) {
+        // Text weights in .safetensors (a PEFT text LoRA or an LLM) cannot load in llama.rn: refuse
+        // before the copy, naming the PC conversion. Anything else goes to the image import as before.
+        const textRefusal = firstFileName.toLowerCase().endsWith('.safetensors')
+          ? await textSafetensorsRefusal(firstUri)
+          : null;
+        if (textRefusal) {
+          setAlertState(showAlert('Convert to GGUF first', textRefusal));
+          return;
+        }
         await importSdCheckpointOrLora(
           { uri: firstUri, name: firstFileName, size: resolvedFiles[0].size },
           { addDownloadedImageModel, activeImageModelId, setActiveImageModelId, setImportProgress, setAlertState },
         );
         return;
+      }
+      // A single GGUF whose header says general.type "adapter" is a text LoRA, not a model.
+      if (resolvedFiles.length === 1 && firstFileName.toLowerCase().endsWith('.gguf')) {
+        const lora = await importPickedTextLora({ uri: firstUri, name: firstFileName });
+        if (lora.handled) {
+          setAlertState(showAlert(lora.title ?? 'Text LoRA', lora.message ?? ''));
+          return;
+        }
       }
 
       await importGgufFiles(resolvedFiles.slice(0, 2), { setAlertState, setImportProgress, addDownloadedModel });

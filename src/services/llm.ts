@@ -26,6 +26,10 @@ import logger from '../utils/logger';
 import { resolveSpeculative } from './mtpDetection';
 import { estimateLlamaMemory } from './llamaMemoryEstimate';
 import type { StreamToken } from './llmStreamTypes';
+import { ensureNativeLogCapture, recentNativeLog, resetNativeLogCapture } from './llmNativeLog';
+import { LIVE_RAM_MARGIN_MB } from './memoryBudget';
+import { enabledLoraList, loraListKey } from './textLoraParams';
+import { enabledTextLoraBytes, loraReasonFromLog, setTextLoraStatus, watchLoraCpuFallback } from './textLora';
 export type { StreamToken };
 type StreamCallback = (data: StreamToken) => void;
 type CompleteCallback = (result: { content: string; reasoningContent: string }) => void;
@@ -53,6 +57,8 @@ class LLMService {
   private requestedGpuLayers: number = 0;
   /** use_mmap of the loaded context. false = weights read into anonymous RAM (non-reclaimable). */
   private weightsMmapped: boolean = true;
+  /** loraListKey of the text LoRA set active on the loaded context ('' = none). */
+  private appliedLoraKey: string = '';
   private sessionCacheDir: string = `${RNFS.CachesDirectoryPath}/llm-sessions`;
   /** Serializes loadModel / unloadModel / reloadWithSettings to prevent concurrent native context init. */
   private contextMutexPromise: Promise<void> = Promise.resolve();
@@ -118,11 +124,15 @@ class LLMService {
       return { ...raw, available: availableMB * 1024 * 1024 };
     };
     const archBytes = await this.readArchBytes(modelPath, params, fileSize);
-    let memCheck = await checkMemoryForModel({ modelFileSize: fileSize, contextLength: params.ctxLen, getAvailableMemory: getMem, quantizedCache, archBytes, safetyMarginMB });
+    // Enabled text LoRAs are copied into llama.cpp buffers (not mmapped): count their bytes as weights.
+    const loraBytes = await enabledTextLoraBytes(undefined, params.loraList.map(l => l.path));
+    if (loraBytes > 0) logger.log(`[LLM] Text LoRA: ${params.loraList.length} adapter(s), ${(loraBytes / 1048576).toFixed(0)}MB counted in the memory check`);
+    const weightsBytes = fileSize + loraBytes;
+    let memCheck = await checkMemoryForModel({ modelFileSize: weightsBytes, contextLength: params.ctxLen, getAvailableMemory: getMem, quantizedCache, archBytes, safetyMarginMB });
     if (!memCheck.safe) {
       // Keep the selected context. A failed estimate asks for Load Anyway; an explicit
       // override passes the selected value to native init even when memory is tight.
-      const decision = await resolveSafeContext({ fileSize, requestedCtx: params.ctxLen, quantizedCache, override, getAvailableMemory: getMem, archBytes, safetyMarginMB });
+      const decision = await resolveSafeContext({ fileSize: weightsBytes, requestedCtx: params.ctxLen, quantizedCache, override, getAvailableMemory: getMem, archBytes, safetyMarginMB });
       memCheck = decision.memCheck;
     }
     logger.log(`[LLM] Memory check: estimatedMB=${memCheck.estimatedMB.toFixed(0)}, availableMB=${memCheck.availableMB.toFixed(0)}, safe=${memCheck.safe}, ctx=${params.ctxLen}`);
@@ -184,16 +194,21 @@ class LLMService {
       this.weightsMmapped = (baseParams as { use_mmap?: boolean }).use_mmap !== false;
       this.currentSettings = { nThreads, nBatch, contextLength: ctxLen };
       logger.log(`[LLM] Loading model: ctx=${ctxLen}, threads=${nThreads}, batch=${nBatch}, fileSize=${(fileSize / (1024 * 1024)).toFixed(0)}MB, availRAM=${memCheck.availableMB.toFixed(0)}MB`);
+      if (params.loraList.length > 0) { watchLoraCpuFallback(); setTextLoraStatus({ cpuFallback: false }); }
       try {
         const { context, gpuAttemptFailed, actualLength, attemptedGpuLayers } = await this.initConfiguredContext({ baseParams, ctxLen, nGpuLayers, fileSize });
         // attemptedGpuLayers (post device-cap/backend resolution) is what the init actually offered the
         // GPU — the truthful layer count for the meta; nGpuLayers is the raw settings request.
         await this.applyLoadedContext({ context, actualLength, gpuAttemptFailed, nGpuLayers: attemptedGpuLayers, requestedGpuLayers: nGpuLayers, modelPath, mmProjPath });
+        this.appliedLoraKey = loraListKey(params.loraList);
+        if (params.loraList.length > 0) setTextLoraStatus({ lastError: null });
       } catch (error: any) {
         this.context = null; this.currentModelPath = null; this.nativeConversationId = null; this.multimodalSupport = null;
-        this.toolCallingSupported = false; this.thinkingSupported = false;
+        this.toolCallingSupported = false; this.thinkingSupported = false; this.appliedLoraKey = '';
         Object.assign(this, { gpuEnabled: false, gpuReason: '', activeGpuLayers: 0, gpuDevices: [], requestedGpuLayers: 0, gpuAttemptFailed: false });
-        throw new Error(error?.message || 'Unknown error loading model');
+        const message = error?.message || 'Unknown error loading model';
+        if (params.loraList.length > 0) setTextLoraStatus({ lastError: message });
+        throw new Error(message);
       }
     } finally {
       mutex.release();
@@ -303,12 +318,66 @@ class LLMService {
     // reload with ~2GB free ground to 0 tok/s then died). Wait (bounded) for the process footprint to drop.
     await awaitMemoryReclaim(() => hardwareService.getProcessMemory());
     useAppStore.getState().setModelMaxContext(null);
-    Object.assign(this, { context: null, currentModelPath: null, nativeConversationId: null, multimodalSupport: null, multimodalInitialized: false, toolCallingSupported: false, thinkingSupported: false, gpuEnabled: false, gpuReason: '', gpuDevices: [], activeGpuLayers: 0, requestedGpuLayers: 0, gpuAttemptFailed: false });
+    Object.assign(this, { context: null, currentModelPath: null, nativeConversationId: null, multimodalSupport: null, multimodalInitialized: false, toolCallingSupported: false, thinkingSupported: false, gpuEnabled: false, gpuReason: '', gpuDevices: [], activeGpuLayers: 0, requestedGpuLayers: 0, gpuAttemptFailed: false, appliedLoraKey: '' });
   }
   async unloadModel(): Promise<void> {
     const mutex = this.acquireContextMutex();
     try { await mutex.ready; await this.doUnloadModel(); } finally { mutex.release(); }
   }
+  /**
+   * Make the loaded context's text LoRA set match settings.textLoras, live, without a reload:
+   * llama.rn applyLoraAdapters / removeLoraAdapters (node_modules/llama.rn/src/index.ts:1003-1014).
+   * Native loads every adapter of the new set before it swaps (cpp/rn-llama.cpp:762-788), so a
+   * failing adapter leaves the previous set active, and the new set's bytes are briefly held on top
+   * of the old one: the live-RAM check below covers the new set. The KV cache is cleared after a
+   * change: the cached prompt was computed with the old adapters. No model loaded -> nothing to do;
+   * the next load passes the set as lora_list (buildModelParams).
+   */
+  async syncTextLoras(): Promise<{ changed: boolean; error?: string }> {
+    const mutex = this.acquireContextMutex();
+    try {
+      await mutex.ready;
+      if (!this.context) return { changed: false };
+      const desired = enabledLoraList(useAppStore.getState().settings.textLoras);
+      const key = loraListKey(desired);
+      if (key === this.appliedLoraKey) return { changed: false };
+      if (!(await this.waitForIdle())) return { changed: false, error: 'A reply is still generating. Change the LoRA again when it finishes.' };
+      if (desired.length > 0) {
+        const bytes = await enabledTextLoraBytes(undefined, desired.map(l => l.path));
+        const neededMB = bytes / 1048576;
+        let availableMB: number | undefined;
+        try { availableMB = (await hardwareService.getAppMemoryUsage()).available / 1048576; } catch { availableMB = undefined; }
+        if (availableMB !== undefined && availableMB - LIVE_RAM_MARGIN_MB < neededMB) {
+          return { changed: false, error: `Not enough free RAM for the LoRA set (${neededMB.toFixed(0)}MB needed, ${Math.max(0, availableMB - LIVE_RAM_MARGIN_MB).toFixed(0)}MB free after the safety margin).` };
+        }
+        watchLoraCpuFallback();
+      }
+      ensureNativeLogCapture();
+      resetNativeLogCapture();
+      setTextLoraStatus({ cpuFallback: false });
+      const ctx = this.context;
+      try {
+        if (desired.length === 0) await ctx.removeLoraAdapters();
+        else await ctx.applyLoraAdapters(desired);
+      } catch (e: any) {
+        const reason = loraReasonFromLog(recentNativeLog(40));
+        const base = e?.message || String(e);
+        const message = reason ? `${base}\n\nllama.cpp: ${reason}` : base;
+        logger.warn(`[LLM] Text LoRA apply failed: ${message}`);
+        return { changed: false, error: message };
+      }
+      this.appliedLoraKey = key;
+      try { await (ctx as any).clearCache(true); } catch (e) { logger.log('[LLM] Clear cache after LoRA change:', e); }
+      this.nativeConversationId = null;
+      const applied = desired.length === 0 ? 'none' : desired.map(l => [l.path.split('/').pop(), l.scaled].join('@')).join(', ');
+      logger.log(`[LLM] Text LoRA applied live: ${applied}`);
+      return { changed: true };
+    } finally {
+      mutex.release();
+    }
+  }
+  /** loraListKey of the adapter set on the loaded context ('' = none or no model). */
+  getAppliedTextLoraKey(): string { return this.appliedLoraKey; }
   isModelLoaded(): boolean { return this.context !== null; }
   /** Whether the loaded model's weights are file-backed (mmap) pages; false = anonymous RAM. */
   weightsAreMmapped(): boolean { return this.weightsMmapped; }

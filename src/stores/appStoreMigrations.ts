@@ -112,7 +112,46 @@ export function migratePersistedState<TState>(
   migrateAdvancedSettings(merged, defaultSettings);
   migrateGeneratedImageTimestamps(merged);
   migrateGeneratedImagePaths(merged, documentsPath);
+  migrateTextLoras(merged, documentsPath);
   return merged as TState;
+}
+
+const TEXT_LORA_SCALE_MAX = 2;
+/**
+ * settings.textLoras: an install from before text LoRA has none (the defaults spread gives []); a
+ * malformed entry (hand-edited / partially synced store) is dropped, a scale outside 0-2 is clamped,
+ * and an iOS container path is rebased onto the current Documents folder (the UUID changes on
+ * reinstall, like generated images). settings.remoteTextLoras keeps only {id: integer, scale} rows.
+ * Idempotent.
+ */
+export function migrateTextLoras(merged: any, documentsPath?: string): void {
+  const s = merged.settings;
+  if (!s) return;
+  const list = Array.isArray(s.textLoras) ? s.textLoras : [];
+  s.textLoras = list
+    .filter((l: any) =>
+      l && typeof l.id === 'string' && typeof l.name === 'string' && typeof l.path === 'string' && l.path.length > 0)
+    .map((l: any) => {
+      const scale = isFiniteNumber(l.scale) ? Math.min(TEXT_LORA_SCALE_MAX, Math.max(0, l.scale)) : 1;
+      const rebased = documentsPath
+        ? /\/Containers\/Data\/Application\/[^/]+\/Documents\/(text_loras\/.+)$/.exec(l.path)
+        : null;
+      return {
+        id: l.id, name: l.name,
+        path: rebased ? `${documentsPath}/${rebased[1]}` : l.path,
+        scale, enabled: l.enabled === true,
+      };
+    });
+  const remote = s.remoteTextLoras && typeof s.remoteTextLoras === 'object' && !Array.isArray(s.remoteTextLoras)
+    ? s.remoteTextLoras : {};
+  const cleaned: Record<string, Array<{ id: number; scale: number }>> = {};
+  for (const [key, rows] of Object.entries(remote)) {
+    if (!Array.isArray(rows)) continue;
+    cleaned[key] = rows
+      .filter((r: any) => r && Number.isInteger(r.id) && isFiniteNumber(r.scale))
+      .map((r: any) => ({ id: r.id, scale: Math.min(TEXT_LORA_SCALE_MAX, Math.max(0, r.scale)) }));
+  }
+  s.remoteTextLoras = cleaned;
 }
 
 const isFiniteNumber = (v: unknown): boolean => typeof v === 'number' && Number.isFinite(v);

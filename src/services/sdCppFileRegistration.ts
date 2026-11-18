@@ -93,12 +93,16 @@ async function registerLora(
   await RNFS.unlink(stagingDir).catch(() => {});
   // A removed LoRA's path can be reused by a new file: never keep its cached base model.
   sdCppGeneratorService.forgetFile(dest);
+  // Size feeds only the RAM estimate; a failed stat must not fail the import.
+  const stat = await RNFS.stat(dest).catch(() => null);
+  const sizeBytes = Number(stat?.size) || undefined;
   const lora: ImageLora = {
     id: `lora_${safeSdFileId(fileName)}_${Date.now()}`,
     name: fileName.replace(/\.safetensors$/i, ''),
     path: dest,
     weight: 1,
     enabled,
+    sizeBytes,
   };
   const { settings, updateSettings } = useAppStore.getState();
   updateSettings({ imageLoras: [...(settings.imageLoras ?? []), lora] });

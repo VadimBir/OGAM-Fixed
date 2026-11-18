@@ -19,6 +19,7 @@ import {
   UbatchSlider,
   VCacheTypeToggle,
 } from '../../components/settings/textGenAdvancedSections';
+import { TextLoraSection } from '../../components/settings/TextLoraSection';
 import { useTextGenerationSettings } from '../../hooks/useTextGenerationSettings';
 import { useThemedStyles } from '../../theme';
 import { createStyles } from './styles';
@@ -50,6 +51,7 @@ export const TextGenerationSection: React.FC = () => {
           />
           <SliderSetting testID="llama-max-tokens" {...llama.maxTokens} />
           <ThinkingBudgetSelector />
+          <TextLoraSection />
         </>
       )}
 

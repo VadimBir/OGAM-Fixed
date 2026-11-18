@@ -25,6 +25,7 @@ import {
   UbatchSlider,
   VCacheTypeToggle,
 } from '../settings/textGenAdvancedSections';
+import { TextLoraSection } from '../settings/TextLoraSection';
 
 const ChatSettingSlider: React.FC<{ setting: NumericSettingModel }> = ({
   setting,
@@ -47,6 +48,7 @@ export const TextGenerationSection: React.FC = () => {
         <ChatSettingSlider key={setting.key} setting={setting} />
       ))}
       {!isLiteRT && <ThinkingBudgetSelector compact />}
+      {!isLiteRT && <TextLoraSection compact />}
       <ShowGenerationDetailsToggle />
       <AdvancedToggle
         isExpanded={showAdvanced}

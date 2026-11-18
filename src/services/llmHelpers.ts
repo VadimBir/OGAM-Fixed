@@ -13,6 +13,8 @@ import { HTP_ENABLED } from '../config/featureFlags';
 import { flashAttnPlacement } from '../utils/acceleration';
 import { LIVE_RAM_MARGIN_MB } from './memoryBudget';
 import { customStopStrings, resolveSampling, type SamplingSettings } from './samplingParams';
+import { enabledLoraList, type LlamaLoraAdapter } from './textLoraParams';
+import type { TextLora } from './textLoraTypes';
 
 const RESPONSE_RESERVE = 512;
 /** Prompt compaction target. Output length is the user's model-aware maxTokens setting. */
@@ -92,6 +94,8 @@ export interface ModelLoadParams {
   nUbatch: number;
   /** Why flash attention will not run fully on the GPU/NPU for this KV pair (null = it does). */
   flashAttnWarning: string | null;
+  /** The enabled text LoRA adapters sent as lora_list ([] = none, the key is then omitted). */
+  loraList: LlamaLoraAdapter[];
 }
 
 /** mmap decision for a load: 'on' / 'off' are the user's; 'auto' (or unset) = shouldDisableMmap. */
@@ -160,7 +164,7 @@ export function resolveFlashAttnType(opts: { android: boolean; requestedOff: boo
 
 export function buildModelParams(
   modelPath: string,
-  settings: { nThreads?: number; nBatch?: number; nUbatch?: number; contextLength?: number; flashAttn?: boolean; enableGpu?: boolean; gpuLayers?: number; cacheType?: string; cacheTypeV?: string; mmapMode?: 'auto' | 'on' | 'off'; inferenceBackend?: string; speculativeDecoding?: boolean; modelFileSizeBytes?: number; liveAvailableMB?: number; modelMaxContext?: number | null },
+  settings: { nThreads?: number; nBatch?: number; nUbatch?: number; contextLength?: number; flashAttn?: boolean; enableGpu?: boolean; gpuLayers?: number; cacheType?: string; cacheTypeV?: string; mmapMode?: 'auto' | 'on' | 'off'; inferenceBackend?: string; speculativeDecoding?: boolean; modelFileSizeBytes?: number; liveAvailableMB?: number; modelMaxContext?: number | null; textLoras?: TextLora[] },
 ): ModelLoadParams {
   const nThreads = settings.nThreads || getOptimalThreadCount();
   const nBatch = settings.nBatch || getOptimalBatchSize();
@@ -191,6 +195,10 @@ export function buildModelParams(
   // Flash attention is decided by the V cache: llama.cpp refuses a quantized V cache without it
   // (vendor src/llama-context.cpp:3732-3740); a quantized K cache alone does not need it.
   const flash_attn_type = resolveFlashAttnType({ android: flashAttnForced, requestedOff: flashAttnRequestedOff, cacheType: cacheTypeV });
+  // Enabled text LoRAs load with the model (llama.rn lora_list -> common_init_from_params loads and
+  // applies them, vendor common/common.cpp:1342-1357 / :1507-1508). Later changes apply live
+  // (LLMService.syncTextLoras), so the adapter set is not a reload setting.
+  const loraList = enabledLoraList(settings.textLoras);
   return {
     baseParams: {
       model: modelPath, use_mlock: false, n_batch: nBatch, n_ubatch: nUbatch, n_threads: nThreads,
@@ -212,6 +220,7 @@ export function buildModelParams(
       // was omitted for OpenCL to dodge an Adreno init crash on some older devices — if that
       // resurfaces, the fix is a per-device guard, not blanket f16 for all OpenCL GPUs.
       cache_type_k: cacheType, cache_type_v: cacheTypeV,
+      ...(loraList.length > 0 ? { lora_list: loraList } : {}),
     },
     nThreads, nBatch, ctxLen, nGpuLayers,
     // The cache types sent above (cache_type_k/v) for every backend. With K and V split, "f16" is
@@ -221,6 +230,7 @@ export function buildModelParams(
     cacheTypeV,
     nUbatch,
     flashAttnWarning: flashAttnWarningFor(backend, cacheType, cacheTypeV),
+    loraList,
   };
 }
 
@@ -403,9 +413,17 @@ async function initContextChain(
       logger.error(`[LLM] Both init attempts failed for model: ${modelPath}`);
       logger.error(`[LLM] Error chain — GPU: "${gpuMsg}" | CPU: "${cpuMsg}"`);
       const nativeSuffix = nativeReason ? `\n\nllama.cpp: ${nativeReason}` : '';
-      throw new Error(`Failed to load model at selected context ${contextLength}. This may indicate insufficient memory, a corrupted model file, or an unsupported model format.\n\nGPU: ${gpuMsg} | CPU: ${cpuMsg}${nativeSuffix}`);
+      throw new Error(`Failed to load model at selected context ${contextLength}. This may indicate insufficient memory, a corrupted model file, or an unsupported model format.${loraLoadHint(params)}\n\nGPU: ${gpuMsg} | CPU: ${cpuMsg}${nativeSuffix}`);
     }
   }
+}
+/** A load with text LoRAs fails as a whole when one adapter does not fit the base model
+ *  (common_init_from_params returns on the first failed adapter, vendor common/common.cpp:1343-1349). */
+export function loraLoadHint(params: object): string {
+  const list = (params as { lora_list?: Array<{ path: string }> }).lora_list;
+  if (!Array.isArray(list) || list.length === 0) return '';
+  const names = list.map(l => l.path.split('/').pop()).join(', ');
+  return `\n\nText LoRA enabled: ${names}. A LoRA must match this base model's architecture and sizes; disable it in Text Generation settings and load again.`;
 }
 export interface GpuInfo {
   gpuEnabled: boolean;

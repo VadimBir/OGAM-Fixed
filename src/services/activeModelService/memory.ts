@@ -7,6 +7,7 @@ import { DownloadedModel, ONNXImageModel } from '../../types';
 import { loadLlamaModelInfo } from 'llama.rn';
 import { buildModelParams, modelMaxContextFromMetadata } from '../llmHelpers';
 import { estimateLlamaMemory } from '../llamaMemoryEstimate';
+import { enabledTextLoraBytes } from '../textLora';
 import { hardwareService } from '../hardware';
 import { llmService } from '../llm';
 import { liteRTService } from '../litert';
@@ -100,10 +101,12 @@ export async function estimateTextModelMemoryMB(model: DownloadedModel): Promise
   try {
     const metadata = await loadLlamaModelInfo(model.filePath) as Record<string, unknown>;
     const params = buildModelParams(model.filePath, { ...settings, modelMaxContext: modelMaxContextFromMetadata(metadata) });
+    // Enabled text LoRA adapters load beside the weights (llama-adapter.cpp:335, same buffer type).
+    const loraBytes = await enabledTextLoraBytes(undefined, params.loraList.map(l => l.path));
     // params.cacheType is the type actually sent (an unset setting resolves to q8_0, not f16).
     const estimate = estimateLlamaMemory(metadata, {
       ctxLen: params.ctxLen, cacheType: params.cacheType, cacheTypeV: params.cacheTypeV, nBatch: params.nBatch,
-      weightsBytes: model.fileSize + (model.mmProjFileSize ?? 0),
+      weightsBytes: model.fileSize + (model.mmProjFileSize ?? 0) + loraBytes,
     });
     if (!estimate) return Math.ceil(fallback / (1024 * 1024));
     return Math.ceil(estimate.totalBytes / (1024 * 1024));

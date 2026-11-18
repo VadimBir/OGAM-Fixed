@@ -3,6 +3,33 @@
 Branch `app-refactor-fixes`. Newest first. Each entry gives the commit it ships in.
 State words: DONE = finished and unit tested; WIP = an agent is still editing, so the code is not checked; UNKNOWN = not verified.
 
+## 2026-11-18: text LoRA end to end (agent LT) + LoRA RAM in both estimates
+
+### DONE: GGUF text LoRA, local + remote
+- **Import:** a single `.gguf` with `general.type` "adapter" + `adapter.type` "lora" (keys llama.cpp checks, `llama-adapter.cpp:202-216`) is copied to `text_loras/` and added to `settings.textLoras`, never as a model (`textLora.ts`, `textLoraGguf.ts`, `useModelsScreen.ts`).
+- **Refusal:** a `.safetensors` text LoRA or LLM is refused before the copy, naming `convert_lora_to_gguf.py` / `convert_hf_to_gguf.py` (scripts not vendored: UNKNOWN locally).
+- **Load:** enabled adapters go as `lora_list` at init (`buildModelParams`); adapter bytes count in the load memory check (`llm.ts`).
+- **Live apply:** `LLMService.syncTextLoras` uses `applyLoraAdapters` / `removeLoraAdapters`, clears the KV cache, checks free RAM; no reload entry added.
+- **UI:** `TextLoraSection` (enable, scale 0-2, remove, import, mismatch note, llama.cpp error, CPU-fallback warning); remote llama-server list from `GET /lora-adapters`.
+- **Remote:** per-request `lora: [{id, scale}]` only through `acceptsServerExtensions`. Server field shape: UNKNOWN (no vendored server source).
+- **DONE:** `activeModelService/memory.ts` residency estimate now adds enabled adapter bytes (`enabledTextLoraBytes`), merged from LT's diff.
+
+### DONE: image LoRA RAM in the sd.cpp estimate
+- `ImageLora.sizeBytes` is set from `RNFS.stat` at import (`registerLora`; a failed stat does not fail the import).
+- `sdCppMemory` gets the `loraBytes` input and the `loraMB` output, and adds it to the peak. It is always counted: a LoRA is resident in runtime mode and held during the merge in immediate mode.
+- LoRAs imported before this change have no size, so they count as 0. Re-import them to have them counted.
+- Test added in `memoryEstimates.test.ts`.
+
+### Gates (this commit)
+- **jest:** 581 of 585 suites pass, 6854 tests pass. The only failure is the orphaned `imageGenerator.test.ts` (33 tests), waiting for the owner's OK to delete it.
+- **tsc:** the same 14 `src/services/sync/*` errors as before; none are new.
+- **eslint:** 0 errors (11 warnings).
+- **gradle `testDebugUnitTest`:** passes.
+- **The gradle message "Hexagon SDK not found, building CPU-only" is harmless:**
+  - llama.rn uses its prebuilt libraries (`rnllamaBuildFromSource` defaults to false, `node_modules/llama.rn/android/build.gradle:20`);
+  - the APK ships `assets/ggml-hexagon/libggml-htp-v73/v75/v79/v81.so`.
+- **Tests:** 47 new (6 suites); full jest: 1 failing suite `imageGenerator.test.ts`, pre-existing (`src/services/imageGenerator.ts` is not in the tree).
+
 ## 2026-11-18: image LoRA + safetensors audit (agent LI) + RAM-gate fix
 
 ### DONE: image LoRA path, import to sd.cpp c92d73c
@@ -32,7 +59,7 @@ State words: DONE = finished and unit tested; WIP = an agent is still editing, s
 
 ### UNKNOWN / open
 - On-device Vulkan with a runtime LoRA (q4_0 weights force runtime mode, `sdcpp_jni.cpp:302`). Needs the phone.
-- LoRA RAM in runtime mode is not in the estimate. Needs a `sizeBytes` field on `ImageLora`, to be added after the text-LoRA merge.
+- ~~LoRA RAM missing from the estimate~~: done in the next entry (`ImageLora.sizeBytes`).
 - local-dream (NPU) has no LoRA field in its request or launch arguments.
 - **Remote:** the app sends `loras:[{name, weight}]`, but sd-server's OpenAI route ignores it; only `sdapi` `lora:[{path, multiplier}]` works. The Desktop server's contract is UNKNOWN.
 - A `.ckpt` LoRA is still classified as a checkpoint.

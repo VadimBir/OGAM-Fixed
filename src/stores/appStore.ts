@@ -39,6 +39,7 @@ import { migratePersistedState } from './appStoreMigrations';
 import { defaultImageSteps, SWEET_SPOT_SIZE } from '../utils/imageGenAdvice';
 import type { SdWeightType } from '../services/sdCppMemory';
 import { SAMPLING_DEFAULTS } from '../services/samplingParams';
+import type { RemoteTextLoraScale, TextLora } from '../services/textLoraTypes';
 
 type OnboardingChecklist = {
   downloadedModel: boolean;
@@ -123,6 +124,10 @@ export type AppSettings = {
   imageScheduler?: string;
   /** LoRA adapters for stable-diffusion.cpp models (enabled ones apply to every generation). */
   imageLoras?: ImageLora[];
+  /** GGUF LoRA adapters for local text models (llama.rn lora_list; enabled ones apply live). */
+  textLoras?: TextLora[];
+  /** Per-request LoRA scales for the user's llama-server, keyed by its API root (textLoraRemote). */
+  remoteTextLoras?: Record<string, RemoteTextLoraScale[]>;
   /** Civitai search: include NSFW models and previews. Unset = off (store-safe default). */
   civitaiShowNsfw?: boolean;
   /** sd.cpp: weight type converted to at load (the file is not rewritten); 'auto' keeps the file's. */
@@ -347,6 +352,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   imageNegativePrompt: '',
   imageSeed: -1,
   imageClipSkip: 0,
+  textLoras: [],
+  remoteTextLoras: {},
   enhanceImagePrompts: false,
   enableGpu: Platform.OS === 'ios',
   inferenceBackend:
@@ -477,8 +484,9 @@ export const useAppStore = create<AppState>()(
         }
       },
       // Resets the generation knobs, NOT the user's own content: the system prompt, the persona and
-      // the imported LoRA list survive. Dropping imageLoras left every imported LoRA file on disk
+      // the imported LoRA lists survive. Dropping imageLoras left every imported LoRA file on disk
       // (image_loras/) with no row to enable or delete it, and a re-import refused the same name.
+      // textLoras survives for the same reason (text_loras/).
       resetSettings: () => {
         const before = get().settings;
         const after: AppSettings = {
@@ -489,6 +497,7 @@ export const useAppStore = create<AppState>()(
           personaCaveats: before.personaCaveats,
           personaAvatarUri: before.personaAvatarUri,
           imageLoras: before.imageLoras,
+          textLoras: before.textLoras,
         };
         set({ settings: after });
         emitChangedModelSettings(before, after);

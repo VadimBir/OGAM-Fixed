@@ -28,6 +28,7 @@ import {
   remoteApiUrl,
   remoteAuthorizationHeaders,
 } from '../remoteTransportPolicy';
+import { remoteLoraPayload } from '../textLoraRemote';
 
 export type { OpenAIChatMessage, OpenAIConfig } from './openAICompatibleTypes';
 
@@ -175,6 +176,8 @@ export class OpenAICompatibleProvider implements LLMProvider {
       ...openAISamplingParams(options, localServer || isOpenRouter, localServer),
       // llama-server: reuse the KV cache of the shared prompt prefix across turns.
       ...(localServer && { cache_prompt: true }),
+      // llama-server per-request LoRA scales ({ lora: [{ id, scale }] }), only when the user set any.
+      ...(localServer && remoteLoraPayload(this.config.endpoint)),
       ...(this.modelCapabilities.supportsToolCalling && options.tools && options.tools.length > 0 && {
         tools: options.tools,
         tool_choice: 'auto',

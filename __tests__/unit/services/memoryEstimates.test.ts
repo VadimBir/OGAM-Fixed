@@ -153,4 +153,11 @@ describe('estimateSdCppMemory (stable-diffusion.cpp)', () => {
     // A measured family keeps its shape-based number (no floor).
     expect(estimateSdCppMemory({ ...base, weightType: 'q4_0' }).weightsMB).toBeLessThan(2.13e9 / (1024 * 1024));
   });
+  it('enabled LoRA bytes add to the peak (held at merge, resident at runtime)', () => {
+    const none = estimateSdCppMemory({ ...base });
+    const lora = estimateSdCppMemory({ ...base, loraBytes: 200 * 1024 * 1024 });
+    expect(none.loraMB).toBe(0);
+    expect(lora.loraMB).toBe(200);
+    expect(lora.totalMB - none.totalMB).toBeGreaterThanOrEqual(220); // 200 MB x 1.1 safety
+  });
 });
