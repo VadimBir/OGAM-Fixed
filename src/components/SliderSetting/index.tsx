@@ -25,6 +25,23 @@ interface SliderSettingProps {
   compact?: boolean;
 }
 
+/** Most native slider positions a SliderSetting asks for (more than a phone track has pixels). */
+export const MAX_SLIDER_POSITIONS = 1000;
+
+/**
+ * The step handed to the native slider. @react-native-community/slider 5.1.2 builds an array of
+ * every step on EVERY render (dist/Slider.js: Array.from({length: (max - min) / step + 1})), so the
+ * seed slider (-1..2147483647, step 1) allocated 2.1 billion entries and froze the JS thread the
+ * moment Advanced opened. A range wider than MAX_SLIDER_POSITIONS gets a coarser multiple of `step`;
+ * commits still snap to `step` and tap-to-type stays exact. Android maps the last position to max
+ * exactly (ReactSlider.toRealProgress), so the ends stay reachable.
+ */
+export function nativeSliderStep(min: number, max: number, step: number): number {
+  if (step <= 0 || max <= min) return step;
+  const positions = (max - min) / step;
+  return positions > MAX_SLIDER_POSITIONS ? step * Math.ceil(positions / MAX_SLIDER_POSITIONS) : step;
+}
+
 /**
  * A single numeric setting control: a draggable slider for quick changes, with
  * a live value you can tap to type an exact number (clamped to min/max) for
@@ -134,7 +151,7 @@ export const SliderSetting: React.FC<SliderSettingProps> = ({
         style={[styles.slider, compact && styles.compactSlider]}
         minimumValue={min}
         maximumValue={max}
-        step={step}
+        step={nativeSliderStep(min, max, step)}
         value={value}
         onValueChange={setDragValue}
         onSlidingComplete={(v) => {

@@ -3,6 +3,29 @@
 Branch `app-refactor-fixes`. Newest first. Each entry gives the commit it ships in.
 State words: DONE = finished and unit tested; WIP = an agent is still editing, so the code is not checked; UNKNOWN = not verified.
 
+## 2026-11-19: user bug: Settings froze on opening Advanced
+
+### Cause (DONE)
+- **What broke:** `@react-native-community/slider` 5.1.2 builds an array with one entry per step, on every render (`dist/Slider.js`: `Array.from({length: (max-min)/step + 1})`).
+- **Why it froze:** the Seed slider runs from -1 to 2147483647 with step 1. It sits in text Advanced (`useTextGenerationSettings.ts:226`) and image Advanced (`ImageDefaultsSettings.tsx:55`). Opening Advanced therefore allocated 2.1 billion entries and froze the JS thread.
+- **Why the tests missed it:** jest replaces the slider with a plain View (`jest.setup.ts:278`).
+
+### Fix (DONE)
+- **`SliderSetting`:** `nativeSliderStep` hands the native slider a coarser multiple of the step, so the slider asks for at most 1000 positions.
+- **Unchanged:** commits still snap to the real step, and tap-to-type stays exact. Android maps the last position to max exactly (`ReactSlider.toRealProgress`).
+- **Also coarsened:** the two 0-4096 window sliders now move 5 tokens per position.
+- **Tests:**
+  - `SliderSetting.test.tsx`: `nativeSliderStep`, plus exact seed commit and typing.
+  - `ModelSettingsScreen.test.tsx`: every slider in text and image Advanced asks for at most 1000 positions.
+- **Device:** UNKNOWN, not yet run on a phone.
+
+### Gates + APK (this commit)
+- **jest:** 582 of 586 suites pass, 6889 tests pass. The only failure is the orphaned `imageGenerator.test.ts` (33 tests).
+- **tsc:** 0 errors in `src/` outside `src/services/sync/*`.
+- **eslint:** 0 errors on the changed files.
+- **gradle `assembleRelease`:** passes.
+- **APK:** `OGAM-slider-freeze-20261119.apk`, 194,720,832 bytes, SHA-256 `53d5bba8807303210e83838c51fdea89fe766a66a2eab34b1da987584916672a`.
+
 ## 2026-11-19: user bugs: image safetensors import and Civitai login (agents SI, CA)
 
 ### Gates + APK (this commit)

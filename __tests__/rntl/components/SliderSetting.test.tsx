@@ -123,3 +123,34 @@ describe('SliderSetting', () => {
     expect(onChange).toHaveBeenCalledWith(0.7);
   });
 });
+
+describe('nativeSliderStep (slider 5.1.2 allocates one entry per step on every render)', () => {
+  const { nativeSliderStep, MAX_SLIDER_POSITIONS } = require('../../../src/components/SliderSetting');
+  it('keeps the real step while the range has <= 1000 positions', () => {
+    expect(nativeSliderStep(0, 2, 0.05)).toBe(0.05);
+    expect(nativeSliderStep(0, 1000, 1)).toBe(1);
+  });
+  it('coarsens a huge range to a multiple of the step with <= 1000 positions', () => {
+    const s = nativeSliderStep(-1, 2147483647, 1);
+    expect(Number.isInteger(s)).toBe(true);
+    expect((2147483647 + 1) / s).toBeLessThanOrEqual(MAX_SLIDER_POSITIONS);
+    expect(nativeSliderStep(0, 4096, 1)).toBe(5);
+  });
+  it('passes through a zero step or an empty range', () => {
+    expect(nativeSliderStep(0, 10, 0)).toBe(0);
+    expect(nativeSliderStep(5, 5, 1)).toBe(1);
+  });
+  it('the seed slider still commits an exact integer and typing stays exact', () => {
+    const onChange = jest.fn();
+    const { getByTestId } = render(
+      <SliderSetting testID="seed" label="Seed" value={-1} min={-1} max={2147483647} step={1} onChange={onChange} />,
+    );
+    expect(getByTestId('seed-slider').props.step).toBe(nativeSliderStep(-1, 2147483647, 1));
+    fireEvent(getByTestId('seed-slider'), 'slidingComplete', 12345.4);
+    expect(onChange).toHaveBeenLastCalledWith(12345);
+    fireEvent.press(getByTestId('seed-value-button'));
+    fireEvent.changeText(getByTestId('seed-input'), '987654321');
+    fireEvent(getByTestId('seed-input'), 'submitEditing');
+    expect(onChange).toHaveBeenLastCalledWith(987654321);
+  });
+});

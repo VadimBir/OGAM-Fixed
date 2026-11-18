@@ -1157,3 +1157,23 @@ describe('Speech sections — Transcription (STT) + Text to Speech (TTS)', () =>
     expect(view.queryByTestId('tts-accordion')).toBeNull();
   });
 });
+
+describe('ModelSettingsScreen Advanced sliders stay cheap to render', () => {
+  beforeEach(() => resetStores());
+  // @react-native-community/slider 5.1.2 allocates (max - min) / step + 1 entries on every render
+  // (dist/Slider.js Array.from). The seed slider (-1..2147483647, step 1) froze the phone on
+  // opening Advanced; every slider on the screen must ask for at most 1000 positions.
+  it('every slider in the open text + image Advanced sections asks for <= 1000 positions', () => {
+    const result = renderWithSections('text', 'image');
+    const sliders = result.UNSAFE_root.findAll(
+      n => typeof n.type === 'string' && typeof n.props.minimumValue === 'number' && typeof n.props.step === 'number',
+    );
+    expect(sliders.length).toBeGreaterThan(10);
+    const seed = sliders.filter(n => n.props.maximumValue === 2147483647);
+    expect(seed.length).toBeGreaterThanOrEqual(2); // text seed + image seed are both rendered
+    for (const n of sliders) {
+      const positions = (n.props.maximumValue - n.props.minimumValue) / n.props.step;
+      expect({ id: n.props.testID, ok: n.props.step === 0 || positions <= 1000 }).toEqual({ id: n.props.testID, ok: true });
+    }
+  });
+});
