@@ -10,7 +10,10 @@ State words: DONE = finished and unit tested; WIP = an agent is still editing, s
 - **tsc:** 14 errors in `src/`, all in `src/services/sync/*`. They come from the rebuilt `@offgrid/sync` types; that folder is unchanged since 2cb50bff.
 - **eslint:** 0 errors (11 warnings).
 - **gradle `:app:testDebugUnitTest`:** BUILD SUCCESSFUL.
-- **Release APK:** build started.
+- **Release APK, built from c760bf91:**
+  - `app-release.apk`: 194,671,728 bytes, SHA-256 `ff3e8e0c906148a214aaf05243b431cf960dfab56da31f728d711b3c5cfb4dd6`;
+  - it contains the 60.7 MB `lib/arm64-v8a/libsdcpp_jni.so` (Vulkan);
+  - served on the LAN as `OGAM-vulkan-20261118.apk`. The APK file is not committed to the repo.
 
 ## 2026-11-18: agents Q, R, A3 reports + merge fixes
 
