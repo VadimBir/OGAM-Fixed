@@ -1,4 +1,5 @@
 import { ToolDefinition } from './types';
+import { imagePromptDescription } from './imageTool';
 
 export const AVAILABLE_TOOLS: ToolDefinition[] = [
   {
@@ -90,22 +91,22 @@ export const AVAILABLE_TOOLS: ToolDefinition[] = [
     id: 'generate_image',
     name: 'generate_image',
     displayName: 'Generate Image',
-    description: 'Generate an image on-device from a text description and show it directly in the chat. Call this whenever the user asks to create, draw, paint, render, generate, or make an image, picture, photo, wallpaper, avatar, logo, or artwork. Write a vivid, detailed English `prompt` describing the desired subject, style, and composition. The image is produced by the selected local image model and appears as an attachment in the conversation.',
+    description: 'Create an image and show it in the chat. Call it when the user asks to draw, paint, render or make an image, photo, logo or artwork. Only set optional arguments the user asked for; omitted ones use the user\'s settings.',
     icon: 'image',
     parameters: {
       prompt: {
         type: 'string',
-        description: 'Detailed English description of the image to generate (subject, style, composition, lighting).',
+        // Replaced at schema time by the selected image model's prompt style (imagePromptDescription).
+        description: 'English description: subject, setting, style, lighting.',
         required: true,
       },
-      negative_prompt: {
-        type: 'string',
-        description: 'Optional: things to avoid in the image (e.g. "blurry, extra fingers, text").',
-      },
-      steps: {
-        type: 'integer',
-        description: 'Optional denoising steps. Higher = more detail but slower; typical 8-30. Omit to use the user\'s configured default.',
-      },
+      negative_prompt: { type: 'string', description: 'Things to avoid, e.g. "blurry, text".' },
+      width: { type: 'integer', description: 'Pixels, 64-512, multiple of 64.' },
+      height: { type: 'integer', description: 'Pixels, 64-512, multiple of 64.' },
+      steps: { type: 'integer', description: 'Denoising steps, 1-50. More = slower.' },
+      guidance: { type: 'number', description: 'Prompt strength (CFG), 1-20.' },
+      seed: { type: 'integer', description: 'Same seed = same image. Omit for random.' },
+      sampler: { type: 'string', description: 'Sampler name, e.g. "euler_a".' },
     },
   },
   {
@@ -250,6 +251,12 @@ export function buildToolBlockPromptHint(enabledToolIds: readonly string[]): str
   );
 }
 
+/** A parameter's model-facing description. generate_image's `prompt` follows the selected image
+ *  model's prompt style (SD 1.5 tags vs natural language), so a small model writes the right kind. */
+function parameterDescription(tool: ToolDefinition, key: string, description: string): string {
+  return tool.id === 'generate_image' && key === 'prompt' ? imagePromptDescription() : description;
+}
+
 export function getToolsAsOpenAISchema(enabledToolIds: readonly string[]) {
   return AVAILABLE_TOOLS
     .filter(tool => enabledToolIds.includes(tool.id))
@@ -267,7 +274,7 @@ export function getToolsAsOpenAISchema(enabledToolIds: readonly string[]) {
               key,
               {
                 type: param.type,
-                description: param.description,
+                description: parameterDescription(tool, key, param.description),
                 ...(param.enum ? { enum: param.enum } : {}),
               },
             ]),
@@ -293,7 +300,7 @@ export function getToolsAsOpenAISchema(enabledToolIds: readonly string[]) {
 /** `name (type, required) — description` lines, so a text-hint model knows the argument names. */
 function toolParameterLines(tool: ToolDefinition): string {
   return Object.entries(tool.parameters)
-    .map(([key, p]) => `    ${key} (${p.type}${p.required ? ', required' : ''}${p.enum ? `, one of: ${p.enum.join('|')}` : ''}) — ${p.description}`)
+    .map(([key, p]) => `    ${key} (${p.type}${p.required ? ', required' : ''}${p.enum ? `, one of: ${p.enum.join('|')}` : ''}) — ${parameterDescription(tool, key, p.description)}`)
     .join('\n');
 }
 

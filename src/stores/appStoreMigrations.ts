@@ -85,7 +85,7 @@ export function migratePersistedState<TState>(
   if (persistedState?.settings && !persistedState.settings.cacheType) {
     merged.settings = {
       ...merged.settings,
-      cacheType: persistedState.settings.flashAttn ? 'q8_0' : 'f16',
+      cacheType: 'q8_0',
       flashAttn: true,
     };
   }

@@ -74,7 +74,6 @@ export function useTextGenerationSettings() {
 
   const temperature = settings.temperature ?? DEFAULT_SETTINGS.temperature;
   const maxTokens = settings.maxTokens ?? DEFAULT_SETTINGS.maxTokens;
-  const reasoningBudget = settings.reasoningBudget ?? -1;
   const maxToolCalls = settings.maxToolCalls ?? DEFAULT_SETTINGS.maxToolCalls;
   const contextLength =
     settings.contextLength ?? DEFAULT_SETTINGS.contextLength;
@@ -87,21 +86,11 @@ export function useTextGenerationSettings() {
       : headerContext?.path === selectedPath ? headerContext.max : null
     : modelMaxContext;
   const llamaModelLimit = selectedModelLimit ?? Math.max(maxTokens, contextLength, 512);
-
-  useEffect(() => {
-    if (isLiteRT) return;
-    const nextContext = selectedModelLimit ? Math.min(contextLength, selectedModelLimit) : contextLength;
-    const nextMaxTokens = Math.min(maxTokens, nextContext);
-    // A cap at or above Max Tokens is Auto (the slider's top position).
-    const nextBudget = reasoningBudget >= nextMaxTokens ? -1 : reasoningBudget;
-    if (nextContext !== contextLength || nextMaxTokens !== maxTokens || nextBudget !== reasoningBudget) {
-      updateSettings({
-        ...(nextContext !== contextLength ? { contextLength: nextContext } : {}),
-        ...(nextMaxTokens !== maxTokens ? { maxTokens: nextMaxTokens } : {}),
-        ...(nextBudget !== reasoningBudget ? { reasoningBudget: nextBudget } : {}),
-      });
-    }
-  }, [isLiteRT, selectedModelLimit, contextLength, maxTokens, reasoningBudget, updateSettings]);
+  // The selected model's limit CLAMPS WHAT IS SHOWN, never what is stored. An effect here used to
+  // write min(global, model limit) back into the GLOBAL contextLength / maxTokens / reasoningBudget
+  // whenever a small model was selected, so picking a 2K-context model once permanently cut every
+  // later model to 2K. The stored values are the user's choice; the load path clamps per model.
+  const effectiveContext = Math.min(contextLength, llamaModelLimit);
 
   const liteRTTemperature =
     settings.liteRTTemperature ?? DEFAULT_SETTINGS.liteRTTemperature;
@@ -142,9 +131,9 @@ export function useTextGenerationSettings() {
       description: 'Maximum length of generated response',
       // Clamped for DISPLAY too: a value stored by an older build (or before the context came
       // down) must not render past the end of its own slider.
-      value: Math.min(maxTokens, maxTokensCeiling(contextLength)),
+      value: Math.min(maxTokens, maxTokensCeiling(effectiveContext)),
       min: MIN_MAX_TOKENS,
-      max: Math.min(llamaModelLimit, maxTokensCeiling(contextLength)),
+      max: Math.min(llamaModelLimit, maxTokensCeiling(effectiveContext)),
       step: 64,
       formatValue: formatMaxTokens,
       // Clamped on WRITE as well as on display: the slider cannot reach an illegal value, but

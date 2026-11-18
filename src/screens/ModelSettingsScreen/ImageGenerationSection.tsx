@@ -66,7 +66,7 @@ const ImageGpuSection: React.FC = () => {
         <View style={styles.toggleInfo}>
           <Text style={styles.toggleLabel}>OpenCL GPU Acceleration</Text>
           <Text style={styles.toggleDesc}>
-            Use GPU for faster image generation. First run may be slower while optimizing for your device.
+            Use GPU for faster image generation. Applies at 512x512 only (other sizes decode on the CPU to avoid corrupted images). First run may be slower while optimizing for your device.
           </Text>
         </View>
         <Switch
@@ -130,7 +130,8 @@ const DetectionMethodRow: React.FC = () => {
 // ─── Advanced Section ────────────────────────────────────────────────────────
 
 const ImageAdvancedSection: React.FC = () => {
-  const { settings, updateSettings } = useAppStore();
+  const { settings, updateSettings, downloadedImageModels, activeImageModelId } = useAppStore();
+  const isSdCpp = downloadedImageModels.find(m => m.id === activeImageModelId)?.backend === 'sdcpp';
 
   return (
     <>
@@ -146,7 +147,9 @@ const ImageAdvancedSection: React.FC = () => {
       <SliderSetting
         testID="image-threads"
         label="Image Threads"
-        description="CPU threads used for image generation (applies on next image model load)"
+        description={isSdCpp
+          ? 'CPU threads used for image generation (applies on next image model load)'
+          : 'Used by stable-diffusion.cpp models only; the NPU/GPU engine sets its own thread count'}
         value={settings?.imageThreads ?? 4}
         min={1} max={8} step={1}
         onChange={(value) => updateSettings({ imageThreads: value })}
@@ -168,7 +171,14 @@ export const ImageGenerationSection: React.FC = () => {
   const { settings, updateSettings, downloadedImageModels, activeImageModelId } = useAppStore();
   const [showAdvanced, setShowAdvanced] = useState(false);
   // stable-diffusion.cpp checkpoints take free W×H (ImageEngineSettings); the square slider is LocalDream's.
-  const isSdCpp = downloadedImageModels.find(m => m.id === activeImageModelId)?.backend === 'sdcpp';
+  const activeBackend = downloadedImageModels.find(m => m.id === activeImageModelId)?.backend;
+  const isSdCpp = activeBackend === 'sdcpp';
+  let sizeDescription = 'Output resolution (smaller = faster, larger = more detail)';
+  if (activeBackend === 'qnn') {
+    sizeDescription = 'NPU models render 512x512 unless the model ships a resolution patch for the chosen size';
+  } else if (activeBackend === 'mnn') {
+    sizeDescription = 'CPU/GPU models render a square image (smaller = faster; below 256 output is incoherent)';
+  }
 
   const isAutoMode = settings?.imageGenerationMode === 'auto';
   const trackColor = { false: colors.surfaceLight, true: `${colors.primary}80` };
@@ -217,7 +227,7 @@ export const ImageGenerationSection: React.FC = () => {
       {!isSdCpp && <SliderSetting
         testID="image-size"
         label="Image Size"
-        description="Output resolution (smaller = faster, larger = more detail)"
+        description={sizeDescription}
         // Single source of truth for the floor: SD-class models render garbage below the
         // sweet spot (256), so both this screen and the chat modal (ImageQualitySliders) share
         // the SAME min/fallback — the surfaces can't diverge and a sub-256 value is unreachable.

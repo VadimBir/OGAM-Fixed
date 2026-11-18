@@ -31,11 +31,10 @@ jest.mock('@react-navigation/native', () => ({
 
 describe('memory refusal shows "Load Anyway" on the rendered alert, not a dead-end (red-flow)', () => {
   it('tapping send when the pre-load context gate refuses surfaces a "Load Anyway" override the user can tap', async () => {
-    // Pinned to iOS ON PURPOSE: the reclaim-aware gate fix (textPreloadGateReclaimAware) makes the
-    // Android-aggressive cell ADMIT via the LMK reclaim credit, so the refusal this test needs only
-    // survives on iOS (no reclaim credit — the gate reads raw). residency still admits (3.5GB record);
-    // resolveSafeContext refuses on the raw 5GB on-disk weight estimate. deferInitialLoad → first send
-    // triggers the real lazy load. This is why the two memory tests don't contradict each other.
+    // Pinned to iOS ON PURPOSE: on Android the live residency gate now refuses this cell FIRST
+    // (textPreloadGateReclaimAware), so only iOS isolates the pre-load gate this test targets: residency
+    // admits (3.5GB record, physical budget); resolveSafeContext refuses on the raw 5GB on-disk weight
+    // estimate. deferInitialLoad → first send triggers the real lazy load.
     const h = await setupChatScreen({
       engine: 'llama',
       platform: 'ios',

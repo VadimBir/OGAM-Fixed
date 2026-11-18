@@ -35,6 +35,9 @@ import { doLoadTextModel, doLoadImageModel, checkImageModelCanLoad } from './loa
 import {
   getResourceUsage as _getResourceUsage,
   syncWithNativeState as _syncWithNativeState,
+  memoryRefusalDetail,
+  isTextGenerationInFlight,
+  isImageGenerationInFlight,
 } from './utils';
 ;
 class ActiveModelService {
@@ -185,9 +188,10 @@ class ActiveModelService {
     );
     // First refusal is OVERRIDABLE ("Load Anyway"); a refusal UNDER override is a hard limit → plain Error.
     if (!room.fits) {
+      const detail = memoryRefusalDetail(room);
       throw opts?.override
-        ? new Error('Not enough free memory to load this model, even after freeing other models. Close other apps or choose a smaller model.')
-        : new OverridableMemoryError('Not enough free memory to load this model. Close other apps or choose a smaller model.');
+        ? new Error(`Not enough free memory to load this model, even after freeing other models${detail}. Close other apps or choose a smaller model.`)
+        : new OverridableMemoryError(`Not enough free memory to load this model${detail}. Close other apps or choose a smaller model.`);
     }
     this.loadingState.text = true;
     this.notifyListeners();
@@ -202,7 +206,8 @@ class ActiveModelService {
         this.setLoadedText(id);
         useAppStore.getState().setTextModelEvicted(false); // loaded → clear any prior eviction
         modelResidencyManager.register(
-          { key: 'text', type: 'text', modelId, sizeMB: textSizeMB, dirtyMemory: textIsDirty },
+          // isBusy: the Android trim release never drops the text model mid-generation.
+          { key: 'text', type: 'text', modelId, sizeMB: textSizeMB, dirtyMemory: textIsDirty, isBusy: isTextGenerationInFlight },
           () => this.doUnloadTextModelLocked(true), // eviction keeps the selection
         );
       },
@@ -338,7 +343,8 @@ class ActiveModelService {
           // os_proc RAM (budgetForSpec dirty-pressure), or a sidecar stacks onto its
           // generation spike and jetsams the app. Without this flag the resident-dirty
           // arm of the gate is a no-op.
-          { key: 'image', type: 'image', dirtyMemory: true, sizeMB: Math.round(estimateImageModelRamBytes(model) / (1024 * 1024)) },
+          // isBusy: the trim / post-generation release never drops it mid-generation.
+          { key: 'image', type: 'image', dirtyMemory: true, sizeMB: Math.round(estimateImageModelRamBytes(model) / (1024 * 1024)), isBusy: isImageGenerationInFlight },
           () => this.doUnloadImageModelLocked(true), // eviction keeps the selection
         );
       },

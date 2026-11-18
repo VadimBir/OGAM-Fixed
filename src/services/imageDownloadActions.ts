@@ -13,7 +13,7 @@ import { useDownloadStore, isActiveStatus } from '../stores/downloadStore';
 import { makeImageModelKey } from '../utils/modelKey';
 import { ImageModelDescriptor, ImageDownloadDeps } from './imageModelDownloadTypes';
 import { getQnnWarningMessage, showQnnWarningAlert } from './imageDownloadQnn';
-import { ensureImageExtractionComplete } from '../utils/imageModelIntegrity';
+import { ensureImageExtractionComplete, validateImageModelDir } from '../utils/imageModelIntegrity';
 import logger from '../utils/logger';
 
 // ImageDownloadDeps now lives in ./types (so imageDownloadQnn can import it without cycling back
@@ -410,6 +410,18 @@ export async function downloadCoreMLMultiFile(
   }
 }
 
+/** `_ready` present, or (legacy mnn/qnn dir from before the sentinel) the extraction check passes. */
+async function isCompleteImageModelDir(modelDir: string, backend: ImageModelDescriptor['backend']): Promise<boolean> {
+  if (await RNFS.exists(`${modelDir}/_ready`)) return true;
+  if (backend !== 'mnn' && backend !== 'qnn') return false;
+  const result = await validateImageModelDir(modelDir, backend);
+  if (!result.complete) return false;
+  await RNFS.writeFile(`${modelDir}/_ready`, '', 'utf8').catch((error: unknown) => {
+    logger.warn(`[ImageDownload] could not mark ${modelDir} ready:`, error);
+  });
+  return true;
+}
+
 export async function proceedWithDownload(
   modelInfo: ImageModelDescriptor,
   deps: ImageDownloadDeps,
@@ -439,14 +451,21 @@ export async function proceedWithDownload(
   const existing = useDownloadStore.getState().downloads[modelKey];
   if (existing && (isActiveStatus(existing.status) || existing.status === 'paused')) return;
 
-  // Guard: if files already exist on disk, register without re-downloading.
+  // Guard: if a COMPLETE model is already on disk, register without re-downloading. A directory
+  // alone proves nothing - a killed unzip leaves one - so it must carry `_ready` (written only
+  // after the extraction check), or, for a pre-sentinel mnn/qnn install, pass that same check now.
+  // Anything else is a partial leftover: removed, then downloaded fresh.
   const imageModelsDir = modelManager.getImageModelsDirectory();
   const modelDir = `${imageModelsDir}/${modelInfo.id}`;
   if (await RNFS.exists(modelDir)) {
-    const resolvedModelDir = modelInfo.backend === 'coreml' ? await resolveCoreMLModelDir(modelDir) : modelDir;
-    logger.log(`[ImageDownload] proceedWithDownload zip - files exist on disk, registering directly modelId=${modelInfo.id}`);
-    await registerAndNotify(deps, { imageModel: buildImageModel(modelInfo, resolvedModelDir), modelName: modelInfo.name });
-    return;
+    if (await isCompleteImageModelDir(modelDir, modelInfo.backend)) {
+      const resolvedModelDir = modelInfo.backend === 'coreml' ? await resolveCoreMLModelDir(modelDir) : modelDir;
+      logger.log(`[ImageDownload] proceedWithDownload zip - complete model on disk, registering directly modelId=${modelInfo.id}`);
+      await registerAndNotify(deps, { imageModel: buildImageModel(modelInfo, resolvedModelDir), modelName: modelInfo.name });
+      return;
+    }
+    logger.warn(`[ImageDownload] proceedWithDownload zip - partial model dir (no _ready) removed before re-download modelId=${modelInfo.id}`);
+    await cleanupImageModelDir(modelInfo.id);
   }
 
   // Publish a QUEUED row IMMEDIATELY, before awaiting the (slot-limited) native start (same

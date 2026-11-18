@@ -86,6 +86,7 @@ describe('generationService', () => {
     (generationService as any).listeners.clear();
     (generationService as any).abortRequested = false;
     (generationService as any).queueProcessor = null;
+    (generationService as any).queueDispatchInFlight = false;
 
     // Re-setup mocks after clearAllMocks
     mockedLlmService.isModelLoaded.mockReturnValue(true);
@@ -705,6 +706,50 @@ describe('generationService', () => {
       // Actually processNextInQueue clears the queue first then calls processor
       // If no processor, it returns early without clearing
       expect(generationService.getState().queuedMessages).toHaveLength(1);
+    });
+
+    it('coalesces only the head conversation and leaves other conversations queued', async () => {
+      let release!: () => void;
+      const processor = jest
+        .fn()
+        .mockImplementationOnce(() => new Promise<void>(resolve => { release = resolve; }))
+        .mockResolvedValue(undefined);
+      generationService.setQueueProcessor(processor);
+      generationService.enqueueMessage({ id: 'a1', conversationId: 'conv-A', text: 'A one', messageText: 'A one' });
+      generationService.enqueueMessage({ id: 'b1', conversationId: 'conv-B', text: 'B one', messageText: 'B one' });
+      generationService.enqueueMessage({ id: 'a2', conversationId: 'conv-A', text: 'A two', messageText: 'A two' });
+
+      (generationService as any).processNextInQueue();
+
+      expect(processor).toHaveBeenCalledTimes(1);
+      const first = processor.mock.calls[0][0];
+      expect(first.conversationId).toBe('conv-A');
+      expect(first.text).toBe('A one\n\nA two');
+      expect(first.text).not.toContain('B one');
+      expect(generationService.getState().queuedMessages.map(m => m.id)).toEqual(['b1']);
+
+      // A second trigger while the first batch is still in flight must not start a concurrent batch.
+      (generationService as any).processNextInQueue();
+      expect(processor).toHaveBeenCalledTimes(1);
+
+      // When the first batch settles, the other conversation's item drains on its own.
+      release();
+      await new Promise<void>(resolve => setTimeout(resolve, 0));
+      expect(processor).toHaveBeenCalledTimes(2);
+      expect(processor.mock.calls[1][0]).toMatchObject({ id: 'b1', conversationId: 'conv-B', text: 'B one' });
+      expect(generationService.getState().queuedMessages).toHaveLength(0);
+    });
+
+    it('keeps items queued with no processor and drains them once a processor is set and drainQueue runs', () => {
+      generationService.setQueueProcessor(null);
+      generationService.enqueueMessage({ id: 'q1', conversationId: 'conv-1', text: 'kept', messageText: 'kept' });
+      generationService.drainQueue();
+      expect(generationService.getState().queuedMessages).toHaveLength(1);
+
+      const processor = jest.fn().mockResolvedValue(undefined);
+      generationService.setQueueProcessor(processor);
+      generationService.drainQueue();
+      expect(processor).toHaveBeenCalledWith(expect.objectContaining({ id: 'q1', text: 'kept' }));
     });
   });
 

@@ -6,7 +6,7 @@
  * symbols (ImageGenPhase, ImageGenerationState, isInFlight), so every existing
  * `import { ... } from './imageGenerationService'` keeps working unchanged.
  */
-import { GeneratedImage } from '../types';
+import { GeneratedImage, ONNXImageModel, RemoteServer } from '../types';
 
 /**
  * Explicit lifecycle phase — the single source of truth for "what is image
@@ -69,6 +69,41 @@ export interface GenerateImageParams {
   width?: number;
   height?: number;
 }
+
+/**
+ * Why a generate request produced no image. One code per cause, so a caller (the generate_image
+ * tool) can tell the model what to do instead of one generic "make sure a model is selected".
+ */
+export type ImageGenFailureReason =
+  | 'no_model'
+  | 'load_failed'
+  | 'out_of_memory'
+  | 'busy'
+  | 'cancelled'
+  | 'engine_error';
+
+/** The values the engine actually ran with, after every clamp/policy step. A field is absent when
+ *  the engine is not sent that value (the remote path sends prompt + size only). */
+export interface ImageGenUsedParams {
+  engine: 'local' | 'remote';
+  width: number;
+  height: number;
+  steps?: number;
+  guidance?: number;
+  seed?: number;
+  /** '' / undefined = the engine's default sampler. */
+  sampler?: string;
+}
+
+/** The engine a generate request would run on right now; null = none available. */
+export type ActiveImageEngine =
+  | { kind: 'remote'; server: RemoteServer }
+  | { kind: 'local'; model: ONNXImageModel }
+  | null;
+
+export type ImageGenerationOutcome =
+  | { ok: true; image: GeneratedImage; used: ImageGenUsedParams }
+  | { ok: false; reason: ImageGenFailureReason; message: string };
 
 /** Engine-specific knobs resolved once per request and forwarded to the format-selected engine. */
 export interface EngineImageOptions {

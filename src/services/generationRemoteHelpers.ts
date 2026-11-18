@@ -17,6 +17,15 @@ import {
   type GenerationWithToolsRequest,
 } from './generationServiceHelpers';
 
+/**
+ * True for a failure to reach the server (httpClient: 'Network error', 'Request timeout',
+ * 'Remote server stopped responding'; fetch: 'Network request failed'). False for an HTTP error body.
+ */
+export function isUnreachableError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /network error|network request failed|request timeout|timed? ?out|stopped responding|ECONNREFUSED|ECONNRESET|EHOSTUNREACH|ENETUNREACH/i.test(message);
+}
+
 export async function generateRemoteResponseImpl(
   svc: any,
   req: GenerationRequest,
@@ -39,12 +48,15 @@ export async function generateRemoteResponseImpl(
   // abortRequested is reset by the next generation's prepareGeneration().
   const { signal: generationSignal } = svc.currentRemoteAbortController;
 
-  const { temperature, maxTokens, topP, thinkingEnabled, reasoningBudget } =
+  const { temperature, maxTokens, topP, repeatPenalty, thinkingEnabled, reasoningBudget } =
     useAppStore.getState().settings;
+  // The app decides every sampling value; the server only executes. topK / seed / minP have no
+  // settings field yet, so they are not sent and the server's default applies to them.
   const options: GenerationOptions = {
     temperature,
     maxTokens,
     topP,
+    repeatPenalty,
     stopSequences: [],
     enableThinking:
       provider.capabilities.supportsThinking &&
@@ -108,9 +120,10 @@ export async function generateRemoteResponseImpl(
   } catch (error) {
     if (generationSignal.aborted) return;
     logger.error('[GenerationService] Remote generation error:', error);
-    // Mark server as offline so the Remote Servers screen reflects the failure
+    // Mark the server offline only when it could not be reached. An HTTP error (bad request, model
+    // refusal) came FROM a live server, and marking it offline would misreport it.
     const failedServerId = useRemoteServerStore.getState().activeServerId;
-    if (failedServerId)
+    if (failedServerId && isUnreachableError(error))
       useRemoteServerStore.getState().updateServerHealth(failedServerId, false);
     if (req.preservePartialOnError !== false) keepShownPartialOnError(svc, conversationId);
     throw error;

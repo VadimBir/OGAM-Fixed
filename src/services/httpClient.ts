@@ -39,7 +39,10 @@ export interface FetchOptions extends RequestInit {
 /** Optional config for streaming requests */
 interface StreamRequestOptions {
   headers?: Record<string, string>;
+  /** Whole-request cap in ms; 0 = none. */
   timeout?: number;
+  /** Fail after this many ms with no received data (reset on every chunk); 0 = off. */
+  idleTimeout?: number;
   signal?: AbortSignal;
 }
 
@@ -94,6 +97,66 @@ function rejectCredentialDowngrade(input: {
 const DEFAULT_TIMEOUT = 30000; // 30 seconds
 const DEFAULT_RETRIES = 0;
 const DEFAULT_RETRY_DELAY = 1000; // 1 second
+/**
+ * Streaming requests fail when the server sends NOTHING for this long. Reset on every received chunk,
+ * so a long answer never trips it; it covers prompt processing before the first token (a PC can need
+ * minutes on a long context) and a server that died mid-stream.
+ */
+export const STREAM_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
+const STREAM_IDLE_ERROR = 'Remote server stopped responding';
+
+/**
+ * Shared settle/cleanup for one XHR stream: settles once, removes the abort listener, clears both
+ * timers, and re-arms the idle timer on progress.
+ */
+function streamLifecycle(input: {
+  xhr: XMLHttpRequest;
+  signal?: AbortSignal;
+  timeout: number;
+  idleTimeout: number;
+  resolve: () => void;
+  reject: (reason?: unknown) => void;
+}) {
+  const { xhr, signal, timeout, idleTimeout } = input;
+  let settled = false;
+  let idleId: ReturnType<typeof setTimeout> | undefined;
+  const cleanup = () => {
+    clearTimeout(totalId);
+    clearTimeout(idleId);
+    signal?.removeEventListener('abort', onAbort);
+  };
+  const resolve = () => {
+    if (settled) return;
+    settled = true;
+    cleanup();
+    input.resolve();
+  };
+  const reject = (reason?: unknown) => {
+    if (settled) return;
+    settled = true;
+    cleanup();
+    input.reject(reason);
+  };
+  // A user stop ends the stream quietly; the caller checks its own signal to tell stop from finish.
+  const onAbort = () => {
+    xhr.abort();
+    resolve();
+  };
+  signal?.addEventListener('abort', onAbort, { once: true });
+  const totalId = timeout > 0 ? setTimeout(() => {
+    xhr.abort();
+    reject(new Error('Request timeout'));
+  }, timeout) : undefined;
+  const touch = () => {
+    if (settled || idleTimeout <= 0) return;
+    clearTimeout(idleId);
+    idleId = setTimeout(() => {
+      xhr.abort();
+      reject(new Error(STREAM_IDLE_ERROR));
+    }, idleTimeout);
+  };
+  return { resolve, reject, touch, isSettled: () => settled };
+}
 
 /**
  * Fetch with timeout and retry support
@@ -167,25 +230,19 @@ export async function createStreamingRequest(
   req: StreamRequestConfig,
   onEvent: (event: SSEEvent) => void,
 ): Promise<void> {
-  const { body, headers = {}, timeout = 0, signal } = req;
+  const { body, headers = {}, timeout = 0, idleTimeout = STREAM_IDLE_TIMEOUT_MS, signal } = req;
   logger.log('[HttpClient] Creating streaming request to:', url);
-  return new Promise((resolve, reject) => {
+  // Already stopped: send nothing (an aborted signal never fires its 'abort' event again).
+  if (signal?.aborted) return;
+  return new Promise((outerResolve, outerReject) => {
     // XMLHttpRequest is required for SSE streaming in React Native as fetch
     // does not support real-time streaming with progress events.
     // Requests are validated by isPrivateNetworkEndpoint before use.
     const xhr = new XMLHttpRequest(); // NOSONAR
-
-    if (signal) {
-      signal.addEventListener('abort', () => {
-        xhr.abort();
-        resolve();
-      });
-    }
-
-    const timeoutId = timeout > 0 ? setTimeout(() => {
-      xhr.abort();
-      reject(new Error('Request timeout'));
-    }, timeout) : undefined;
+    const life = streamLifecycle({
+      xhr, signal, timeout, idleTimeout, resolve: outerResolve, reject: outerReject,
+    });
+    const { resolve, reject } = life;
 
     xhr.open('POST', url, true);
     xhr.setRequestHeader('Content-Type', 'application/json');
@@ -199,8 +256,8 @@ export async function createStreamingRequest(
     const sseProcessor = createSSELineProcessor(onEvent);
 
     xhr.onreadystatechange = () => {
-      if (xhr.readyState === 4) {
-        clearTimeout(timeoutId);
+      // Settled already (user stop, timeout): xhr.abort() lands here with status 0. Nothing to report.
+      if (xhr.readyState === 4 && !life.isSettled()) {
         // React Native strips Authorization on redirects in both native clients:
         // iOS rebuilds redirect headers in RCTHTTPRequestHandler; Android OkHttp
         // removes Authorization when the URL cannot reuse the connection. Reject
@@ -242,6 +299,7 @@ export async function createStreamingRequest(
 
     // Handle progress events for real-time streaming
     xhr.onprogress = () => {
+      if (life.isSettled()) return;
       if (
         rejectCredentialDowngrade({
           xhr,
@@ -250,9 +308,9 @@ export async function createStreamingRequest(
           reject,
         })
       ) {
-        clearTimeout(timeoutId);
         return;
       }
+      life.touch();
       const responseText = xhr.responseText;
       if (responseText.length > processedLength) {
         const newData = responseText.slice(processedLength);
@@ -262,12 +320,10 @@ export async function createStreamingRequest(
     };
 
     xhr.onerror = () => {
-      clearTimeout(timeoutId);
       reject(new Error('Network error'));
     };
 
     xhr.ontimeout = () => {
-      clearTimeout(timeoutId);
       reject(new Error('Request timeout'));
     };
 
@@ -275,8 +331,8 @@ export async function createStreamingRequest(
       const bodyStr = JSON.stringify(body);
       logger.log('[HttpClient] Sending request body, length:', bodyStr.length);
       xhr.send(bodyStr);
+      life.touch();
     } catch (err) {
-      clearTimeout(timeoutId);
       logger.error('[HttpClient] Error sending request:', err);
       reject(err);
     }
@@ -292,22 +348,16 @@ export async function createNDJSONStreamingRequest(
   req: StreamRequestConfig,
   onLine: (parsed: Record<string, unknown>) => void,
 ): Promise<void> {
-  const { body, headers = {}, timeout = 0, signal } = req;
+  const { body, headers = {}, timeout = 0, idleTimeout = STREAM_IDLE_TIMEOUT_MS, signal } = req;
   logger.log('[HttpClient] Creating NDJSON streaming request to:', url);
-  return new Promise((resolve, reject) => {
+  // Already stopped: send nothing (an aborted signal never fires its 'abort' event again).
+  if (signal?.aborted) return;
+  return new Promise((outerResolve, outerReject) => {
     const xhr = new XMLHttpRequest(); // NOSONAR
-
-    if (signal) {
-      signal.addEventListener('abort', () => {
-        xhr.abort();
-        resolve();
-      });
-    }
-
-    const timeoutId = timeout > 0 ? setTimeout(() => {
-      xhr.abort();
-      reject(new Error('Request timeout'));
-    }, timeout) : undefined;
+    const life = streamLifecycle({
+      xhr, signal, timeout, idleTimeout, resolve: outerResolve, reject: outerReject,
+    });
+    const { resolve, reject } = life;
 
     xhr.open('POST', url, true);
     xhr.setRequestHeader('Content-Type', 'application/json');
@@ -319,6 +369,7 @@ export async function createNDJSONStreamingRequest(
     const processor = createNDJSONProcessor(onLine);
 
     xhr.onprogress = () => {
+      if (life.isSettled()) return;
       if (
         rejectCredentialDowngrade({
           xhr,
@@ -327,9 +378,9 @@ export async function createNDJSONStreamingRequest(
           reject,
         })
       ) {
-        clearTimeout(timeoutId);
         return;
       }
+      life.touch();
       const text = xhr.responseText;
       if (text.length > processedLength) {
         processor.process(text.slice(processedLength));
@@ -337,24 +388,25 @@ export async function createNDJSONStreamingRequest(
       }
     };
 
-    xhr.onreadystatechange = () =>
+    xhr.onreadystatechange = () => {
+      // Settled already (user stop, timeout): xhr.abort() lands here with status 0. Nothing to report.
+      if (life.isSettled()) return;
       completeNDJSONRequest({
         xhr,
         url,
         hasAuthorization: 'Authorization' in headers,
         processedLength,
         processor,
-        timeoutId,
+        timeoutId: undefined,
         resolve,
         reject,
       });
+    };
 
     xhr.onerror = () => {
-      clearTimeout(timeoutId);
       reject(new Error('Network error'));
     };
     xhr.ontimeout = () => {
-      clearTimeout(timeoutId);
       reject(new Error('Request timeout'));
     };
 
@@ -362,8 +414,8 @@ export async function createNDJSONStreamingRequest(
       const bodyStr = JSON.stringify(body);
       logger.log('[HttpClient] Sending request body, length:', bodyStr.length);
       xhr.send(bodyStr);
+      life.touch();
     } catch (err) {
-      clearTimeout(timeoutId);
       reject(err);
     }
   });

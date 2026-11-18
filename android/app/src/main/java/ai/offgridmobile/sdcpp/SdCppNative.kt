@@ -34,6 +34,25 @@ object SdCppNative {
         mmap: Boolean,
     ): Long
 
+    /**
+     * nativeLoad plus the memory options (sdcpp_jni.cpp nativeLoadEx). Absent from a prebuilt .so that
+     * predates it: calling it then throws UnsatisfiedLinkError (callers fall back to nativeLoad).
+     * paramsBackend: "" = weights resident, "disk" / "te=disk,vae=disk,diffusion=disk" = per-run reload.
+     * loraApplyMode: "" / "auto" / "immediately" / "at_runtime".
+     */
+    @JvmStatic external fun nativeLoadEx(
+        modelPath: String,
+        vaePath: String,
+        taesdPath: String,
+        nThreads: Int,
+        wtype: String,
+        flashAttn: Boolean,
+        mmap: Boolean,
+        paramsBackend: String,
+        loraApplyMode: String,
+        vaeConvDirect: Boolean,
+    ): Long
+
     @JvmStatic external fun nativeModelVersion(handle: Long): String
 
     @JvmStatic external fun nativeFree(handle: Long)

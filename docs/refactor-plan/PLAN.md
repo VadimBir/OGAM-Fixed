@@ -38,9 +38,9 @@ search — names differ; try synonyms and read full files.
 - Two image generators: `src/services/imageGenerator.ts` (ImageGeneratorModule) vs
   `src/services/localDreamGenerator.ts` (LocalDreamModule/CoreMLDiffusionModule). Likely
   one is legacy/dead. [CP-02]
-- Android image wiring bug: `localDreamGenerator.buildNativeParams` sends `useOpenCL`,
-  but `LocalDreamModule.buildGenerationBody` (kt ~L639) never reads it / never puts
-  `use_opencl` in the JSON body → OpenCL toggle silently dropped. [CP-03/CP-05]
+- Android image wiring (RESOLVED, was stale): `localDreamGenerator.buildNativeParams` sends `useOpenCL`
+  and `LocalDreamModule.buildGenerationBody` puts `use_opencl` in the JSON body (kt ~L917); it is
+  NOT dropped. It applies only at 512x512 (OPENCL_SOUND_SIZE rainbow guard). [CP-03/CP-05]
 - Android native RGB→PNG decode (`saveRgbToPng`, kt ~L150; `buildFinalResult` ~L737)
   looks correct for a raw-RGB (w*h*3) contract. Rainbow bug therefore likely: (i) server
   now returns a different payload than raw RGB, or (ii) iOS/JS path, or (iii) preview vs

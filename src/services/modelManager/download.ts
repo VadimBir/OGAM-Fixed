@@ -1,7 +1,7 @@
 /* eslint-disable max-lines */
 import RNFS from 'react-native-fs';
 import { statFile } from '../../utils/fileStat';
-import { ModelFile, BackgroundDownloadInfo } from '../../types';
+import { ModelFile, BackgroundDownloadInfo, DownloadedModel } from '../../types';
 import { huggingFaceService } from '../huggingface';
 import { backgroundDownloadService } from '../backgroundDownloadService';
 import {
@@ -11,7 +11,8 @@ import {
   BackgroundDownloadMetadataCallback,
   BackgroundDownloadContext,
 } from './types';
-import { buildDownloadedModel, persistDownloadedModel } from './storage';
+import { buildDownloadedModel, persistDownloadedModel, loadDownloadedModels } from './storage';
+import { resolveLocalModelFile } from './localModelFile';
 import logger from '../../utils/logger';
 import { useDownloadStore } from '../../stores/downloadStore';
 import { makeModelKey } from '../../utils/modelKey';
@@ -24,7 +25,9 @@ import { extractBaseName } from './scan';
  * path resolves to the identical name (no more `…-Q4_K_M-mmproj.gguf` vs `…-mmproj-F16.gguf` divergence).
  */
 export function mmProjLocalName(ggufFileName: string, mmProjSourceName?: string): string {
-  const base = extractBaseName(ggufFileName);
+  // Base name only: a catalog file inside a repo folder (`Q4_K_M/model-Q4_K_M.gguf`) still names a
+  // projector in the flat models dir.
+  const base = extractBaseName(ggufFileName.substring(ggufFileName.lastIndexOf('/') + 1));
   // Build the on-disk name as `<model-base>-mmproj-<precision>.gguf`, keeping ONLY the projector's own
   // precision token from its source name and dropping every model-name token wherever it sits.
   //  - `<model-base>` prefix → two repos that both ship `mmproj-F16.gguf` can't collide on disk.
@@ -140,8 +143,11 @@ export async function performMmProjRepairDownload(opts: MmProjRepairDownloadOpts
   }
 }
 
+/** downloadId prefix of a download that found its main file already installed (nothing fetched). */
+export const ALREADY_DOWNLOADED_PREFIX = 'already-downloaded:';
+
 function makeAlreadyDownloadedId(modelId: string, fileName: string): string {
-  return `already-downloaded:${makeModelKey(modelId, fileName)}`;
+  return `${ALREADY_DOWNLOADED_PREFIX}${makeModelKey(modelId, fileName)}`;
 }
 
 export {
@@ -160,30 +166,75 @@ export interface PerformBackgroundDownloadOpts {
   onProgress?: DownloadProgressCallback;
 }
 
+/** User-facing refusal for a split GGUF (only part 1 would be fetched; llama.cpp needs every part). */
+export function splitGgufRefusal(file: ModelFile): string | null {
+  const parts = file.splitPartCount ?? 0;
+  if (parts <= 1) return null;
+  return `This model is split into ${parts} files. Split GGUF downloads are not supported yet - pick a single-file quant.`;
+}
+
 export async function performBackgroundDownload(opts: PerformBackgroundDownloadOpts): Promise<BackgroundDownloadInfo> {
   const { modelId, file, modelsDir, backgroundDownloadContext, backgroundDownloadMetadataCallback, onProgress } = opts;
-  const localPath = `${modelsDir}/${file.name}`;
+  const refusal = splitGgufRefusal(file);
+  if (refusal) throw new Error(refusal);
+
+  const registry = await loadDownloadedModels(modelsDir).catch((error: unknown) => {
+    logger.warn(`[ModelManager] registry unreadable while choosing a download path: ${error instanceof Error ? error.message : String(error)}`);
+    return [] as DownloadedModel[];
+  });
+  // One rule for the on-disk name and for "is the main file already here and complete"
+  // (see localModelFile.ts). A file of the same name from ANOTHER repo is never reused, overwritten
+  // or deleted: this download gets a repo-qualified name instead.
+  const local = await resolveLocalModelFile({
+    modelId,
+    catalogFileName: file.name,
+    catalogSize: file.size,
+    registry,
+    downloads: Object.values(useDownloadStore.getState().downloads),
+    probe: { stat: name => statLocal(`${modelsDir}/${name}`) },
+  });
+  const localPath = `${modelsDir}/${local.name}`;
+  const localFileName = local.name !== file.name ? local.name : undefined;
   const mmProjLocalPath = file.mmProjFile
     ? `${modelsDir}/${mmProjLocalName(file.name, file.mmProjFile?.name)}`
     : null;
 
-  const mainExists = await RNFS.exists(localPath);
-  const mmProjExists = await checkMmProjExists(mmProjLocalPath, file.mmProjFile?.size);
+  const mmProjExists = await checkMmProjExists(mmProjLocalPath, file.mmProjFile?.size, registry);
 
-  if (mainExists && mmProjExists) {
-    return handleAlreadyDownloaded({ modelId, file, localPath, mmProjLocalPath, backgroundDownloadContext });
+  if (local.complete) {
+    // The main file is installed and complete: NEVER fetch it again (a cancel of that re-fetch used
+    // to unlink the installed model). A missing projector is registered as "needs vision repair";
+    // startModelDownload then fetches the projector alone through the repair path.
+    return handleAlreadyDownloaded({
+      modelId, file, localPath,
+      mmProjLocalPath: mmProjExists ? mmProjLocalPath : null,
+      expectedMmProjFileName: mmProjExists ? undefined : file.mmProjFile?.name,
+      backgroundDownloadContext,
+    });
   }
 
   return startBgDownload({
-    modelId, file, localPath, mmProjLocalPath, mmProjExists,
+    modelId, file, localPath, localFileName, mainPreExisted: local.exists, mmProjLocalPath, mmProjExists,
     modelsDir, backgroundDownloadContext, backgroundDownloadMetadataCallback, onProgress,
   });
 }
 
-async function checkMmProjExists(path: string | null, expectedSize?: number): Promise<boolean> {
+async function statLocal(path: string): Promise<{ exists: boolean; size?: number }> {
+  if (!(await RNFS.exists(path))) return { exists: false };
+  return { exists: true, size: (await statFile(path))?.size };
+}
+
+async function checkMmProjExists(
+  path: string | null,
+  expectedSize: number | undefined,
+  registry: DownloadedModel[],
+): Promise<boolean> {
   if (!path) return true;
   const exists = await RNFS.exists(path);
   if (!exists || !expectedSize) return exists;
+  // A projector another installed model links is that model's working file: reuse it, never unlink.
+  const name = path.substring(path.lastIndexOf('/') + 1);
+  if (registry.some(m => m.engine === 'llama' && m.mmProjPath && m.mmProjPath.endsWith(`/${name}`))) return true;
   try {
     const actualSize = (await statFile(path))?.size ?? 0;
     if (actualSize < expectedSize) {
@@ -203,12 +254,15 @@ interface AlreadyDownloadedOpts {
   file: ModelFile;
   localPath: string;
   mmProjLocalPath: string | null;
+  expectedMmProjFileName?: string;
   backgroundDownloadContext: Map<string, BackgroundDownloadContext>;
 }
 
 async function handleAlreadyDownloaded(opts: AlreadyDownloadedOpts): Promise<BackgroundDownloadInfo> {
-  const { modelId, file, localPath, mmProjLocalPath, backgroundDownloadContext } = opts;
-  const model = await buildDownloadedModel({ modelId, file, resolvedLocalPath: localPath, mmProjPath: mmProjLocalPath || undefined });
+  const { modelId, file, localPath, mmProjLocalPath, expectedMmProjFileName, backgroundDownloadContext } = opts;
+  const model = await buildDownloadedModel({
+    modelId, file, resolvedLocalPath: localPath, mmProjPath: mmProjLocalPath || undefined, expectedMmProjFileName,
+  });
   const totalBytes = file.size + (file.mmProjFile?.size || 0);
   const downloadId = makeAlreadyDownloadedId(modelId, file.name);
   const completedInfo: BackgroundDownloadInfo = {
@@ -223,6 +277,11 @@ interface StartBgDownloadOpts {
   modelId: string;
   file: ModelFile;
   localPath: string;
+  /** Set when the on-disk name differs from file.name (repo-qualified; see localModelFile.ts). */
+  localFileName?: string;
+  /** A file (unregistered, wrong size) is already at localPath: replaced only by a FINISHED
+   *  download, never deleted by a cancel. */
+  mainPreExisted: boolean;
   mmProjLocalPath: string | null;
   mmProjExists: boolean;
   modelsDir: string;
@@ -232,7 +291,7 @@ interface StartBgDownloadOpts {
 }
 
 async function startBgDownload(opts: StartBgDownloadOpts): Promise<BackgroundDownloadInfo> {
-  const { modelId, file, localPath, mmProjLocalPath, mmProjExists, backgroundDownloadContext, backgroundDownloadMetadataCallback, onProgress } = opts;
+  const { modelId, file, localPath, localFileName, mainPreExisted, mmProjLocalPath, mmProjExists, backgroundDownloadContext, backgroundDownloadMetadataCallback, onProgress } = opts;
 
   const mmProjSize = file.mmProjFile?.size || 0;
   const combinedTotalBytes = file.size + mmProjSize;
@@ -248,6 +307,8 @@ async function startBgDownload(opts: StartBgDownloadOpts): Promise<BackgroundDow
     metadataObj.mmProjDownloadUrl = file.mmProjFile?.downloadUrl;
   }
   if (skipSizeValidation) metadataObj.skipSizeValidation = true;
+  // Survives an app kill in the native row, so restore finalizes to the same repo-qualified path.
+  if (localFileName) metadataObj.localFileName = localFileName;
   const metadataJson = Object.keys(metadataObj).length > 0 ? JSON.stringify(metadataObj) : undefined;
 
   // Start the mmproj sidecar BEFORE the main, so the MAIN is the last download started
@@ -456,7 +517,7 @@ async function startBgDownload(opts: StartBgDownloadOpts): Promise<BackgroundDow
 
   // Cast to any: this context map and all callers are removed in Step 5.
   (backgroundDownloadContext as Map<any, any>).set(downloadInfo.downloadId, {
-    modelId, file, localPath, mmProjLocalPath, removeProgressListener,
+    modelId, file, localPath, mmProjLocalPath, removeProgressListener, mainPreExisted,
     mmProjDownloadId, mmProjCompleted: !needsMmProj, mainCompleted: false,
     mainCompleteHandled: false, mmProjCompleteHandled: false, isFinalizing: false,
     removeMmProjProgressListener,
@@ -609,7 +670,12 @@ export function watchBackgroundDownload(opts: WatchDownloadOpts): void {
       try {
         finalPath = await backgroundDownloadService.moveCompletedDownload(downloadId, ctx.localPath);
       } catch (moveErr) {
-        if (await RNFS.exists(ctx.localPath)) {
+        // A file that was already at localPath BEFORE this download (an unregistered wrong-size
+        // copy) is not this download's result unless its size now matches the catalog.
+        const onDisk = await RNFS.exists(ctx.localPath);
+        const fromThisDownload = onDisk && (!ctx.mainPreExisted ||
+          (ctx.file.size > 0 && (await statFile(ctx.localPath))?.size === ctx.file.size));
+        if (fromThisDownload) {
           movedNatively = false;
           finalPath = ctx.localPath;
           logger.log('[DownloadDebug] native move rejected but file present — finalizing from disk (idempotent)', {

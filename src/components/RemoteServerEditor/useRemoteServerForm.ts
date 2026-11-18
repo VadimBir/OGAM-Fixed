@@ -56,6 +56,9 @@ export function useRemoteServerForm({
   const [name, setName] = useState('');
   const [endpoint, setEndpoint] = useState('');
   const [apiKey, setApiKey] = useState('');
+  // A Keychain read that FAILED is not an empty key: saving must then leave the stored key alone,
+  // not remove it because the field happened to show ''.
+  const [apiKeyReadFailed, setApiKeyReadFailed] = useState(false);
   const [notes, setNotes] = useState('');
   const [textModelId, setTextModelId] = useState('');
   const [imageModelId, setImageModelId] = useState('');
@@ -88,19 +91,23 @@ export function useRemoteServerForm({
       setTranscriptionModelId(server.mediaModels?.transcription || '');
       setVoiceModelId(server.mediaModels?.voice || '');
       // Load existing API key from keychain so user can see it's set
+      setApiKeyReadFailed(false);
       remoteServerManager
         .getApiKey(server.id)
         .then(key => {
-        if (!cancelled) setApiKey(key || '');
+          if (!cancelled) setApiKey(key || '');
         })
         .catch(() => {
-          if (!cancelled) setApiKey('');
+          if (cancelled) return;
+          setApiKey('');
+          setApiKeyReadFailed(true);
         });
     } else {
       // Reset form for new server
       setName('');
       setEndpoint('');
       setApiKey('');
+      setApiKeyReadFailed(false);
       setNotes('');
       setTextModelId('');
       setImageModelId('');
@@ -263,7 +270,8 @@ export function useRemoteServerForm({
           name,
           endpoint,
           notes,
-          apiKey,
+          // undefined = keep the stored key. Only a successfully read key may be cleared by ''.
+          apiKey: apiKeyReadFailed && !apiKey ? undefined : apiKey,
           mediaModels: desktopManaged ? server.mediaModels : mediaModels,
           modelCatalog,
           modelManagement,
@@ -334,6 +342,7 @@ export function useRemoteServerForm({
     name,
     endpoint,
     apiKey,
+    apiKeyReadFailed,
     notes,
     textModelId,
     imageModelId,

@@ -232,12 +232,19 @@ export async function setActiveRemoteImageModelImpl(
   modelId: string,
 ): Promise<void> {
   const store = useRemoteServerStore.getState();
+  // runRemoteImageGeneration reads server.mediaModels.image, so the selection lives on the record.
+  const configuredServer = store.getServerById(serverId);
+  if (configuredServer && configuredServer.mediaModels?.image !== modelId) {
+    store.updateServer(serverId, {
+      mediaModels: { ...configuredServer.mediaModels, image: modelId },
+    });
+  }
   store.setActiveRemoteMediaServerId('image', serverId);
   store.setActiveRemoteImageModelId(modelId);
 
   let provider = providerRegistry.getProvider(serverId);
   if (!provider) {
-    const server = store.getServerById(serverId);
+    const server = configuredServer;
     if (server) {
       logger.log(
         '[RemoteServerManager] Creating provider for server:',

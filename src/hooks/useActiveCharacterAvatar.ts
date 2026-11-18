@@ -1,4 +1,4 @@
-import { useChatStore, useProjectStore } from '../stores';
+import { useAppStore, useChatStore, useProjectStore } from '../stores';
 
 /**
  * The avatar URI of the ACTIVE conversation's character (its `Project`), or undefined when the
@@ -16,4 +16,13 @@ export function useActiveCharacterAvatarUri(): string | undefined {
   return useProjectStore(s =>
     projectId ? s.projects.find(p => p.id === projectId)?.avatarUri : undefined,
   );
+}
+
+/**
+ * The avatar URI of the user's PERSONA ({user}, AppSettings.personaAvatarUri), or undefined when none
+ * is set. Rendered as the small circle next to the user's own messages; a leaf selector for the same
+ * re-render reason as useActiveCharacterAvatarUri.
+ */
+export function usePersonaAvatarUri(): string | undefined {
+  return useAppStore(s => s.settings.personaAvatarUri);
 }

@@ -9,7 +9,7 @@ UI does not fully explain to the user.
 
 | # | Setting / value | UI (writes) | Where it dies | Mark | Effect |
 |---|---|---|---|---|---|
-| W1 | image `use_opencl` | `imageUseOpenCL` → `imageGenerationService.ts:440` → `localDreamGenerator.ts:152` (`useOpenCL`) | `LocalDreamModule.buildGenerationBody` never adds `use_opencl` to /generate body — `LocalDreamModule.kt:639-650` | DROPPED | image OpenCL toggle inert on Android; server runs default path (comment kt:100-102 wrongly claims it's sent) |
+| W1 | image `use_opencl` | `imageUseOpenCL` → `imageGenerationService.ts:607` → `localDreamGenerator.ts:159` (`useOpenCL`) | `LocalDreamModule.kt:917` puts `use_opencl` in the /generate body via `effectiveUseOpenCL` (requested AND not force-disabled AND 512x512, kt:155-158) | WIRED (earlier "DROPPED" entry was stale) | OpenCL applies at 512x512 only (rainbow guard); other sizes decode on CPU. Store default is false (`appStore.ts:285`) |
 | W2 | KV cache q8_0/q4_0 on **OpenCL** | `KvCacheTypeToggle` → `useTextGenerationAdvanced.ts:53` → `cacheType` | cache params omitted for OpenCL: `llmHelpers.ts:114` (`backend===OPENCL ? {} : {cache_type_k/v}`) → llama.cpp defaults f16 | HARDCODED/BY-DESIGN | q4/q8 impossible on OpenCL; f16 KV uses 2–4× RAM (item 3b) |
 | W3 | KV cache on **HTP/NPU** | same toggle | `effectiveCacheType` coerces to `'f16'` when `backendForcesF16Cache` — `llmHelpers.ts:69,74,97` | HARDCODED/BY-DESIGN | q4/q8 impossible on HTP |
 | W4 | flash attention on OpenCL/HTP | `FlashAttentionToggle` `textGenAdvancedSections.tsx:132` | forced `'off'`: `llmHelpers.ts:89-90` (`gpuBackendIncompatible`) | HARDCODED/BY-DESIGN | flash-attn toggle inert on GPU/NPU; and quant KV needs flash-attn → compounds W2/W3 |

@@ -47,8 +47,10 @@ class DownloadCompleteBroadcastReceiver : BroadcastReceiver() {
 
     private fun findDownload(downloads: JSONArray, downloadId: Long): Pair<JSONObject, Int>? {
         for (i in 0 until downloads.length()) {
-            val download = downloads.getJSONObject(i)
-            if (download.getLong("downloadId") == downloadId) return Pair(download, i)
+            // opt*: one entry without a numeric downloadId (or a non-object entry) threw a
+            // JSONException out of onReceive and crashed the app.
+            val download = downloads.optJSONObject(i) ?: continue
+            if (download.optLong("downloadId", Long.MIN_VALUE) == downloadId) return Pair(download, i)
         }
         return null
     }

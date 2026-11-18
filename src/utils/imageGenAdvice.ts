@@ -32,18 +32,20 @@ export const QUALITY_STEP_FLOOR = 20;
  */
 export const SWEET_SPOT_SIZE = 256;
 
-/** Platform step counts. */
+/** Slider maximum only. It is NOT the default (that was the old bug: 50 steps out of the box). */
 export const MAX_IMAGE_STEPS = 50;
-const IMAGE_STEP_DEFAULTS = {
-  android: MAX_IMAGE_STEPS,
-  ios: MAX_IMAGE_STEPS,
-} as const;
 
-/** One owner for the platform default. Persisted user values still take precedence. */
-export function defaultImageSteps(platform: string): number {
-  return platform === 'ios'
-    ? IMAGE_STEP_DEFAULTS.ios
-    : IMAGE_STEP_DEFAULTS.android;
+/**
+ * THE default step count for every image engine and every layer (store, JS generators, and the
+ * native LocalDream/sd.cpp fallbacks, which are 20 and are contract-tested against this value).
+ * 20 = QUALITY_STEP_FLOOR: below it output is muddy, above it time grows linearly for little gain
+ * (512x512 @ 22 steps ~= 18 min on a Snapdragon 765G, so 50 is never a sane out-of-box value).
+ */
+export const DEFAULT_IMAGE_STEPS = QUALITY_STEP_FLOOR;
+
+/** One owner for the default. Persisted user values still take precedence. */
+export function defaultImageSteps(_platform?: string): number {
+  return DEFAULT_IMAGE_STEPS;
 }
 
 export function getImageGenAdvice(opts: {

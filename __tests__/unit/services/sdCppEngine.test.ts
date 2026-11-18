@@ -27,6 +27,7 @@ const mockLocalDream = {
   deleteGeneratedImage: jest.fn(async () => true),
   clearOpenCLCache: jest.fn(async () => 0),
   getConstants: jest.fn(() => ({})),
+  getEffectiveSize: jest.fn(async () => ({ engine: 'localdream', width: 512, height: 512, adjusted: false })),
 };
 const mockSdCpp = {
   isAvailable: jest.fn(() => true),
@@ -167,6 +168,19 @@ describe('imageEngineRouter', () => {
     await router.loadModel('/qnn/model', 4, { backend: 'auto' });
     expect(mockSdCpp.unloadModel).toHaveBeenCalledTimes(1);
     expect(router.getActiveEngine()).toBe('localdream');
+  });
+
+  it('getEffectiveSize: sd.cpp is answered in JS on the 64 grid, LocalDream asks its native core', async () => {
+    await router.loadModel('/qnn/model', 4, { backend: 'auto' });
+    await router.getEffectiveSize({ width: 320, height: 320 });
+    expect(mockLocalDream.getEffectiveSize).toHaveBeenCalledWith({ width: 320, height: 320 });
+
+    await router.loadModel('/sd/model.safetensors', 6, { backend: 'sdcpp' });
+    mockLocalDream.getEffectiveSize.mockClear();
+    await expect(router.getEffectiveSize({ width: 64, height: 512 })).resolves.toMatchObject({
+      engine: 'sdcpp', width: 64, height: 512, adjusted: false,
+    });
+    expect(mockLocalDream.getEffectiveSize).not.toHaveBeenCalled();
   });
 
   it('gallery store stays LocalDream (shared generated_images dir)', async () => {

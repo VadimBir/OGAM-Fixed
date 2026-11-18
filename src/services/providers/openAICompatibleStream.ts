@@ -3,9 +3,10 @@
  * ThinkTagParser, processDelta, generateOllamaChatImpl
  */
 import { createNDJSONStreamingRequest } from '../httpClient';
+import { remoteApiUrl } from '../remoteTransportPolicy';
 import logger from '../../utils/logger';
 import { REASONING_DELIMITERS, partialTagSuffix, maxPartialTagSuffix } from '../../utils/messageContent';
-import type { StreamCallbacks } from './types';
+import type { GenerationOptions, StreamCallbacks } from './types';
 import type {
   OpenAIChatMessage,
   OpenAIToolCall,
@@ -136,20 +137,53 @@ type DeltaShape = {
   }>;
 };
 
+/** Per-stream map from the server's tool_calls[].index to the call being accumulated. */
+const toolCallsByIndex = new WeakMap<OpenAIStreamState, Map<number, OpenAIToolCall>>();
+
+function startToolCall(state: OpenAIStreamState, id: string | undefined): OpenAIToolCall {
+  // Index-suffixed fallback when the server sends no id: unique within this turn's calls.
+  const call: OpenAIToolCall = {
+    id: id || `call_${state.toolCalls.length}`,
+    type: 'function',
+    function: { name: '', arguments: '' },
+  };
+  state.toolCalls.push(call);
+  state.currentToolCall = call;
+  return call;
+}
+
+/**
+ * Accumulate one streamed tool-call fragment. OpenAI-compatible servers key fragments by `index`
+ * and send `id` on the first fragment only (some repeat it on every fragment, some never send it),
+ * so `index` decides which call a fragment extends. A server without `index` falls back to the id.
+ */
 function processToolCallChunk(
   tc: NonNullable<DeltaShape['tool_calls']>[0],
   state: OpenAIStreamState,
 ): void {
-  if (tc.id) {
-    state.currentToolCall = { id: tc.id, type: 'function', function: { name: '', arguments: '' } };
-    state.toolCalls.push(state.currentToolCall as OpenAIToolCall);
+  let call: OpenAIToolCall;
+  if (typeof tc.index === 'number') {
+    let calls = toolCallsByIndex.get(state);
+    if (!calls) {
+      calls = new Map();
+      toolCallsByIndex.set(state, calls);
+    }
+    const existing = calls.get(tc.index);
+    // A NEW id at an index whose call already has a name is a second call reusing that index.
+    const reused = !!existing && !!tc.id && tc.id !== existing.id && !!existing.function.name;
+    if (!existing || reused) {
+      call = startToolCall(state, tc.id);
+      calls.set(tc.index, call);
+    } else {
+      call = existing;
+      state.currentToolCall = call;
+    }
+  } else {
+    const current = state.currentToolCall as OpenAIToolCall | null;
+    call = !current || (tc.id && tc.id !== current.id) ? startToolCall(state, tc.id) : current;
   }
-  if (tc.function?.name && state.currentToolCall?.function) {
-    state.currentToolCall.function.name = tc.function.name;
-  }
-  if (tc.function?.arguments && state.currentToolCall?.function) {
-    state.currentToolCall.function.arguments += tc.function.arguments;
-  }
+  if (tc.function?.name) call.function.name = tc.function.name;
+  if (tc.function?.arguments) call.function.arguments += tc.function.arguments;
 }
 
 /**
@@ -161,7 +195,8 @@ export function processDelta(
   state: OpenAIStreamState,
   ctx: DeltaCtx,
 ): void {
-  logger.log(`[WIRE-REMOTE] ${JSON.stringify(delta)}`); // [WIRE] raw OpenAI-compatible/Ollama delta from-device
+  // Shape only: chat content and tool arguments are private and must not reach the log file.
+  logger.log(`[WIRE-REMOTE] delta keys=${Object.keys(delta).join(',')} content=${delta.content?.length ?? 0} toolCalls=${delta.tool_calls?.length ?? 0}`);
   if (delta.content) {
     ctx.thinkTagParser.process(
       delta.content,
@@ -215,8 +250,9 @@ function buildOllamaCompletion(
     content: fullContent,
     reasoningContent: fullReasoningContent || undefined,
     meta: { gpu: false, gpuBackend: 'Remote' },
-    toolCalls: accumulatedToolCalls.length > 0 ? accumulatedToolCalls.map(tc => ({
-      id: tc.id, name: tc.function.name,
+    toolCalls: accumulatedToolCalls.length > 0 ? accumulatedToolCalls.map((tc, index) => ({
+      // Ollama's native tool_calls often carry no id; give each call a distinct one.
+      id: tc.id || `call_${index}`, name: tc.function.name,
       arguments: typeof tc.function.arguments === 'string' ? tc.function.arguments : JSON.stringify(tc.function.arguments),
     })) : undefined,
   };
@@ -228,6 +264,8 @@ interface OllamaStreamState {
   fullReasoningContent: string;
   completeCalled: boolean;
   streamErrorOccurred: boolean;
+  /** Server error line, reported once the request has settled (never from inside the XHR handler). */
+  streamError?: Error;
   accumulatedToolCalls: OpenAIToolCall[];
 }
 
@@ -238,11 +276,14 @@ function handleOllamaChatLine(
   req: { callbacks: StreamCallbacks; signal: AbortSignal; abort: () => void },
 ): void {
   if (req.signal.aborted) return;
-  logger.log(`[WIRE-OLLAMA] ${JSON.stringify(line)}`); // [WIRE] raw Ollama /api/chat NDJSON line from-device
+  // Shape only: chat content is private and must not reach the log file.
+  logger.log(`[WIRE-OLLAMA] line keys=${Object.keys(line).join(',')} done=${line.done === true}`);
 
   if (line.error) {
+    // Record and stop. Reported after the request settles: calling onError here and then aborting
+    // fired onError AND the abort path's empty onComplete for one turn.
     streamState.streamErrorOccurred = true;
-    req.callbacks.onError(new Error(typeof line.error === 'string' ? line.error : JSON.stringify(line.error)));
+    streamState.streamError = new Error(typeof line.error === 'string' ? line.error : JSON.stringify(line.error));
     req.abort();
     return;
   }
@@ -257,7 +298,7 @@ function handleOllamaChatLine(
     if (msg.tool_calls) {
       for (const tc of msg.tool_calls) {
         if (tc.function?.name) {
-          logger.log(`[OllamaChat] tool_call: ${tc.function.name}(${typeof tc.function.arguments === 'string' ? tc.function.arguments.substring(0, 100) : JSON.stringify(tc.function.arguments).substring(0, 100)})`);
+          logger.log(`[OllamaChat] tool_call: ${tc.function.name}`);
           streamState.accumulatedToolCalls.push(tc);
         }
       }
@@ -275,11 +316,25 @@ function handleOllamaChatLine(
  * Generate using Ollama's native /api/chat endpoint (NDJSON streaming).
  * Supports think: true/false for reasoning control.
  */
+/** Ollama /api/chat `options`: the same app-decided sampling values, under Ollama's names. */
+export function ollamaSamplingOptions(options: GenerationOptions): Record<string, unknown> {
+  const stop = options.stopSequences?.filter(sequence => sequence.length > 0) ?? [];
+  return {
+    ...(options.temperature !== undefined && { temperature: options.temperature }),
+    ...(options.topP !== undefined && { top_p: options.topP }),
+    ...(options.topK !== undefined && { top_k: options.topK }),
+    ...(options.repeatPenalty !== undefined && { repeat_penalty: options.repeatPenalty }),
+    ...(options.seed !== undefined && { seed: options.seed }),
+    ...(stop.length > 0 && { stop }),
+    ...(typeof options.maxTokens === 'number' && options.maxTokens > 0 && { num_predict: options.maxTokens }),
+  };
+}
+
 export async function generateOllamaChatImpl(
   openaiMessages: OpenAIChatMessage[],
-  req: OllamaChatRequest,
+  req: OllamaChatRequest & { headers?: Record<string, string> },
 ): Promise<void> {
-  const { options, callbacks, signal, endpoint, modelId, abort } = req;
+  const { options, callbacks, signal, endpoint, modelId, abort, headers = {} } = req;
   const thinkingEnabled = options.enableThinking !== false;
   const think = req.thinkingLevelsOnly
     ? options.reasoningBudget == null || options.reasoningBudget < 0 ? 'medium'
@@ -333,17 +388,12 @@ export async function generateOllamaChatImpl(
   const requestBody: Record<string, unknown> = {
     model: modelId, messages: ollamaMessages, stream: true, think,
     ...(options.tools && options.tools.length > 0 && { tools: options.tools }),
-    options: {
-      ...(options.temperature !== undefined && { temperature: options.temperature }),
-      // num_predict intentionally omitted — Ollama defaults to -1 (until natural stop).
-      // A client-side cap truncates reasoning models mid-<think>.
-      ...(options.topP !== undefined && { top_p: options.topP }),
-    },
+    // The app owns every sampling value, the output cap (num_predict = settings.maxTokens) included.
+    options: ollamaSamplingOptions(options),
   };
 
-  let baseUrl = endpoint;
-  while (baseUrl.endsWith('/')) baseUrl = baseUrl.slice(0, -1);
-  const url = `${baseUrl}/api/chat`;
+  // /api/chat lives at the server root, also when the endpoint was saved as `.../v1`.
+  const url = remoteApiUrl(endpoint, '/api/chat');
 
   const streamState: OllamaStreamState = {
     fullContent: '',
@@ -354,15 +404,22 @@ export async function generateOllamaChatImpl(
   };
 
   try {
-    await createNDJSONStreamingRequest(url, { body: requestBody, headers: {}, signal }, (line) => {
+    await createNDJSONStreamingRequest(url, { body: requestBody, headers, signal }, (line) => {
       handleOllamaChatLine(line, streamState, { callbacks, signal, abort });
     });
-
-    if (!streamState.completeCalled && !streamState.streamErrorOccurred) {
-      callbacks.onComplete(buildOllamaCompletion(streamState.fullContent, streamState.fullReasoningContent, streamState.accumulatedToolCalls));
-    }
   } catch (error) {
-    if (signal.aborted) { callbacks.onComplete({ content: '', meta: { gpu: false } }); return; }
+    if (streamState.streamError) { callbacks.onError(streamState.streamError); return; }
+    if (signal.aborted) {
+      if (!streamState.completeCalled) callbacks.onComplete({ content: '', meta: { gpu: false } });
+      return;
+    }
     callbacks.onError(error instanceof Error ? error : new Error(String(error)));
+    return;
   }
+  if (streamState.streamError) { callbacks.onError(streamState.streamError); return; }
+  if (streamState.completeCalled) return;
+  // A user stop resolves the request: end the turn empty, never finalize the partial stream or hand
+  // half-received tool calls on. The tool loop still needs this one terminal callback.
+  if (signal.aborted) { callbacks.onComplete({ content: '', meta: { gpu: false } }); return; }
+  callbacks.onComplete(buildOllamaCompletion(streamState.fullContent, streamState.fullReasoningContent, streamState.accumulatedToolCalls));
 }

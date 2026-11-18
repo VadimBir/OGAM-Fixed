@@ -75,13 +75,17 @@ function parseToolCallBody(body: string, idSuffix: number): ToolCall | null {
     arguments: normalizeToolArgs(args),
   });
 
-  // Standard JSON: {"name": "tool", "arguments": {...}}
-  try {
-    const parsed = parseJsonLenient(body);
-    if (parsed.name)
-      return makeCall(parsed.name, parsed.arguments ?? parsed.parameters ?? {});
-  } catch {
-    /* fall through */
+  // Standard JSON: {"name": "tool", "arguments": {...}}. A body cut off (max tokens) or missing only
+  // its closing braces is completed when that is unambiguous (completeTruncatedJson).
+  for (const candidate of [body, completeTruncatedJson(body)]) {
+    if (!candidate) continue;
+    try {
+      const parsed = parseJsonLenient(candidate);
+      if (parsed.name)
+        return makeCall(parsed.name, parsed.arguments ?? parsed.parameters ?? {});
+    } catch {
+      /* fall through */
+    }
   }
 
   // Function-call style: tool_name({"key": "value"})
@@ -110,6 +114,34 @@ function parseToolCallBody(body: string, idSuffix: number): ToolCall | null {
 
   return parseXmlStyleToolCall(body, idSuffix);
 }
+/**
+ * Complete a JSON object whose only missing part is its closing brackets (the model stopped right
+ * after the last value, or hit max tokens there). Returns null when completion would be a guess:
+ * cut inside a string (a truncated value must not run, e.g. a half calendar time), right after a
+ * ':' ',' '{' or '[' (the arguments were never written), or with mismatched brackets. Exported for tests.
+ */
+export function completeTruncatedJson(raw: string): string | null {
+  const s = raw.trim();
+  if (!s.startsWith('{')) return null;
+  const closers: string[] = [];
+  let inString = false;
+  let escaped = false;
+  for (const ch of s) {
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === '{') closers.push('}');
+    else if (ch === '[') closers.push(']');
+    else if ((ch === '}' || ch === ']') && closers.pop() !== ch) return null;
+  }
+  if (inString || closers.length === 0 || /[:,{[]\s*$/.test(s)) return null;
+  return s + closers.reverse().join('');
+}
+
 function fixUnquotedKeys(json: string): string {
   return json.replace(/([{,]\s*)([a-zA-Z_]\w*)(\s*):/g, '$1"$2"$3:');
 }
@@ -275,6 +307,9 @@ function parseInvokeBlocks(
   }
 }
 
+/** Text tool-call wrappers whose body parseToolCallBody understands. */
+const TEXT_TOOL_CALL_TAGS = ['tool_call', 'function_call'] as const;
+
 /** Parse tool calls from text output (fallback for small models). Supports JSON, XML, and invoke formats. */
 export function parseToolCallsFromText(text: string): {
   cleanText: string;
@@ -283,25 +318,28 @@ export function parseToolCallsFromText(text: string): {
   const toolCalls: ToolCall[] = [];
   const matchedRanges: [number, number][] = [];
 
-  // 1. Standard <tool_call>...</tool_call> blocks (JSON or XML body)
-  const closedPattern = /<tool_call>([\s\S]*?)<\/tool_call>/g;
+  // 1. <tool_call>...</tool_call> and <function_call>...</function_call> blocks (same bodies: JSON,
+  //    name({...}), name{...} or XML). <function_call> used to be detected but never parsed.
   let match;
-  while ((match = closedPattern.exec(text)) !== null) {
-    matchedRanges.push([match.index, match.index + match[0].length]);
-    const call = parseToolCallBody(match[1].trim(), toolCalls.length);
-    if (call) {
-      toolCalls.push(call);
+  for (const tag of TEXT_TOOL_CALL_TAGS) {
+    const open = `<${tag}>`;
+    const closedPattern = new RegExp(`${open}([\\s\\S]*?)</${tag}>`, 'g');
+    while ((match = closedPattern.exec(text)) !== null) {
+      matchedRanges.push([match.index, match.index + match[0].length]);
+      const call = parseToolCallBody(match[1].trim(), toolCalls.length);
+      if (call) {
+        toolCalls.push(call);
+      }
     }
-  }
-  // Unclosed <tool_call> at end of text (model hit EOS without closing tag)
-  const unclosedMatch = /<tool_call>([\s\S]+)$/.exec(text);
-  if (unclosedMatch) {
-    const unclosedStart = text.lastIndexOf(unclosedMatch[0]);
+    // Unclosed opener at end of text (model hit EOS / max tokens before the closing tag). The LAST
+    // opener: a cut second call after a complete first one must not be skipped.
+    const unclosedStart = text.lastIndexOf(open);
     const alreadyMatched = matchedRanges.some(
       ([s, e]) => unclosedStart >= s && unclosedStart < e,
     );
-    if (!alreadyMatched) {
-      const call = parseToolCallBody(unclosedMatch[1].trim(), toolCalls.length);
+    const unclosedBody = text.slice(unclosedStart + open.length);
+    if (unclosedStart !== -1 && !alreadyMatched && unclosedBody.length > 0) {
+      const call = parseToolCallBody(unclosedBody.trim(), toolCalls.length);
       if (call) toolCalls.push(call);
       matchedRanges.push([unclosedStart, text.length]);
     }
@@ -613,18 +651,22 @@ async function callLocalWithRetry(
   messages: Message[],
   tools: any[],
   onStream?: (data: StreamToken) => void,
+  disableThinking?: boolean,
 ): Promise<{
   fullResponse: string;
   toolCalls: ToolCall[];
   interrupted?: boolean;
 }> {
+  // disableThinking is forwarded by llm.ts generateResponseWithTools into generateWithToolsImpl.
+  const options: { tools: any[]; onStream?: (data: StreamToken) => void; disableThinking?: boolean } = {
+    tools,
+    onStream,
+    ...(disableThinking ? { disableThinking: true } : {}),
+  };
   let lastError: any;
   for (let attempt = 0; attempt < MAX_LLM_RETRIES; attempt++) {
     try {
-      return await llmService.generateResponseWithTools(messages, {
-        tools,
-        onStream,
-      });
+      return await llmService.generateResponseWithTools(messages, options);
     } catch (e: any) {
       lastError = e;
       const msg = e?.message || String(e) || '';
@@ -1112,7 +1154,7 @@ async function callLLMWithRetry(
       throw new Error(e?.message || String(e) || 'Remote LLM error');
     }
   }
-  return callLocalWithRetry(augmentedMessages, tools, onStream);
+  return callLocalWithRetry(augmentedMessages, tools, onStream, disableThinking);
 }
 
 /** Detect if text contains any tool call pattern (various model formats). */
@@ -1124,6 +1166,35 @@ function containsToolCallMarkup(text: string): boolean {
     text.includes('<function_call>')
   );
 }
+
+/** Any tool-call markup at all, Gemma-native forms included. */
+function hasAnyToolCallMarkup(text: string): boolean {
+  return (
+    containsToolCallMarkup(text) ||
+    text.includes('<|tool_call>') ||
+    text.includes('<tool_call:')
+  );
+}
+
+const TOOL_CALL_MARKUP_STARTS = ['<tool_call', '<|tool_call>', '<function_call>', '<invoke'];
+
+/** Visible text with every tool-call block removed, including a broken/unclosed one: a call that
+ *  could not run must never stay in the chat as raw markup. */
+function stripToolCallMarkup(text: string): string {
+  let clean = parseGemmaNativeToolCalls(parseToolCallsFromText(text).cleanText).cleanText;
+  const cuts = TOOL_CALL_MARKUP_STARTS.map(t => clean.indexOf(t)).filter(i => i >= 0);
+  if (cuts.length > 0) clean = clean.slice(0, Math.min(...cuts));
+  return clean.trim();
+}
+
+/** Sent once per turn after a tool call that could not be parsed (cut off by max tokens or malformed). */
+const TOOL_CALL_REPAIR_INSTRUCTION =
+  'Your last tool call was cut off or malformed, so it did not run. If a tool is still needed, reply ' +
+  'with only one complete call on one line: <tool_call>{"name": "TOOL_NAME", "arguments": {...}}</tool_call>. ' +
+  'Keep argument values short.';
+
+const BROKEN_TOOL_CALL_NOTICE =
+  '_(The model\'s tool call was cut off before it finished, so it did not run. Try again, or raise Max Tokens.)_';
 
 /** If no structured tool calls, try parsing tool-call markup (<tool_call>, <invoke>, namespaced
  *  wrappers, <function_call>) or Gemma's native format from text. Also collects tool calls from
@@ -1212,7 +1283,13 @@ function buildStreamHandler(
 async function handleTextModelEvictedByTools(
   ctx: ToolLoopContext,
   state: ToolLoopState,
-  info: { toolNames: string[]; anyOk: boolean; displayResponse: string },
+  info: {
+    toolNames: string[];
+    anyOk: boolean;
+    /** The user cancelled the image (generate_image failed with reason 'cancelled'). */
+    imageCancelled?: boolean;
+    displayResponse: string;
+  },
 ): Promise<ToolLoopOutcome | null> {
   if (info.toolNames.every(name => name === 'generate_image')) {
     logger.log('[ToolLoop] text model evicted by the image model; ending the turn after generate_image');
@@ -1221,7 +1298,11 @@ async function handleTextModelEvictedByTools(
       ctx,
       state,
       info.displayResponse.trim() ||
-        (info.anyOk ? 'Here is the image.' : 'Image generation failed. See the card above.'),
+        (info.anyOk
+          ? 'Here is the image.'
+          : info.imageCancelled
+            ? 'Image generation cancelled.'
+            : 'Image generation failed. See the card above.'),
     );
     return { interrupted: false };
   }
@@ -1465,6 +1546,9 @@ export async function runToolLoop(
     reasoningContent: '',
     successfulToolResults: [],
   };
+  // One repair round per turn for a tool call that could not be parsed (see TOOL_CALL_REPAIR_INSTRUCTION).
+  let toolCallRepairTried = false;
+  let repairNudge: Message | null = null;
   for (let iteration = 0; iteration < maxToolSteps; iteration++) {
     if (ctx.isAborted()) {
       break;
@@ -1479,9 +1563,12 @@ export async function runToolLoop(
     state.reasoningContent = '';
 
     const onStream = buildStreamHandler(ctx, state);
+    // The repair instruction rides this one call only; it is never stored in the chat.
+    const callMessages = repairNudge ? [...loopMessages, repairNudge] : loopMessages;
+    repairNudge = null;
     let completion;
     try {
-      completion = await callLLMWithRetry(loopMessages, effectiveSchemas, {
+      completion = await callLLMWithRetry(callMessages, effectiveSchemas, {
         onStream,
         forceRemote: ctx.forceRemote,
         conversationId: ctx.conversationId,
@@ -1596,10 +1683,55 @@ export async function runToolLoop(
       });
     }
 
-    const { effectiveToolCalls, displayResponse } = resolveToolCalls(
-      fullResponse,
-      toolCalls,
-    );
+    const resolved = resolveToolCalls(fullResponse, toolCalls);
+    const { displayResponse } = resolved;
+    let { effectiveToolCalls } = resolved;
+    // A call written inside the reasoning channel (Qwen-style models think, then emit <tool_call>
+    // before closing </think>) never reaches fullResponse. Parse it there only when the visible
+    // answer is empty, so a real answer is never replaced by a call the model only considered.
+    if (
+      effectiveToolCalls.length === 0 &&
+      !displayResponse.trim() &&
+      hasAnyToolCallMarkup(state.reasoningContent)
+    ) {
+      const fromReasoning = resolveToolCalls(state.reasoningContent, []);
+      if (fromReasoning.effectiveToolCalls.length > 0) {
+        logger.log(
+          `[ToolLoop] parsed ${fromReasoning.effectiveToolCalls.length} tool call(s) from the reasoning channel`,
+        );
+        effectiveToolCalls = fromReasoning.effectiveToolCalls;
+        state.reasoningContent = fromReasoning.displayResponse;
+      }
+    }
+    // Markup present but nothing parsed: the call was cut off (max tokens) or malformed. Retry once
+    // with an explicit instruction; if that fails too, end with the markup stripped and a notice.
+    const brokenToolCall =
+      effectiveToolCalls.length === 0 && hasAnyToolCallMarkup(fullResponse);
+    if (brokenToolCall && !ctx.isAborted()) {
+      if (state.streamedContent || state.reasoningContent) ctx.onStreamReset?.();
+      state.streamedContent = '';
+      state.reasoningContent = '';
+      state.firstTokenFired = false;
+      if (!toolCallRepairTried) {
+        toolCallRepairTried = true;
+        logger.warn('[ToolLoop] unparseable tool-call markup; retrying once with a repair instruction');
+        repairNudge = {
+          id: `tool-call-repair-${Date.now()}`,
+          role: 'user',
+          content: TOOL_CALL_REPAIR_INSTRUCTION,
+          timestamp: Date.now(),
+        };
+        chatStore.setIsThinking(true);
+        iteration -= 1;
+        continue;
+      }
+      emitFinalResponse(
+        ctx,
+        state,
+        stripToolCallMarkup(fullResponse) || BROKEN_TOOL_CALL_NOTICE,
+      );
+      return { interrupted: false };
+    }
     // Cap THIS round's requested tool calls to the budget still remaining before maxToolSteps.
     // `callsWithinToolBudget` is a numeric predicate (count < max), not an array capper — calling it
     // here (with a 3rd arg it never declared) returned a boolean, so `.length`/`.map` below blew up
@@ -1675,6 +1807,7 @@ export async function runToolLoop(
 
     const localLlamaBeforeTools = !isUsingRemote(ctx.forceRemote) && llmService.isModelLoaded();
     const okBefore = state.successfulToolResults.length;
+    const loopLengthBefore = loopMessages.length;
     totalToolCalls += await executeToolCalls(ctx, {
       toolCalls: cappedToolCalls,
       loopMessages,
@@ -1693,6 +1826,9 @@ export async function runToolLoop(
       const outcome = await handleTextModelEvictedByTools(ctx, state, {
         toolNames: cappedToolCalls.map(tc => tc.name),
         anyOk: state.successfulToolResults.length > okBefore,
+        imageCancelled: loopMessages
+          .slice(loopLengthBefore)
+          .some(m => m.role === 'tool' && m.toolName === 'generate_image' && m.content.includes('generate_image cancelled:')),
         displayResponse,
       });
       if (outcome) return outcome;

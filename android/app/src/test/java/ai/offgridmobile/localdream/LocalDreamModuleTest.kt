@@ -549,4 +549,33 @@ class LocalDreamModuleTest {
         assertEquals(384, LocalDreamModule.snapMnnSize(360))
         assertEquals(512, LocalDreamModule.snapMnnSize(1024))
     }
+
+    // -- buildCommand port / isPathInside / shouldCopyRuntimeAsset -------------
+
+    @Test
+    fun `buildCommand passes the given port to both backends`() {
+        val exe = makeExecutable()
+        val rt = makeRuntimeDir()
+        val cpu = LocalDreamModule.buildCommand(exe, makeCpuModelDir(), rt, isCpu = true, port = 40123)
+        assertEquals("40123", cpu[cpu.indexOf("--port") + 1])
+        val npu = LocalDreamModule.buildCommand(exe, makeQnnModelDir(), rt, isCpu = false, port = 40124)
+        assertEquals("40124", npu[npu.indexOf("--port") + 1])
+    }
+
+    @Test
+    fun `isPathInside accepts root and children, rejects sibling prefix`() {
+        val root = "/data/user/0/ai.offgridmobile/files"
+        assertTrue(LocalDreamModule.isPathInside(root, root))
+        assertTrue(LocalDreamModule.isPathInside("$root/models/sd", root))
+        assertFalse(LocalDreamModule.isPathInside("${root}_evil/models", root))
+        assertFalse(LocalDreamModule.isPathInside("/data/user/0/other", root))
+    }
+
+    @Test
+    fun `shouldCopyRuntimeAsset copies QNN libs only for NPU and executable only when asked`() {
+        assertTrue(LocalDreamModule.shouldCopyRuntimeAsset("libQnnHtp.so", copyQnnLibs = true, copyExecutable = false))
+        assertFalse(LocalDreamModule.shouldCopyRuntimeAsset("libQnnHtp.so", copyQnnLibs = false, copyExecutable = true))
+        assertTrue(LocalDreamModule.shouldCopyRuntimeAsset("libstable_diffusion_core.so", copyQnnLibs = false, copyExecutable = true))
+        assertFalse(LocalDreamModule.shouldCopyRuntimeAsset("libstable_diffusion_core.so", copyQnnLibs = true, copyExecutable = false))
+    }
 }

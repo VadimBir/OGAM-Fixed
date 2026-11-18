@@ -6,14 +6,71 @@ import {
 } from '../types';
 import {
   HF_API,
-  QUANTIZATION_INFO,
   LMSTUDIO_AUTHORS,
   OFFICIAL_MODEL_AUTHORS,
   VERIFIED_QUANTIZERS,
 } from '../constants';
 import { looksLikeVisionModel } from '../utils/visionModel';
 import { huggingFaceRevisionPath } from '../utils/modelOrigin';
+import { lookupQuantizationInfo, parseQuantization } from '../utils/quantization';
 import { isMMProjFile, pickMmProjForDownload } from './mmproj';
+
+interface TreeEntry {
+  type: string;
+  path: string;
+  size?: number;
+  lfs?: { size: number };
+}
+
+/** Upper bound on tree pages followed for one listing (HF serves ~1000 entries a page). */
+const MAX_TREE_PAGES = 20;
+
+function basenameOfPath(path: string): string {
+  return path.substring(path.lastIndexOf('/') + 1);
+}
+
+/** The `rel="next"` URL of an HF paginated response, or null. Tolerates a response without headers. */
+function nextPageUrl(response: Response): string | null {
+  const link = response.headers?.get?.('link');
+  if (!link) return null;
+  for (const part of link.split(',')) {
+    const m = /<([^>]+)>\s*;\s*rel="?next"?/i.exec(part);
+    if (m) return m[1];
+  }
+  return null;
+}
+
+const SPLIT_PART_RE = /-(\d{5})-of-(\d{5})\.gguf$/i;
+
+/**
+ * Collapse split GGUF parts (`<name>-00001-of-00003.gguf`, …) into ONE row: part 1, carrying the
+ * summed size of every listed part and `splitPartCount`. Listing each part as its own "model" let
+ * the user download `-00002-of-00003` alone, a file llama.cpp cannot load. Parts 2..N are hidden;
+ * a group whose part 1 is not listed is dropped (nothing loadable to offer).
+ */
+export function groupSplitParts(files: ModelFile[]): ModelFile[] {
+  const groups = new Map<string, { first?: ModelFile; total: number; count: number; parts: number }>();
+  const out: ModelFile[] = [];
+  for (const file of files) {
+    const m = SPLIT_PART_RE.exec(file.name);
+    const parts = m ? Number.parseInt(m[2], 10) : 0;
+    if (!m || parts <= 1) {
+      out.push(file);
+      continue;
+    }
+    const key = file.name.replace(SPLIT_PART_RE, '');
+    const group = groups.get(key) ?? { total: 0, count: 0, parts };
+    group.total += file.size || 0;
+    group.count += 1;
+    if (Number.parseInt(m[1], 10) === 1) group.first = file;
+    groups.set(key, group);
+  }
+  for (const group of groups.values()) {
+    if (!group.first) continue;
+    out.push({ ...group.first, size: group.total, splitPartCount: group.parts });
+  }
+  return out;
+}
 
 class HuggingFaceService {
   private baseUrl = HF_API.baseUrl;
@@ -120,26 +177,15 @@ class HuggingFaceService {
     revision = 'main',
   ): Promise<ModelFile[]> {
     try {
-      const encodedRevision = encodeURIComponent(revision);
-      const response = await fetch(
-        `${this.apiUrl}/models/${modelId}/tree/${encodedRevision}`,
-        { headers: { Accept: 'application/json' } },
-      );
-      if (!response.ok)
-        return this.getModelFilesFromSiblings(modelId, revision);
-      const files: Array<{
-        type: string;
-        path: string;
-        size?: number;
-        lfs?: { size: number };
-      }> = await response.json();
+      const files = await this.fetchTreeEntries(modelId, revision);
+      if (!files) return this.getModelFilesFromSiblings(modelId, revision);
       const allGguf = files.filter(
-        f => f.type === 'file' && f.path.endsWith('.gguf'),
+        f => f.type === 'file' && f.path.toLowerCase().endsWith('.gguf'),
       );
       const mmProjFiles = allGguf.filter(f => this.isMMProjFile(f.path));
       const modelFiles = allGguf.filter(f => !this.isMMProjFile(f.path));
-      return modelFiles
-        .map(file => ({
+      return groupSplitParts(
+        modelFiles.map(file => ({
           name: file.path,
           size: file.lfs?.size || file.size || 0,
           quantization: this.extractQuantization(file.path),
@@ -148,11 +194,37 @@ class HuggingFaceService {
             modelId,
             revision,
           }),
-        }))
-        .sort((a, b) => a.size - b.size);
+        })),
+      ).sort((a, b) => a.size - b.size);
     } catch {
       return this.getModelFilesFromSiblings(modelId, revision);
     }
+  }
+
+  /**
+   * Every entry of a repo revision, INCLUDING sub-folders (`?recursive=1`) and every page (HF pages
+   * the tree endpoint and names the next page in a `Link: <url>; rel="next"` header). The bare call
+   * listed the root folder's first page only, so a repo that keeps its quants in folders, or has
+   * more files than one page, showed a partial list. Null when any page fails: the caller then uses
+   * the siblings listing, which is recursive and unpaged, so both paths list the same files.
+   */
+  private async fetchTreeEntries(
+    modelId: string,
+    revision: string,
+  ): Promise<TreeEntry[] | null> {
+    const entries: TreeEntry[] = [];
+    let url: string | null = `${this.apiUrl}/models/${modelId}/tree/${encodeURIComponent(revision)}?recursive=1`;
+    for (let page = 0; url && page < MAX_TREE_PAGES; page++) {
+      const response: Response = await fetch(url, {
+        headers: { Accept: 'application/json' },
+      });
+      if (!response.ok) return null;
+      const body: unknown = await response.json();
+      if (!Array.isArray(body)) return null;
+      entries.push(...(body as TreeEntry[]));
+      url = nextPageUrl(response);
+    }
+    return entries;
   }
 
   private async getModelFilesFromSiblings(
@@ -161,11 +233,15 @@ class HuggingFaceService {
   ): Promise<ModelFile[]> {
     const revisionPath =
       revision === 'main' ? '' : `/revision/${encodeURIComponent(revision)}`;
+    // `blobs=true` makes siblings carry sizes; without it every file read as 0 bytes here while the
+    // tree path showed real sizes for the same repo.
     const result = await this.fetchJson<HFModelSearchResult>(
-      `${this.apiUrl}/models/${modelId}${revisionPath}`,
+      `${this.apiUrl}/models/${modelId}${revisionPath}?blobs=true`,
     );
     if (!result.siblings) return [];
-    const allGguf = result.siblings.filter(f => f.rfilename.endsWith('.gguf'));
+    const allGguf = result.siblings.filter(f =>
+      f.rfilename.toLowerCase().endsWith('.gguf'),
+    );
     const mmProjFiles = allGguf.filter(f => this.isMMProjFile(f.rfilename));
     const modelFiles = allGguf.filter(f => !this.isMMProjFile(f.rfilename));
     const mmProjForMatch = mmProjFiles.map(f => ({
@@ -173,15 +249,15 @@ class HuggingFaceService {
       size: f.size,
       lfs: f.lfs,
     }));
-    return modelFiles
-      .map(file => ({
+    return groupSplitParts(
+      modelFiles.map(file => ({
         ...this.transformFileInfo(modelId, file, revision),
         mmProjFile: this.findMatchingMMProj(file.rfilename, mmProjForMatch, {
           modelId,
           revision,
         }),
-      }))
-      .sort((a, b) => a.size - b.size);
+      })),
+    ).sort((a, b) => a.size - b.size);
   }
 
   getDownloadUrl(
@@ -268,26 +344,10 @@ class HuggingFaceService {
     };
   }
 
+  // The shared label rule (src/utils/quantization.ts): IQ4_XS stays IQ4_XS, BF16 stays BF16,
+  // UD-Q4_K_XL stays UD-Q4_K_XL. Read from the file's own name, never its folder.
   private extractQuantization(fileName: string): string {
-    const upperName = fileName.toUpperCase();
-
-    // Check for known quantization patterns
-    for (const quant of Object.keys(QUANTIZATION_INFO)) {
-      if (upperName.includes(quant.replace('_', ''))) {
-        return quant;
-      }
-      if (upperName.includes(quant)) {
-        return quant;
-      }
-    }
-
-    // Try to extract with regex
-    const match = fileName.match(/[QqFf]\d+[_]?[KkMmSs]*/);
-    if (match) {
-      return match[0].toUpperCase();
-    }
-
-    return 'Unknown';
+    return parseQuantization(basenameOfPath(fileName));
   }
 
   // Delegates to the single source of truth (src/services/mmproj.ts) so "is this a projector" is defined once.
@@ -304,13 +364,15 @@ class HuggingFaceService {
     mmProjFiles: Array<{ path: string; size?: number; lfs?: { size: number } }>,
     source: string | { modelId: string; revision: string },
   ): { name: string; size: number; downloadUrl: string } | undefined {
+    // Matched on BASE names: with the recursive listing a model in `Q4_K_M/` and its projector at the
+    // repo root would otherwise differ by the folder token in their identity stems.
     const chosen = pickMmProjForDownload(
-      modelFileName,
-      mmProjFiles.map(f => f.path),
+      basenameOfPath(modelFileName),
+      mmProjFiles.map(f => basenameOfPath(f.path)),
     );
     if (!chosen) return undefined;
 
-    const file = mmProjFiles.find(f => f.path === chosen);
+    const file = mmProjFiles.find(f => basenameOfPath(f.path) === chosen);
     if (!file) return undefined;
     const modelId = typeof source === 'string' ? source : source.modelId;
     const revision = typeof source === 'string' ? 'main' : source.revision;
@@ -363,7 +425,7 @@ class HuggingFaceService {
 
   getQuantizationInfo(quantization: string) {
     return (
-      QUANTIZATION_INFO[quantization] || {
+      lookupQuantizationInfo(quantization) || {
         bitsPerWeight: 4.5,
         quality: 'Unknown',
         description: 'Unknown quantization level',

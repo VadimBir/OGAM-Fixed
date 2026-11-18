@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo, useEffect } from 'react';
+import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import { Keyboard, BackHandler } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { showAlert, hideAlert, AlertState } from '../../components/CustomAlert';
@@ -15,6 +15,7 @@ import { initialFilterState, SIZE_OPTIONS, VISION_PIPELINE_TAG, CODE_FALLBACK_QU
 import { getModelType } from './utils';
 import logger from '../../utils/logger';
 import { getUserFacingDownloadMessage } from '../../utils/downloadErrors';
+import { modelRowMatchesCatalogFile } from '../../services/modelManager/localModelFile';
 
 const PARAM_COUNT_REGEX = /\b(\d+[.]\d+|\d+)\s?[Bb]\b/;
 
@@ -137,13 +138,17 @@ export function useTextModels(setAlertState: (s: AlertState) => void) {
     }, [selectedModel])
   );
 
+  // Each search takes a ticket; only the LATEST ticket may write results. Typing "qwen" then
+  // "qwen3" fires two requests, and when the first answers last it replaced the newer results.
+  const searchSeqRef = useRef(0);
   const runSearch = async () => {
+    const seq = ++searchSeqRef.current;
     const hasQuery = searchQuery.trim().length > 0;
     const hasTypeFilter = filterState.type !== 'all';
     const hasOrgFilter = filterState.orgs.length > 0;
     const hasSizeFilter = filterState.size !== 'all';
     if (!hasQuery && !hasTypeFilter && !hasOrgFilter && !hasSizeFilter) {
-      setHasSearched(false); setSearchResults([]); return;
+      setHasSearched(false); setSearchResults([]); setIsLoading(false); return;
     }
     let pipelineTag: string | undefined;
     let effectiveQuery = searchQuery.trim();
@@ -152,11 +157,14 @@ export function useTextModels(setAlertState: (s: AlertState) => void) {
     setIsLoading(true); setHasSearched(true);
     try {
       const results = await huggingFaceService.searchModels(effectiveQuery, { limit: 30, pipelineTag });
+      if (seq !== searchSeqRef.current) return;
       setSearchResults(results);
-    } catch {
+    } catch (error) {
+      if (seq !== searchSeqRef.current) return;
+      logger.warn('[ModelsScreen] search failed:', error);
       setAlertState(showAlert('Search Error', 'Failed to search models. Please try again.'));
     } finally {
-      setIsLoading(false);
+      if (seq === searchSeqRef.current) setIsLoading(false);
     }
   };
 
@@ -167,7 +175,11 @@ export function useTextModels(setAlertState: (s: AlertState) => void) {
   };
 
   useEffect(() => {
-    if (!searchQuery.trim()) { setHasSearched(false); setSearchResults([]); return; }
+    if (!searchQuery.trim()) {
+      // Invalidate any request still in flight so it cannot repopulate the cleared list.
+      searchSeqRef.current += 1;
+      setHasSearched(false); setSearchResults([]); setIsLoading(false); return;
+    }
     const timer = setTimeout(() => { runSearch(); }, 500);
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -261,8 +273,26 @@ export function useTextModels(setAlertState: (s: AlertState) => void) {
         { text: 'Cancel', style: 'cancel' },
         { text: 'Delete', style: 'destructive', onPress: async () => {
           setAlertState(hideAlert());
-          if (activeModelId === model.id) await activeModelService.unloadTextModel().catch(() => {});
-          await modelManager.deleteModel(model.id);
+          // Unload whenever this model is the one in memory, not only when it is the selection.
+          const { loadedTextModelId } = useAppStore.getState();
+          if (activeModelId === model.id || loadedTextModelId === model.id) {
+            await activeModelService.unloadTextModel().catch((error: unknown) => {
+              logger.warn('[ModelsScreen] unload before delete failed:', error);
+            });
+          }
+          try {
+            await modelManager.deleteModel(model.id);
+          } catch (error) {
+            // deleteModel already treats an absent file as deleted; a row that is gone from the
+            // registry is gone too. Anything else is a real failure the user must see.
+            const message = error instanceof Error ? error.message : String(error);
+            if (message !== 'Model not found') {
+              logger.error('[ModelsScreen] delete failed:', error);
+              setAlertState(showAlert('Delete Failed', `Could not delete "${model.name}": ${message}`));
+              return;
+            }
+            logger.warn(`[ModelsScreen] ${model.id} was already absent from the registry`);
+          }
           removeDownloadedModel(model.id);
         } },
       ],
@@ -275,8 +305,13 @@ export function useTextModels(setAlertState: (s: AlertState) => void) {
   // after an app kill) look "not downloaded", so its file row fell through to whichever
   // sibling quant WAS registered under the expected id (the Q4_K_M) — loading the wrong
   // quant. A file name is unique within the models dir, so it's the stable key.
+  //
+  // But a file NAME is not unique across repos (two repos can both publish
+  // `Qwen3-4B-Q4_K_M.gguf`), so a row attributed to ANOTHER repo is never this file; only an exact
+  // id, or an unattributed (recovered / imported) row of the same name, matches. Rule owner:
+  // services/modelManager/localModelFile.ts.
   const matchesFile = (m: DownloadedModel, modelId: string, fileName: string) =>
-    m.fileName === fileName || m.id === `${modelId}/${fileName}`;
+    modelRowMatchesCatalogFile(m, modelId, fileName);
 
   const isModelDownloaded = (modelId: string, fileName: string) =>
     downloadedModels.some(m => matchesFile(m, modelId, fileName));

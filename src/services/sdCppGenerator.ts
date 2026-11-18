@@ -6,6 +6,8 @@ import {
 } from '../types';
 import { generateRandomSeed } from '../utils/generateId';
 import logger from '../utils/logger';
+import { DEFAULT_IMAGE_STEPS } from '../utils/imageGenAdvice';
+import { snapSdCppDimension } from './imageEngineParams';
 import type { SdWeightType } from './sdCppMemory';
 import {
   classifySafetensorsKeys,
@@ -14,12 +16,55 @@ import {
 
 const { SdCppImageModule } = NativeModules;
 
+/** Native reject code for a user cancel (SdCppImageModule.kt). */
+export const SDCPP_CANCELLED_CODE = 'CANCELLED';
+
 type ProgressCallback = (progress: ImageGenerationProgress) => void;
+
+/**
+ * Thrown (before any native call) when a request needs img2img/inpainting, which the sd.cpp JNI
+ * (SdCppNative.nativeGenerate) has no parameters for. Typed so callers can show a real message
+ * instead of the reference image being silently dropped and a plain txt2img being returned.
+ */
+export class SdCppUnsupportedFeatureError extends Error {
+  readonly code = 'ERR_SDCPP_UNSUPPORTED_FEATURE';
+  readonly feature: 'initImage' | 'maskImage';
+  constructor(feature: 'initImage' | 'maskImage') {
+    super(
+      feature === 'initImage'
+        ? 'This image model (stable-diffusion.cpp) cannot do image-to-image yet. Use a NPU/GPU image model, or remove the reference image.'
+        : 'This image model (stable-diffusion.cpp) cannot do inpainting masks yet.',
+    );
+    this.name = 'SdCppUnsupportedFeatureError';
+    this.feature = feature;
+  }
+}
 
 /** Load-time sd.cpp options; a change requires a reload (weights are converted at load). */
 export interface SdCppLoadConfig {
   weightType: SdWeightType;
+  /** Text encoder + VAE only: the diffusion model always runs flash attention (sdcpp_jni.cpp). */
   flashAttn: boolean;
+  /** Where module weights live between runs: unset / 'ram' = resident (upstream default),
+   *  'disk' or 'te=disk,vae=disk,diffusion=disk' = reloaded per run (less RAM, slower). */
+  paramsBackend?: string;
+  /** LoRA merge timing: 'auto' (default) | 'immediately' | 'at_runtime'. */
+  loraApplyMode?: 'auto' | 'immediately' | 'at_runtime';
+  /** Direct conv2d in the VAE (no im2col buffer; may be slower). Default false. */
+  vaeConvDirect?: boolean;
+}
+
+const DEFAULT_LORA_APPLY_MODE = 'auto';
+
+/** Config fields with their defaults applied, so "unset" and "the default" compare equal. */
+function normalizedLoadConfig(c: SdCppLoadConfig) {
+  return {
+    weightType: c.weightType,
+    flashAttn: c.flashAttn,
+    paramsBackend: !c.paramsBackend || c.paramsBackend === 'ram' ? '' : c.paramsBackend,
+    loraApplyMode: c.loraApplyMode ?? DEFAULT_LORA_APPLY_MODE,
+    vaeConvDirect: c.vaeConvDirect ?? false,
+  };
 }
 
 export function sdCppLoadConfigFromSettings(settings: {
@@ -97,16 +142,32 @@ class SdCppGeneratorService {
   /** True when the loaded context was created with a different weight type / flash attention. */
   loadConfigDiffers(config: SdCppLoadConfig): boolean {
     const c = this.loadedConfig;
-    return c != null && (c.weightType !== config.weightType || c.flashAttn !== config.flashAttn);
+    if (c == null) return false;
+    const a = normalizedLoadConfig(c);
+    const b = normalizedLoadConfig(config);
+    return (
+      a.weightType !== b.weightType ||
+      a.flashAttn !== b.flashAttn ||
+      a.paramsBackend !== b.paramsBackend ||
+      a.loraApplyMode !== b.loraApplyMode ||
+      a.vaeConvDirect !== b.vaeConvDirect
+    );
   }
 
   async loadModel(modelPath: string, threads?: number, config: SdCppLoadConfig = { weightType: 'auto', flashAttn: true }): Promise<boolean> {
     if (!this.isAvailable()) {
       throw new Error('stable-diffusion.cpp image generation is not available on this platform');
     }
-    const params: { modelPath: string; threads?: number; mmap: boolean; weightType: string; flashAttn: boolean } = {
+    const params: {
+      modelPath: string; threads?: number; mmap: boolean; weightType: string; flashAttn: boolean;
+      paramsBackend?: string; loraApplyMode: string; vaeConvDirect: boolean;
+    } = {
       modelPath, mmap: true, weightType: config.weightType, flashAttn: config.flashAttn,
+      loraApplyMode: config.loraApplyMode ?? DEFAULT_LORA_APPLY_MODE,
+      vaeConvDirect: config.vaeConvDirect ?? false,
     };
+    // Unset / 'ram' = resident weights: the field is left out so native keeps upstream's default.
+    if (config.paramsBackend && config.paramsBackend !== 'ram') params.paramsBackend = config.paramsBackend;
     if (typeof threads === 'number') params.threads = threads;
     logger.log(`[SDCPP-LOAD] ${JSON.stringify(params)}`);
     const result = await SdCppImageModule.loadModel(params);
@@ -132,11 +193,13 @@ class SdCppGeneratorService {
     const np = {
       prompt,
       negativePrompt: params.negativePrompt || '',
-      steps: params.steps || 20,
+      steps: params.steps || DEFAULT_IMAGE_STEPS,
       guidanceScale: params.guidanceScale || 7,
       seed: params.seed ?? generateRandomSeed(),
-      width: params.width || 512,
-      height: params.height || 512,
+      // Same 64 px grid snap the native side applies (SdCppImageModule.snapDimension), done here so
+      // the size reported by getEffectiveSize / the router is exactly what native receives.
+      width: snapSdCppDimension(params.width),
+      height: snapSdCppDimension(params.height),
       sampler: params.sampler || '',
       scheduler: params.scheduler || '',
       clipSkip: params.clipSkip ?? -1,
@@ -157,6 +220,8 @@ class SdCppGeneratorService {
     if (this.generating) throw new Error('Image generation already in progress');
     const trimmedPrompt = (params.prompt || '').trim();
     if (!trimmedPrompt) throw new Error('Cannot generate image with an empty prompt');
+    if (params.initImage) throw new SdCppUnsupportedFeatureError('initImage');
+    if (params.maskImage) throw new SdCppUnsupportedFeatureError('maskImage');
 
     this.generating = true;
     const subscription = this.getEmitter().addListener(
@@ -181,6 +246,15 @@ class SdCppGeneratorService {
         modelId: '',
         createdAt: new Date().toISOString(),
       };
+    } catch (error: any) {
+      // Native rejects with code CANCELLED (SdCppImageModule.generateImage) for a user cancel.
+      // imageGenerationService treats an error message containing "cancelled" as a cancel, not a failure.
+      if (error?.code === SDCPP_CANCELLED_CODE) {
+        const cancelled = new Error('Image generation was cancelled') as Error & { code: string };
+        cancelled.code = SDCPP_CANCELLED_CODE;
+        throw cancelled;
+      }
+      throw error;
     } finally {
       this.generating = false;
       subscription.remove();

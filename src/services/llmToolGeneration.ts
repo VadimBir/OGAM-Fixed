@@ -137,7 +137,14 @@ export interface ToolGenerationDeps {
 export async function generateWithToolsImpl(
   deps: ToolGenerationDeps,
   messages: Message[],
-  options: { tools: any[]; onStream?: ToolStreamCallback; onComplete?: ToolCompleteCallback },
+  options: {
+    tools: any[];
+    onStream?: ToolStreamCallback;
+    onComplete?: ToolCompleteCallback;
+    /** Hard thinking-off for this pass (tool-limit final answer, empty-response fallback), whatever
+     *  the global Thinking toggle says. Same contract as generateResponse's disableThinking. */
+    disableThinking?: boolean;
+  },
 ): Promise<{ fullResponse: string; toolCalls: ToolCall[]; interrupted?: boolean }> {
   if (!deps.context) throw new Error('No model loaded');
   if (deps.isGenerating) throw new Error('Generation already in progress');
@@ -169,7 +176,11 @@ export async function generateWithToolsImpl(
       ...buildCompletionParams(settings, { disableCtxShift: deps.disableCtxShift }),
       tools: options.tools,
       tool_choice: 'auto',
-      ...buildThinkingCompletionParams(deps.isThinkingEnabled, deps.isGemma4Model, settings.reasoningBudget),
+      ...buildThinkingCompletionParams(
+        deps.isThinkingEnabled && !options.disableThinking,
+        deps.isGemma4Model,
+        settings.reasoningBudget,
+      ),
     };
     logger.log('[LLM-Tools] === INPUT ===');
     logger.log(JSON.stringify(completionParams, null, 2));

@@ -17,6 +17,7 @@ import {
 } from '../../services';
 import { generationSession } from '../../services/generationSession';
 import type { RootStackParamList } from '../../navigation/types';
+import logger from '../../utils/logger';
 import {
   dispatchGenerationFn,
   GenerationDeps,
@@ -109,7 +110,12 @@ export function useChatRuntimeSubscriptions(
 
   const handleQueuedSend = useCallback(
     async (item: QueuedMessage) => {
-      if (!generationDepsRef.current || !startGenerationRef.current) return;
+      if (!generationDepsRef.current || !startGenerationRef.current) {
+        logger.error(
+          `[GenerationService] queued message ${item.id} dropped: chat screen not ready`,
+        );
+        return;
+      }
       await dispatchGenerationFn(
         generationDepsRef.current,
         {
@@ -127,6 +133,12 @@ export function useChatRuntimeSubscriptions(
 
   useEffect(() => {
     generationService.setQueueProcessor(handleQueuedSend);
+    // Messages queued while no ChatScreen was mounted (the processor is null between unmount and the
+    // next mount) stay in the queue; release them now that a processor exists again. drainQueue is a
+    // no-op while a text turn runs; an image turn drains on its own completion, so wait for it.
+    if (!imageGenerationService.getState().isGenerating) {
+      generationService.drainQueue();
+    }
     return () => generationService.setQueueProcessor(null);
   }, [handleQueuedSend]);
 
@@ -157,6 +169,18 @@ export function useChatConversationLifecycle({
   useEffect(() => {
     setPendingProjectId(routeProjectId);
   }, [routeProjectId, setPendingProjectId]);
+
+  // Leaving a conversation for an empty chat (new chat on the same screen, delete) must not carry that
+  // conversation's character into the next one. Reset the pending character to what the ROUTE asked
+  // for (undefined for a plain new chat), never a character picked for the previous conversation.
+  const previousActiveConversationIdRef = useRef(activeConversationId);
+  useEffect(() => {
+    const previous = previousActiveConversationIdRef.current;
+    previousActiveConversationIdRef.current = activeConversationId;
+    if (previous && !activeConversationId) setPendingProjectId(routeProjectId);
+    // Only the active-conversation transition triggers this; routeProjectId is read at that moment.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeConversationId]);
 
   useEffect(() => {
     if (

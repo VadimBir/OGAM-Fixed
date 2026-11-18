@@ -11,6 +11,12 @@ import {
   buildToolSystemPromptHint,
 } from '../../../../src/services/tools/registry';
 
+// The generate_image prompt description follows the selected image model (imageTool.imagePromptDescription).
+let mockImageEngine: any = null;
+jest.mock('../../../../src/services/imageGenerationService', () => ({
+  imageGenerationService: { activeImageEngine: () => mockImageEngine },
+}));
+
 describe('Tool Registry', () => {
   // ========================================================================
   // AVAILABLE_TOOLS
@@ -103,7 +109,7 @@ describe('Tool Registry', () => {
       expect(datetimeSchema[0].function.parameters.required).toEqual([]);
     });
 
-    it('exposes generate_image with a required prompt and optional steps/negative_prompt', () => {
+    it('exposes generate_image with a required prompt and optional size/steps/guidance/seed/sampler', () => {
       const schema = getToolsAsOpenAISchema(['generate_image']);
       expect(schema).toHaveLength(1);
       expect(schema[0].function.name).toBe('generate_image');
@@ -112,6 +118,33 @@ describe('Tool Registry', () => {
       expect(props.prompt.type).toBe('string');
       expect(props.steps.type).toBe('integer');
       expect(props.negative_prompt.type).toBe('string');
+      expect(props.width.type).toBe('integer');
+      expect(props.height.type).toBe('integer');
+      expect(props.width.description).toContain('64-512');
+      expect(props.guidance.type).toBe('number');
+      expect(props.seed.type).toBe('integer');
+      expect(props.sampler.type).toBe('string');
+    });
+
+    it('writes the generate_image prompt description for the selected image model family', () => {
+      mockImageEngine = { kind: 'local', model: { id: 'm', backend: 'sdcpp', sdFamily: 'sd1' } };
+      expect(
+        getToolsAsOpenAISchema(['generate_image'])[0].function.parameters.properties.prompt.description,
+      ).toContain('comma-separated tags');
+      mockImageEngine = { kind: 'local', model: { id: 'm', backend: 'sdcpp', sdFamily: 'sdxl' } };
+      expect(
+        getToolsAsOpenAISchema(['generate_image'])[0].function.parameters.properties.prompt.description,
+      ).toContain('plain sentences');
+      // LocalDream models record no architecture -> neutral text, never a guessed style.
+      mockImageEngine = { kind: 'local', model: { id: 'm', backend: 'mnn' } };
+      const neutral =
+        getToolsAsOpenAISchema(['generate_image'])[0].function.parameters.properties.prompt.description;
+      expect(neutral).not.toContain('tags');
+      expect(neutral).not.toContain('plain sentences');
+      // The text-hint listing carries the same family text.
+      mockImageEngine = { kind: 'local', model: { id: 'm', backend: 'sdcpp', sdFamily: 'sd1' } };
+      expect(buildToolSystemPromptHint(['generate_image'])).toContain('comma-separated tags');
+      mockImageEngine = null;
     });
 
     it('includes enum values when present in parameters', () => {

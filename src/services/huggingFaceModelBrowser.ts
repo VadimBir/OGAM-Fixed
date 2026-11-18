@@ -1,3 +1,5 @@
+import logger from '../utils/logger';
+
 export interface HFImageModel {
   id: string;
   name: string;
@@ -28,8 +30,9 @@ const VARIANT_LABELS: Record<string, string> = {
   '8gen2': 'For Snapdragon 8 Gen 2/3/4/5',
 };
 
-let cachedModels: HFImageModel[] | null = null;
-let cacheTimestamp = 0;
+// Keyed on skipQnn: a list fetched WITHOUT the NPU repo must never answer a request that wants it
+// (and vice versa), or the NPU models stayed hidden for the whole TTL after one skipQnn call.
+const cache = new Map<boolean, { models: HFImageModel[]; timestamp: number }>();
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
 function insertSpaces(name: string): string {
@@ -78,15 +81,28 @@ async function fetchRepoFiles(repo: string): Promise<HFTreeEntry[]> {
 }
 
 export async function fetchAvailableModels(forceRefresh = false, opts?: { skipQnn?: boolean }): Promise<HFImageModel[]> {
-  if (!forceRefresh && cachedModels && Date.now() - cacheTimestamp < CACHE_TTL) {
-    return cachedModels;
+  const skipQnn = !!opts?.skipQnn;
+  const cached = cache.get(skipQnn);
+  if (!forceRefresh && cached && Date.now() - cached.timestamp < CACHE_TTL) {
+    return cached.models;
   }
 
-  const fetchQnn = !opts?.skipQnn;
-  const [mnnFiles, qnnFiles] = await Promise.all([
+  // allSettled: one unreachable repo must not hide the other repo's models. Only when EVERY
+  // requested repo fails is it an error the screen reports.
+  const [mnnResult, qnnResult] = await Promise.allSettled([
     fetchRepoFiles(REPOS.mnn),
-    fetchQnn ? fetchRepoFiles(REPOS.qnn) : Promise.resolve([] as HFTreeEntry[]),
+    skipQnn ? Promise.resolve([] as HFTreeEntry[]) : fetchRepoFiles(REPOS.qnn),
   ]);
+  const failures = [mnnResult, qnnResult].filter(
+    (r): r is PromiseRejectedResult => r.status === 'rejected',
+  );
+  const requested = skipQnn ? 1 : 2;
+  if (failures.length >= requested) throw failures[0].reason;
+  for (const failure of failures) {
+    logger.warn('[HFModelBrowser] one image repo failed; showing the others:', failure.reason);
+  }
+  const mnnFiles = mnnResult.status === 'fulfilled' ? mnnResult.value : [];
+  const qnnFiles = qnnResult.status === 'fulfilled' ? qnnResult.value : [];
 
   const models: HFImageModel[] = [];
 
@@ -120,8 +136,8 @@ export async function fetchAvailableModels(forceRefresh = false, opts?: { skipQn
     return a.name.localeCompare(b.name);
   });
 
-  cachedModels = models;
-  cacheTimestamp = Date.now();
+  // A partial list is shown but not cached, so the next open retries the repo that failed.
+  if (failures.length === 0) cache.set(skipQnn, { models, timestamp: Date.now() });
   return models;
 }
 

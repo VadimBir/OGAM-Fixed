@@ -1354,13 +1354,13 @@ describe('appStore', () => {
       expect(result.settings.cacheType).toBe('q8_0');
     });
 
-    it('migrates missing cacheType with flashAttn=false to f16', () => {
+    it('migrates missing cacheType with flashAttn=false to q8_0 (flash attention is forced on)', () => {
       const merge = getMergeFn();
       const result = merge(
         { settings: { flashAttn: false } }, // no cacheType
         useAppStore.getState(),
       );
-      expect(result.settings.cacheType).toBe('f16');
+      expect(result.settings.cacheType).toBe('q8_0');
     });
 
     it('migrates missing inferenceBackend to platform default', () => {

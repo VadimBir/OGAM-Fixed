@@ -59,4 +59,34 @@ describe('generationSession', () => {
     expect(generationSession.getConversationId()).toBe('c2');
     expect(generationSession.isGeneratingFor('c1')).toBe(false);
   });
+
+  it('begin returns a new token on every call, even for the same conversation', () => {
+    const first = generationSession.begin('c1');
+    const second = generationSession.begin('c1');
+    expect(second).not.toBe(first);
+  });
+
+  it('end with the current token clears the session', () => {
+    const token = generationSession.begin('c1');
+    generationSession.end('done', token);
+    expect(generationSession.getConversationId()).toBeNull();
+  });
+
+  it('end with a stale token is a no-op (a stopped turn cannot clear its successor)', () => {
+    const stale = generationSession.begin('c1');
+    generationSession.end('stopped'); // Stop: unconditional
+    generationSession.begin('c1'); // queued turn starts on the same conversation
+    const listener = jest.fn();
+    generationSession.subscribe(listener);
+    generationSession.end('done', stale);
+    expect(generationSession.isGeneratingFor('c1')).toBe(true);
+    expect(listener).not.toHaveBeenCalled();
+  });
+
+  it('end without a token clears whatever turn is current', () => {
+    generationSession.begin('c1');
+    generationSession.begin('c2');
+    generationSession.end('conversation-switch');
+    expect(generationSession.getConversationId()).toBeNull();
+  });
 });

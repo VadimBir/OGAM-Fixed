@@ -25,6 +25,7 @@ import {
 } from '../utils/remoteCapabilityDetect';
 import {
   REMOTE_FETCH_REDIRECT_POLICY,
+  remoteApiUrl,
   remoteAuthorizationHeaders,
 } from '../services/remoteTransportPolicy';
 import { readOffGridDesktopModelState } from '../services/offGridDesktopModels';
@@ -110,7 +111,7 @@ async function fetchGatewayModelCatalog(
     DISCOVERY_FETCH_TIMEOUT_MS,
   );
   try {
-    const modelListUrl = `${url}${url.endsWith('/v1') ? '' : '/v1'}/models${isOpenRouter ? '?output_modalities=text,image,transcription,speech' : ''}`;
+    const modelListUrl = remoteApiUrl(url, `/v1/models${isOpenRouter ? '?output_modalities=text,image,transcription,speech' : ''}`);
     const response = await fetch(modelListUrl, {
       headers,
       signal: controller.signal,
@@ -361,7 +362,7 @@ export async function fetchModelsFromServer(
 
   // Try OpenAI-compatible endpoint first
   try {
-    const response = await fetchForDiscovery(`${url}${url.endsWith('/v1') ? '' : '/v1'}/models`, {
+    const response = await fetchForDiscovery(remoteApiUrl(url, '/v1/models'), {
       method: 'GET',
       headers,
     });
@@ -395,7 +396,7 @@ export async function fetchModelsFromServer(
                   supportsThinking: !!model.reasoning,
                   thinkingLevelsOnly: model.reasoning?.mandatory === true,
                 }
-              : fetchModelCapabilities(url, model.id, nameDetect),
+              : fetchModelCapabilities(url, model.id, nameDetect, headers),
           ),
         );
         return generativeModels.map(
@@ -443,7 +444,7 @@ export async function fetchModelsFromServer(
         );
         const modelInfos = await Promise.all(
           generativeModels.map((model: { name: string }) =>
-            fetchModelCapabilities(url, model.name, nameDetect),
+            fetchModelCapabilities(url, model.name, nameDetect, headers),
           ),
         );
         return generativeModels.map(
@@ -495,7 +496,7 @@ export async function fetchModelsFromServer(
         );
         const modelInfos = await Promise.all(
           generativeModels.map((model: { name: string }) =>
-            fetchModelCapabilities(url, model.name, nameDetect),
+            fetchModelCapabilities(url, model.name, nameDetect, headers),
           ),
         );
         return generativeModels.map(

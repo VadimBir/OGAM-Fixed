@@ -62,6 +62,22 @@ export function canReconcileCredentialedEndpoint(
   return !hasStoredCredential || url.protocol === 'https:';
 }
 
+/**
+ * The server root a saved endpoint names. A user may save `http://pc:8080` or `http://pc:8080/v1`;
+ * both mean the same server, so trailing slashes and one trailing `/v1` are dropped here and every
+ * request path carries its own `/v1` (or none, for `/props`, `/api/chat`, `/api/show`).
+ */
+export function remoteApiBase(endpoint: string): string {
+  let base = endpoint.trim();
+  while (base.endsWith('/')) base = base.slice(0, -1);
+  return base.toLowerCase().endsWith('/v1') ? base.slice(0, -3) : base;
+}
+
+/** One URL builder for every remote request: never `/v1/v1`, never a missing `/v1`. */
+export function remoteApiUrl(endpoint: string, path: string): string {
+  return `${remoteApiBase(endpoint)}${path.startsWith('/') ? path : `/${path}`}`;
+}
+
 /** React Native fetch must reject redirects instead of following a TLS downgrade. */
 export const REMOTE_FETCH_REDIRECT_POLICY = 'error' as const;
 

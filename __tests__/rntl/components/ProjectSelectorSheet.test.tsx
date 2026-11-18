@@ -161,4 +161,27 @@ describe('ProjectSelectorSheet', () => {
     expect(getByText('A')).toBeTruthy();
     expect(getByText('B')).toBeTruthy();
   });
+
+  it('titles the sheet "Select Character"', () => {
+    const { getByText, queryByText } = render(
+      <ProjectSelectorSheet {...defaultProps} />,
+    );
+    expect(getByText('Select Character')).toBeTruthy();
+    expect(queryByText('Select Project')).toBeNull();
+  });
+
+  it("renders a character's avatar instead of its initial when it has one", () => {
+    const withAvatar: Project[] = [
+      { ...mockProjects[0], avatarUri: 'file:///avatars/alpha.png' },
+      mockProjects[1],
+    ];
+    const { getByTestId, queryByText, getByText } = render(
+      <ProjectSelectorSheet {...defaultProps} projects={withAvatar} />,
+    );
+    expect(getByTestId('project-avatar-1').props.source).toEqual({
+      uri: 'file:///avatars/alpha.png',
+    });
+    expect(queryByText('A')).toBeNull(); // avatar replaces the initial
+    expect(getByText('B')).toBeTruthy(); // no avatar -> initial fallback
+  });
 });

@@ -4,6 +4,7 @@ import {
   Text,
   ScrollView,
   TouchableOpacity,
+  Image,
 } from 'react-native';
 import { AppSheet } from './AppSheet';
 import { useThemedStyles } from '../theme';
@@ -38,7 +39,7 @@ export const ProjectSelectorSheet: React.FC<ProjectSelectorSheetProps> = ({
       visible={visible}
       onClose={onClose}
       snapPoints={['45%']}
-      title="Select Project"
+      title="Select Character"
     >
       <ScrollView
         style={styles.projectList}
@@ -76,9 +77,17 @@ export const ProjectSelectorSheet: React.FC<ProjectSelectorSheetProps> = ({
             onPress={() => handleSelect(project)}
           >
             <View style={styles.projectOptionIcon}>
-              <Text style={styles.projectOptionIconText}>
-                {project.name.charAt(0).toUpperCase()}
-              </Text>
+              {project.avatarUri ? (
+                <Image
+                  source={{ uri: project.avatarUri }}
+                  style={styles.projectOptionAvatar}
+                  testID={`project-avatar-${project.id}`}
+                />
+              ) : (
+                <Text style={styles.projectOptionIconText}>
+                  {project.name.charAt(0).toUpperCase()}
+                </Text>
+              )}
             </View>
             <View style={styles.projectOptionInfo}>
               <Text style={styles.projectOptionName}>{project.name}</Text>
@@ -130,6 +139,11 @@ const createStyles = (colors: ThemeColors, _shadows: ThemeShadows) => ({
     alignItems: 'center' as const,
     justifyContent: 'center' as const,
     marginRight: 12,
+    overflow: 'hidden' as const,
+  },
+  projectOptionAvatar: {
+    width: 36,
+    height: 36,
   },
   projectOptionIconText: {
     ...TYPOGRAPHY.h2,

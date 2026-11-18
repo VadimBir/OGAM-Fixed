@@ -17,7 +17,10 @@
 export function isMMProjFile(fileName: string): boolean {
   const lower = fileName.toLowerCase();
   if (!lower.endsWith('.gguf')) return false;
-  return lower.includes('mmproj') || lower.includes('projector') || lower.includes('clip');
+  // `clip` only as a whole token (`clip-vit-…`, `…-clip.gguf`): a substring test also matched model
+  // names that merely contain the letters ("eclipse", "Clipper"), hiding those models' weights as
+  // "projectors" from the file list, the recovery scan and restore.
+  return lower.includes('mmproj') || lower.includes('projector') || /(^|[-_.])clip([-_.]|$)/.test(lower);
 }
 
 /**

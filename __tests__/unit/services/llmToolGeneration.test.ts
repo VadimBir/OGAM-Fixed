@@ -156,6 +156,20 @@ describe('generateWithToolsImpl', () => {
       expect(callArgs.reasoning_format).toBe('none');
     });
 
+    it('disableThinking forces thinking off even when the global toggle is on', async () => {
+      const completion = jest.fn(async (_params: any, _cb: any) => ({}));
+      const deps = createMockDeps({ context: { completion }, isThinkingEnabled: true });
+
+      await generateWithToolsImpl(deps, [createUserMessage('Hello')], {
+        tools: SAMPLE_TOOLS,
+        disableThinking: true,
+      });
+
+      const callArgs = completion.mock.calls[0][0];
+      expect(callArgs.enable_thinking).toBe(false);
+      expect(callArgs.reasoning_format).toBe('none');
+    });
+
     it('disables ctx_shift when disableCtxShift is true (Android GPU SIGSEGV fix)', async () => {
       const completion = jest.fn(async (_params: any, _cb: any) => ({}));
       const deps = createMockDeps({ context: { completion }, disableCtxShift: true });

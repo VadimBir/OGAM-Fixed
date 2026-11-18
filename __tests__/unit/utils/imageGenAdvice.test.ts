@@ -6,6 +6,7 @@
  *  - <256 is GARBAGE (SD1.5 below training res), not just smaller.
  */
 import {
+  DEFAULT_IMAGE_STEPS,
   defaultImageSteps,
   getImageGenAdvice,
   MAX_IMAGE_STEPS,
@@ -14,9 +15,11 @@ import {
 } from '../../../src/utils/imageGenAdvice';
 
 describe('defaultImageSteps', () => {
-  it('uses the slider maximum on Android and iOS', () => {
-    expect(defaultImageSteps('android')).toBe(MAX_IMAGE_STEPS);
-    expect(defaultImageSteps('ios')).toBe(MAX_IMAGE_STEPS);
+  it('uses the one quality-floor default on Android and iOS, never the slider maximum', () => {
+    expect(defaultImageSteps('android')).toBe(DEFAULT_IMAGE_STEPS);
+    expect(defaultImageSteps('ios')).toBe(DEFAULT_IMAGE_STEPS);
+    expect(DEFAULT_IMAGE_STEPS).toBe(QUALITY_STEP_FLOOR);
+    expect(DEFAULT_IMAGE_STEPS).toBeLessThan(MAX_IMAGE_STEPS);
   });
 });
 

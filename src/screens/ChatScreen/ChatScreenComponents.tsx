@@ -168,12 +168,20 @@ export const EmptyChat: React.FC<{
     <AnimatedEntry index={3} staggerMs={60}>
       <TouchableOpacity style={styles.projectHint} onPress={() => setShowProjectSelector(true)}>
         <View style={styles.projectHintIcon}>
-          <Text style={styles.projectHintIconText}>
-            {activeProject?.name?.charAt(0).toUpperCase() || 'D'}
-          </Text>
+          {activeProject?.avatarUri ? (
+            <Image
+              source={{ uri: activeProject.avatarUri }}
+              style={{ width: 24, height: 24, borderRadius: 6 }}
+              testID="project-hint-avatar"
+            />
+          ) : (
+            <Text style={styles.projectHintIconText}>
+              {activeProject?.name?.charAt(0).toUpperCase() || 'D'}
+            </Text>
+          )}
         </View>
         <Text style={styles.projectHintText}>
-          Project: {activeProject?.name || 'Default'} — tap to change
+          Character: {activeProject?.name || 'Default'} — tap to change
         </Text>
       </TouchableOpacity>
     </AnimatedEntry>

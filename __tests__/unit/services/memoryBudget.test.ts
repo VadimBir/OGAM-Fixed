@@ -9,6 +9,10 @@ import {
   modelWarningThresholdMB,
   memoryReserveMB,
   effectiveAvailableMB,
+  liveRamMarginMB,
+  preloadSafetyMarginMB,
+  LIVE_RAM_MARGIN_MB,
+  AGGRESSIVE_LIVE_RAM_MARGIN_MB,
   MEMORY_RESERVE_MB,
   AGGRESSIVE_RESERVE_MB,
   awaitMemoryReclaim,
@@ -16,31 +20,43 @@ import {
 
 const GB = 1024;
 
-describe('effectiveAvailableMB — reclaimable-aware availability (single owner)', () => {
-  const TOTAL_12GB = 11297; // real device figure from a 12GB phone
+describe('effectiveAvailableMB — live availability (single owner)', () => {
+  const TOTAL_12GB = 12 * GB;
 
-  it('Android: credits the physical budget when the raw availMem snapshot reads low', () => {
-    // The exact device case: a 12GB Android phone reports ~4.6GB raw available (background
-    // apps hold cached pages the LMK will reclaim for a foreground load). The effective
-    // ceiling must be the physical budget (~7908MB = 0.70*11297), not the raw 4590.
-    const eff = effectiveAvailableMB(4590, TOTAL_12GB, { platform: 'android' });
-    expect(eff).toBe(modelMemoryBudgetMB(TOTAL_12GB, 'android'));
-    expect(eff).toBeGreaterThan(4590);
+  it('Android 12GB with 3GB free: the gate sees the LIVE 3072MB, not a 70%-of-RAM credit', () => {
+    // The owner's device: 12GB, ~75% used by other apps. The old reclaim credit returned
+    // max(3072, 0.70*12288=8602) = 8602MB and admitted loads the phone could not hold.
+    expect(effectiveAvailableMB(3 * GB, TOTAL_12GB, { platform: 'android' })).toBe(3 * GB);
+    expect(effectiveAvailableMB(3 * GB, TOTAL_12GB, { platform: 'android', policy: 'aggressive' })).toBe(3 * GB);
   });
 
-  it('Android: keeps the raw availMem when it already exceeds the physical budget', () => {
-    // Never LOWER the ceiling — if the snapshot is already generous, use it.
-    expect(effectiveAvailableMB(9000, TOTAL_12GB, { platform: 'android' })).toBe(9000);
+  it('Android: caps a generous live reading at the physical budget', () => {
+    expect(effectiveAvailableMB(11000, TOTAL_12GB, { platform: 'android' }))
+      .toBe(modelMemoryBudgetMB(TOTAL_12GB, 'android'));
   });
 
-  it('iOS: returns the raw availMem unchanged (no background-reclaim — jetsam kills US)', () => {
-    expect(effectiveAvailableMB(4590, TOTAL_12GB, { platform: 'ios' })).toBe(4590);
+  it('Android: never negative', () => {
+    expect(effectiveAvailableMB(-5, TOTAL_12GB, { platform: 'android' })).toBe(0);
   });
 
-  it('passes the load policy through (aggressive credits a larger ceiling than balanced)', () => {
-    const balanced = effectiveAvailableMB(1000, TOTAL_12GB, { platform: 'android', policy: 'balanced' });
-    const aggressive = effectiveAvailableMB(1000, TOTAL_12GB, { platform: 'android', policy: 'aggressive' });
-    expect(aggressive).toBeGreaterThan(balanced);
+  it('iOS: returns the raw availMem unchanged', () => {
+    expect(effectiveAvailableMB(4590, 11297, { platform: 'ios' })).toBe(4590);
+  });
+});
+
+describe('live safety margin', () => {
+  it('Android: the pre-load gate keeps 1024MB (balanced) / 512MB (aggressive) of live RAM free', () => {
+    expect(LIVE_RAM_MARGIN_MB).toBe(1024);
+    expect(AGGRESSIVE_LIVE_RAM_MARGIN_MB).toBe(512);
+    expect(liveRamMarginMB()).toBe(1024);
+    expect(liveRamMarginMB('aggressive')).toBe(512);
+    expect(preloadSafetyMarginMB({ platform: 'android' })).toBe(1024);
+    expect(preloadSafetyMarginMB({ platform: 'android', policy: 'aggressive' })).toBe(512);
+  });
+
+  it('iOS: no extra pre-load margin (gate unchanged)', () => {
+    expect(preloadSafetyMarginMB({ platform: 'ios' })).toBe(0);
+    expect(preloadSafetyMarginMB({ platform: 'ios', policy: 'aggressive' })).toBe(0);
   });
 });
 

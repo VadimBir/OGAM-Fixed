@@ -326,21 +326,26 @@ describe('shouldDisableMmap', () => {
     afterAll(() => { (Platform as any).OS = origPlatform; });
 
     it('keeps mmap ON (returns false) for a non-repackable quant', () => {
-      expect(shouldDisableMmap('/model.Q8_0.gguf', { modelFileSizeBytes: 1e8, deviceTotalMemoryGB: 8 })).toBe(false);
+      expect(shouldDisableMmap('/model.Q8_0.gguf', { modelFileSizeBytes: 1e8, liveAvailableMB: 8192 })).toBe(false);
     });
 
-    it('keeps mmap ON when size/RAM are unknown, even for q4_0 (OOM-safe default)', () => {
+    it('keeps mmap ON when size or live RAM is unknown, even for q4_0 (OOM-safe default)', () => {
       expect(shouldDisableMmap('/model.q4_0.gguf')).toBe(false);
+      expect(shouldDisableMmap('/model.q4_0.gguf', { modelFileSizeBytes: 1e8 })).toBe(false);
+      expect(shouldDisableMmap('/model.q4_0.gguf', { modelFileSizeBytes: 1e8, liveAvailableMB: 0 })).toBe(false);
     });
 
-    it('disables mmap for a SMALL q4_0 model that fits well within RAM', () => {
-      // 1 GB model on an 8 GB device → 12.5% of RAM, under the 25% threshold.
-      expect(shouldDisableMmap('/model.q4_0.gguf', { modelFileSizeBytes: 1 * 1024 ** 3, deviceTotalMemoryGB: 8 })).toBe(true);
+    it('12GB phone with 3GB free: a 2GB q4_0 keeps mmap ON (old rule: 2GB <= 25% of 12GB → mmap OFF)', () => {
+      // usable = 3072 - 1024 margin = 2048MB; mmap-off ceiling = 50% = 1024MB < 2048MB model.
+      expect(shouldDisableMmap('/model.q4_0.gguf', { modelFileSizeBytes: 2 * 1024 ** 3, liveAvailableMB: 3072 })).toBe(false);
     });
 
-    it('keeps mmap ON for a LARGE q4_0 model that would OOM if fully loaded', () => {
-      // 4 GB model on an 8 GB device → 50% of RAM, over the threshold → page in from disk.
-      expect(shouldDisableMmap('/model.q4_0.gguf', { modelFileSizeBytes: 4 * 1024 ** 3, deviceTotalMemoryGB: 8 })).toBe(false);
+    it('12GB phone with 3GB free: a 1GB q4_0 may take the repack speed path (1024MB <= 1024MB)', () => {
+      expect(shouldDisableMmap('/model.q4_0.gguf', { modelFileSizeBytes: 1 * 1024 ** 3, liveAvailableMB: 3072 })).toBe(true);
+    });
+
+    it('keeps mmap ON when live RAM is below the margin', () => {
+      expect(shouldDisableMmap('/model.q4_0.gguf', { modelFileSizeBytes: 1e8, liveAvailableMB: 900 })).toBe(false);
     });
   });
 });

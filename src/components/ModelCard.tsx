@@ -2,7 +2,8 @@ import React from 'react';
 import { View, Text, TouchableOpacity } from 'react-native';
 import Icon from 'react-native-vector-icons/Feather';
 import { useThemedStyles, useTheme } from '../theme';
-import { QUANTIZATION_INFO, CREDIBILITY_LABELS } from '../constants';
+import { CREDIBILITY_LABELS } from '../constants';
+import { lookupQuantizationInfo } from '../utils/quantization';
 import { ModelFile, DownloadedModel, ModelCredibility } from '../types';
 import { needsVisionRepair } from '../utils/visionRepair';
 import { getMmProjFileSize } from '../utils/modelHelpers';
@@ -83,7 +84,7 @@ interface ModelCardProps {
 
 function resolveQuantInfo(file?: ModelFile, downloadedModel?: DownloadedModel) {
   const quant = file?.quantization ?? downloadedModel?.quantization;
-  return quant ? (QUANTIZATION_INFO[quant] ?? null) : null;
+  return lookupQuantizationInfo(quant) ?? null;
 }
 
 function resolveFileSize(file?: ModelFile, downloadedModel?: DownloadedModel) {

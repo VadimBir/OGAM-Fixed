@@ -23,13 +23,35 @@ import type {
   OpenAIConfig,
   OpenAIStreamState,
 } from './openAICompatibleTypes';
-import { remoteAuthorizationHeaders } from '../remoteTransportPolicy';
+import { remoteApiUrl, remoteAuthorizationHeaders } from '../remoteTransportPolicy';
 
 export type { OpenAIChatMessage, OpenAIConfig } from './openAICompatibleTypes';
 
-/** Returns true if the endpoint looks like an Ollama server (port 11434) */
-function isOllamaEndpoint(endpoint: string): boolean {
-  return endpoint.includes(':11434');
+/** True when the endpoint's port is exactly Ollama's 11434 (not 114340, not a path or query hit). */
+export function isOllamaEndpoint(endpoint: string): boolean {
+  try {
+    return new URL(endpoint).port === '11434';
+  } catch {
+    return /^[a-z][a-z0-9+.-]*:\/\/[^/?#]*:11434(?:[/?#]|$)/i.test(endpoint.trim());
+  }
+}
+
+/**
+ * Sampling fields the app decides and the server must obey (llama-server / OpenAI-compatible names).
+ * An unset option is not sent, so the server default applies only where the app has no value.
+ */
+export function openAISamplingParams(options: GenerationOptions): Record<string, unknown> {
+  const stop = options.stopSequences?.filter(sequence => sequence.length > 0) ?? [];
+  return {
+    ...(options.temperature !== undefined && { temperature: options.temperature }),
+    ...(options.topP !== undefined && { top_p: options.topP }),
+    ...(options.topK !== undefined && { top_k: options.topK }),
+    ...(options.repeatPenalty !== undefined && { repeat_penalty: options.repeatPenalty }),
+    ...(options.seed !== undefined && { seed: options.seed }),
+    ...(stop.length > 0 && { stop }),
+    // The app's max-tokens setting is the output cap. Sent only when it is a positive number.
+    ...(typeof options.maxTokens === 'number' && options.maxTokens > 0 && { max_tokens: options.maxTokens }),
+  };
 }
 
 /**
@@ -97,11 +119,10 @@ export class OpenAICompatibleProvider implements LLMProvider {
       model: this.config.modelId,
       messages: openaiMessages,
       stream: true,
-      ...(options.temperature !== undefined && { temperature: options.temperature }),
-      // max_tokens intentionally omitted — the remote server owns output limits.
-      // A client-side cap (default 1024) silently truncates reasoning models that
-      // need a larger budget for <think> blocks (Qwen3, DeepSeek-R1, etc).
-      ...(options.topP !== undefined && { top_p: options.topP }),
+      // The app owns every sampling parameter, max_tokens included (settings.maxTokens).
+      ...openAISamplingParams(options),
+      // llama-server: reuse the KV cache of the shared prompt prefix across turns.
+      ...(!isOpenRouter && { cache_prompt: true }),
       ...(this.modelCapabilities.supportsToolCalling && options.tools && options.tools.length > 0 && {
         tools: options.tools,
         tool_choice: 'auto',
@@ -111,7 +132,8 @@ export class OpenAICompatibleProvider implements LLMProvider {
       // discovered capability — not the endpoint's port — keeps the "which server
       // accepts this?" decision in one place and free of implementation coupling.
       ...(this.modelCapabilities.acceptsThinkingKwarg && { chat_template_kwargs: { enable_thinking: thinkingEnabled } }),
-      ...(this.config.modelId.startsWith('remote-vision:') && this.modelCapabilities.acceptsThinkingKwarg
+      // Budget goes to every server that advertised the kwarg at discovery, not only 'remote-vision:' ids.
+      ...(this.modelCapabilities.acceptsThinkingKwarg
         ? reasoningBudgetPayload(thinkingEnabled, options.reasoningBudget ?? REASONING_BUDGET_AUTO)
         : {}),
       ...(isOpenRouter && this.modelCapabilities.supportsThinking
@@ -132,10 +154,11 @@ export class OpenAICompatibleProvider implements LLMProvider {
       return;
     }
 
-    this.abortController = new AbortController();
+    const controller = new AbortController();
+    this.abortController = controller;
     // Capture signal in closure so abort checks remain valid even after
     // this.abortController is nulled by stopGeneration().
-    const { signal } = this.abortController;
+    const { signal } = controller;
     let streamError: Error | null = null;
 
     try {
@@ -153,7 +176,9 @@ export class OpenAICompatibleProvider implements LLMProvider {
           endpoint: this.config.endpoint,
           modelId: this.config.modelId,
           thinkingLevelsOnly: this.modelCapabilities.thinkingLevelsOnly,
-          abort: () => this.abortController?.abort(),
+          // Abort THIS turn's controller, never a newer turn's.
+          abort: () => controller.abort(),
+          headers: remoteAuthorizationHeaders(this.config.endpoint, this.config.apiKey),
         });
       }
 
@@ -165,9 +190,8 @@ export class OpenAICompatibleProvider implements LLMProvider {
       };
       Object.assign(headers, remoteAuthorizationHeaders(this.config.endpoint, this.config.apiKey));
 
-      let baseUrl = this.config.endpoint;
-      while (baseUrl.endsWith('/')) baseUrl = baseUrl.slice(0, -1);
-      const url = `${baseUrl}/v1/chat/completions`;
+      // One normalizer: an endpoint saved as `.../v1` must not become `/v1/v1/chat/completions`.
+      const url = remoteApiUrl(this.config.endpoint, '/v1/chat/completions');
 
       const state: OpenAIStreamState = {
         fullContent: '', fullReasoningContent: '',
@@ -186,7 +210,7 @@ export class OpenAICompatibleProvider implements LLMProvider {
           logger.error(`[Provider][DEBUG] Stream error: ${JSON.stringify(message.error)}`);
           state.streamErrorOccurred = true;
           streamError = new Error(message.error.message || 'API error');
-          this.abortController?.abort();
+          controller.abort();
           return;
         }
         if (message.object === 'done') return;
@@ -222,6 +246,15 @@ export class OpenAICompatibleProvider implements LLMProvider {
 
       if (streamError) throw streamError;
 
+      // A user stop resolves the request. End the turn with the same empty completion the
+      // rejected-abort path gives, never the fallback below: that would finalize a partial turn and
+      // hand half-streamed tool calls to the tool loop. A callback must still fire, because
+      // generationToolLoop's remoteGenerateOnce waits on onComplete/onError, not on this promise.
+      if (signal.aborted) {
+        if (!state.completeCalled) callbacks.onComplete({ content: '', meta: { gpu: false } });
+        return;
+      }
+
       // Fallback: if stream ended without a recognised finish_reason (e.g. 'length',
       // 'content_filter', null), ensure the generation is finalised.
       if (!state.completeCalled && !state.streamErrorOccurred) {
@@ -248,7 +281,8 @@ export class OpenAICompatibleProvider implements LLMProvider {
       }
       callbacks.onError(error instanceof Error ? error : new Error(String(error)));
     } finally {
-      this.abortController = null;
+      // A newer generate() may already own this.abortController; only clear our own.
+      if (this.abortController === controller) this.abortController = null;
     }
   }
 

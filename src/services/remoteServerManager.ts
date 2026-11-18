@@ -33,7 +33,7 @@ import {
   setActiveRemoteImageModelImpl,
   initializeProvidersImpl,
 } from './remoteServerManagerUtils';
-import { remoteAuthorizationHeaders } from './remoteTransportPolicy';
+import { remoteAuthorizationHeaders, validateRemoteEndpoint } from './remoteTransportPolicy';
 import { activateOffGridDesktopModel } from './offGridDesktopModels';
 
 /** Normalize an endpoint for identity comparison (lowercase, no trailing slashes). */
@@ -53,14 +53,24 @@ class RemoteServerManager {
   ): Promise<RemoteServer> {
     const store = useRemoteServerStore.getState();
 
-    // Deduplicate: if a server with the same endpoint already exists, return it
+    // Validate the transport before anything is written: a public cleartext endpoint must not leave a
+    // saved record behind when provider creation later throws on it.
+    validateRemoteEndpoint(config.endpoint);
+
+    // Deduplicate: one record per endpoint. A second add for the same endpoint carries the user's
+    // newer choices (key, models, notes), so apply them to the saved record instead of dropping them.
     const normalizedEndpoint = trimSlash(config.endpoint);
     const existing = store.servers.find(
       s => trimSlash(s.endpoint) === normalizedEndpoint,
     );
     if (existing) {
-      logger.log('[RemoteServerManager] Server already exists:', existing.name);
-      return existing;
+      const { endpoint: _endpoint, providerType: _providerType, ...incoming } = config;
+      const updates = Object.fromEntries(
+        Object.entries(incoming).filter(([, value]) => value !== undefined),
+      ) as Partial<Omit<RemoteServer, 'id' | 'createdAt'>>;
+      logger.log('[RemoteServerManager] Server already exists, applying new fields:', existing.name);
+      if (Object.keys(updates).length > 0) await this.updateServer(existing.id, updates);
+      return store.getServerById(existing.id) ?? existing;
     }
 
     // Credentials belong only in Keychain. Never put them in the persisted Zustand server record.
@@ -90,6 +100,10 @@ class RemoteServerManager {
 
     if (!existingServer) throw new Error(`Server not found: ${id}`);
 
+    // Validate before any Keychain or store write: a rejected endpoint must leave the record as it was.
+    const endpoint = updates.endpoint || existingServer.endpoint;
+    validateRemoteEndpoint(endpoint);
+
     if (updates.apiKey !== undefined) {
       if (updates.apiKey) {
         await this.storeApiKey(id, updates.apiKey);
@@ -104,7 +118,6 @@ class RemoteServerManager {
     const provider = providerRegistry.getProvider(id);
     if (provider && 'updateConfig' in provider) {
       const apiKey = await this.getApiKey(id);
-      const endpoint = updates.endpoint || existingServer.endpoint;
       const authorization = remoteAuthorizationHeaders(endpoint, apiKey);
       (provider as OpenAICompatibleProvider).updateConfig({
         endpoint,

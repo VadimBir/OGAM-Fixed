@@ -240,6 +240,24 @@ const createBubbleStyles = (colors: ThemeColors, shadows: ThemeShadows) => ({
     height: 28,
     borderRadius: 14,
   },
+  // User message laid out as [bubble][avatar], the mirror of assistantRow.
+  userRow: {
+    flexDirection: 'row' as const,
+    alignItems: 'flex-start' as const,
+  },
+  userAvatar: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    marginRight: 8,
+    marginTop: 10,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: 'center' as const,
+    justifyContent: 'center' as const,
+    overflow: 'hidden' as const,
+  },
 });
 
 const createThinkingStyles = (colors: ThemeColors, shadows: ThemeShadows) => ({

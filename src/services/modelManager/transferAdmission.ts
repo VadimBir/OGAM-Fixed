@@ -1,3 +1,4 @@
+import { parseQuantization } from '../../utils/quantization';
 import { statFile } from '../../utils/fileStat';
 import {
   ogamModelTransferBlocker,
@@ -39,9 +40,7 @@ export async function registerTransferredModelFile(
   const projectorPath = projector
     ? `${modelsDir}/${projector.name}`
     : undefined;
-  const quantization =
-    primary.name.match(/[_-](Q\d+[_\w]*|f16|f32)/i)?.[1]?.toUpperCase() ??
-    'Unknown';
+  const quantization = parseQuantization(primary.name);
   const pseudoFile: ModelFile = {
     name: primary.name,
     size: primary.sizeBytes,

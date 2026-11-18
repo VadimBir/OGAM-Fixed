@@ -118,7 +118,7 @@ function isMmProjStillRunning(
 async function processCompletedDownload(
   downloadId: string, metadata: PersistedDownloadInfo, modelsDir: string,
 ): Promise<DownloadedModel> {
-  const localPath = `${modelsDir}/${metadata.fileName}`;
+  const localPath = `${modelsDir}/${metadata.localFileName ?? metadata.fileName}`;
   await backgroundDownloadService.moveCompletedDownload(downloadId, localPath);
   const finalMmProjPath = await resolveMmProjPath(metadata);
 

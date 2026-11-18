@@ -46,6 +46,18 @@ import { resolveStoredPath, determineCredibility } from './storage';
 import * as visionRepair from './visionRepairService';
 import type { RepairOpts, VisionRepairContext } from './visionRepairService';
 import { resolveOwnedDocumentPath } from '../../utils/resolveDocumentPath';
+import { withModelRegistryLock } from './registryLock';
+import { basenameOf } from './reconcileStoredPaths';
+
+/** Unlink `path`; a path that is already gone counts as removed. */
+async function unlinkIfPresent(path: string): Promise<void> {
+  try {
+    await RNFS.unlink(path);
+  } catch (error) {
+    if (await RNFS.exists(path)) throw error;
+    logger.log(`[ModelManager] ${path} was already gone`);
+  }
+}
 
 class ModelManager {
   private readonly modelsDir: string;
@@ -98,34 +110,41 @@ class ModelManager {
   }
 
   async deleteModel(modelId: string): Promise<void> {
-    const models = await this.getDownloadedModels();
-    const model = models.find(m => m.id === modelId);
+    // Under the registry lock: a delete racing a download finalize must not resurrect or drop a row.
+    await withModelRegistryLock(async () => {
+      const models = await loadDownloadedModels(this.modelsDir);
+      const model = models.find(m => m.id === modelId);
 
-    if (!model) throw new Error('Model not found');
-    const modelPath = resolveOwnedDocumentPath(model.filePath, this.modelsDir);
-    if (!modelPath) {
-      throw new Error('Invalid model path: outside app directory');
-    }
-    const llamaModel = model.engine === 'llama' ? model : null;
-    const mmProjPath = llamaModel?.mmProjPath
-      ? resolveOwnedDocumentPath(llamaModel.mmProjPath, this.modelsDir)
-      : null;
-    if (llamaModel?.mmProjPath && !mmProjPath) {
-      throw new Error('Invalid mmproj path: outside app directory');
-    }
-    await RNFS.unlink(modelPath);
-
-    // Only delete mmproj if no other models reference it
-    if (llamaModel?.mmProjPath && mmProjPath) {
-      const otherModelsUsingMmproj = models.some(
-        m => m.engine === 'llama' && m.id !== modelId && m.mmProjPath === llamaModel.mmProjPath,
-      );
-      if (!otherModelsUsingMmproj) {
-        await RNFS.unlink(mmProjPath).catch(() => {});
+      if (!model) throw new Error('Model not found');
+      const modelPath = resolveOwnedDocumentPath(model.filePath, this.modelsDir);
+      if (!modelPath) {
+        throw new Error('Invalid model path: outside app directory');
       }
-    }
+      const llamaModel = model.engine === 'llama' ? model : null;
+      const mmProjPath = llamaModel?.mmProjPath
+        ? resolveOwnedDocumentPath(llamaModel.mmProjPath, this.modelsDir)
+        : null;
+      if (llamaModel?.mmProjPath && !mmProjPath) {
+        throw new Error('Invalid mmproj path: outside app directory');
+      }
+      // A file that is already gone is the outcome a delete wants - only a file that is STILL there
+      // after a failed unlink is an error (RNFS.unlink rejects on a missing path).
+      await unlinkIfPresent(modelPath);
 
-    await saveModelsList(models.filter(m => m.id !== modelId));
+      // Only delete mmproj if no other models reference it
+      if (llamaModel?.mmProjPath && mmProjPath) {
+        const otherModelsUsingMmproj = models.some(
+          m => m.engine === 'llama' && m.id !== modelId && m.mmProjPath === llamaModel.mmProjPath,
+        );
+        if (!otherModelsUsingMmproj) {
+          await unlinkIfPresent(mmProjPath).catch((error: unknown) => {
+            logger.warn(`[ModelManager] could not remove projector ${mmProjPath}: ${error instanceof Error ? error.message : String(error)}`);
+          });
+        }
+      }
+
+      await saveModelsList(models.filter(m => m.id !== modelId));
+    });
   }
 
   async getModelPath(modelId: string): Promise<string | null> {
@@ -216,7 +235,22 @@ class ModelManager {
   }
 
   private async cleanupCancelledTextArtifacts(ctx: Extract<BackgroundDownloadContext, { file: ModelFile }>): Promise<void> {
-    const cleanupTargets = [ctx.localPath, ctx.mmProjLocalPath].filter((path): path is string => !!path);
+    // Remove only what THIS download put on disk. Never: a main file that was already there when it
+    // started (an installed model a cancel used to delete), a projector it did not fetch (shared by
+    // every quant of the model), or any file a registered model points at.
+    const registry = await this.getDownloadedModels();
+    const referenced = new Set<string>();
+    for (const m of registry) {
+      if (m.filePath) referenced.add(basenameOf(m.filePath));
+      if (m.engine === 'llama' && m.mmProjPath) referenced.add(basenameOf(m.mmProjPath));
+    }
+    const candidates = [
+      ctx.mainPreExisted ? null : ctx.localPath,
+      ctx.mmProjDownloadId ? ctx.mmProjLocalPath : null,
+    ];
+    const cleanupTargets = candidates.filter(
+      (path): path is string => !!path && !referenced.has(basenameOf(path)),
+    );
 
     await Promise.all(cleanupTargets.map(async targetPath => {
       try {
@@ -345,23 +379,27 @@ class ModelManager {
   }
 
   async addDownloadedImageModel(model: ONNXImageModel): Promise<void> {
-    const models = await this.getDownloadedImageModels();
-    const idx = models.findIndex(m => m.id === model.id);
-    if (idx >= 0) models[idx] = model;
-    else models.push(model);
-    await saveImageModelsList(models);
+    await withModelRegistryLock(async () => {
+      const models = await this.getDownloadedImageModels();
+      const idx = models.findIndex(m => m.id === model.id);
+      if (idx >= 0) models[idx] = model;
+      else models.push(model);
+      await saveImageModelsList(models);
+    });
   }
 
   async deleteImageModel(modelId: string): Promise<void> {
-    const models = await this.getDownloadedImageModels();
-    const model = models.find(m => m.id === modelId);
-    if (!model) throw new Error('Image model not found');
-    const topLevelDir = `${this.imageModelsDir}/${modelId}`;
-    if (!topLevelDir.startsWith(`${this.imageModelsDir}/`)) {
-      throw new Error('Invalid image model path: outside app directory');
-    }
-    if (await RNFS.exists(topLevelDir)) await RNFS.unlink(topLevelDir);
-    await saveImageModelsList(models.filter(m => m.id !== modelId));
+    await withModelRegistryLock(async () => {
+      const models = await this.getDownloadedImageModels();
+      const model = models.find(m => m.id === modelId);
+      if (!model) throw new Error('Image model not found');
+      const topLevelDir = `${this.imageModelsDir}/${modelId}`;
+      if (!topLevelDir.startsWith(`${this.imageModelsDir}/`)) {
+        throw new Error('Invalid image model path: outside app directory');
+      }
+      if (await RNFS.exists(topLevelDir)) await RNFS.unlink(topLevelDir);
+      await saveImageModelsList(models.filter(m => m.id !== modelId));
+    });
   }
 
   async getImageModelPath(modelId: string): Promise<string | null> {

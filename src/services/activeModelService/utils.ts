@@ -2,7 +2,7 @@
  * Standalone utility helpers for ActiveModelService.
  */
 
-import { useAppStore } from '../../stores';
+import { useAppStore, useChatStore } from '../../stores';
 import { hardwareService } from '../hardware';
 import { llmService } from '../llm';
 import { liteRTService } from '../litert';
@@ -61,4 +61,28 @@ export async function syncWithNativeState(target: SyncStateTarget): Promise<void
   } else if (!target.loadedImageModelId && store.activeImageModelId) {
     target.setLoadedImageModelId(store.activeImageModelId);
   }
+}
+
+/**
+ * ": it needs ~X MB but only ~Y MB is free for it right now" - the needed-versus-available
+ * clause of a residency refusal (same "it needs ~" wording as the text pre-load gate).
+ * Empty when the gate did not report numbers, so the message reads as before.
+ */
+export function memoryRefusalDetail(room: { neededMB?: number; availableMB?: number }): string {
+  if (room.neededMB == null || room.availableMB == null) return '';
+  return `: it needs ~${room.neededMB} MB but only ~${room.availableMB} MB is free for it right now`;
+}
+
+/**
+ * Trim-release probe for the text model: true while a generation turn is in flight (the
+ * llama context is generating, or a chat turn is streaming - which also covers LiteRT and the
+ * gaps between tool calls). The residency trim handler never releases the text model then.
+ */
+export function isTextGenerationInFlight(): boolean {
+  return llmService.isCurrentlyGenerating() || useChatStore.getState().streamingForConversationId != null;
+}
+
+/** Trim-release probe for the image model: true while the native engine is generating. */
+export function isImageGenerationInFlight(): Promise<boolean> {
+  return onnxImageGeneratorService.isGenerating();
 }

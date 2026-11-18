@@ -34,7 +34,7 @@ that 874-file diff, only a pointer move (`ff0d8742` → `8883ae51`).
 ## Priority 1 — memory and crash risk (worst on iOS)
 
 Two protections the user cares about most were checked and are **intact**; do not "fix" them:
-- Android memory-reclaim credit — `mobile/src/services/memoryBudget.ts:86-95`, zero commits since the tag.
+- Android model-load gate — the memory-reclaim credit is GONE, replaced by a live-RAM gate: `mobile/src/services/memoryBudget.ts` `effectiveAvailableMB` (live free RAM capped at the physical budget) + `preloadSafetyMarginMB`; the pre-load warning (`activeModelService/memory.ts`) reads the same function.
 - iOS jetsam guard refusing a clean sidecar on a dirty image — `mobile/src/services/modelResidency/index.ts:197-236`.
 
 What WAS removed, in commits `2fa3b967` and `43f520a0` (both 2026-08-15):

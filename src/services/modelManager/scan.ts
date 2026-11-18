@@ -3,11 +3,15 @@ import { statFile } from '../../utils/fileStat';
 import { unzip } from 'react-native-zip-archive';
 import { DownloadedModel, LlamaDownloadedModel, ONNXImageModel } from '../../types';
 import { loadDownloadedModels, saveModelsList } from './storage';
-import { basenameOf } from './reconcileStoredPaths';
 import { resolveCoreMLModelDir } from '../../utils/coreMLModelUtils';
 import { ensureImageExtractionComplete } from '../../utils/imageModelIntegrity';
 // Single source of truth for projector detection + model↔projector matching (see src/services/mmproj.ts).
 import { isMMProjFile, pickMmProjForModel } from '../mmproj';
+import { parseQuantization, stripQuantization } from '../../utils/quantization';
+import logger from '../../utils/logger';
+import { withModelRegistryLock } from './registryLock';
+import { diskFileNameOf } from './localModelFile';
+import { imageModelDirName } from './collapseDuplicateFileRows';
 
 export { isMMProjFile };
 
@@ -63,6 +67,10 @@ function linkMmProjToModel(model: DownloadedModel, mmProjFiles: RNFS.ReadDirResI
 }
 
 export async function cleanupMMProjEntries(modelsDir: string): Promise<number> {
+  return withModelRegistryLock(() => doCleanupMMProjEntries(modelsDir));
+}
+
+async function doCleanupMMProjEntries(modelsDir: string): Promise<number> {
   const models = await loadDownloadedModels(modelsDir);
   const cleanedModels = models.filter(m => !isMMProjFile(m.fileName));
   const removedCount = models.length - cleanedModels.length;
@@ -281,7 +289,7 @@ export async function scanForUntrackedImageModels(opts: ScanImageModelsOpts): Pr
    * directory we already own "untracked" and adopts a second row for it. A directory name is unique
    * within the models dir, so it is the identity that survives a container move.
    */
-  const registeredDirNames = new Set(registeredModels.map(m => basenameOf(m.modelPath)));
+  const registeredDirNames = new Set(registeredModels.map(m => imageModelDirName(m)));
 
   const dirExists = await RNFS.exists(imageModelsDir);
   if (!dirExists) return discoveredModels;
@@ -322,8 +330,11 @@ export async function scanForUntrackedTextModels(
   const discoveredModels: DownloadedModel[] = [];
 
   try {
-    return await doScanForUntrackedTextModels(modelsDir, getModels);
-  } catch {
+    // Load-at-start, save-at-end: under the registry lock so a download finalized meanwhile is not
+    // overwritten by this scan's older copy of the list.
+    return await withModelRegistryLock(() => doScanForUntrackedTextModels(modelsDir, getModels));
+  } catch (error) {
+    logger.warn(`[ModelManagerScan] untracked text scan failed: ${error instanceof Error ? error.message : String(error)}`);
     return discoveredModels;
   }
 }
@@ -347,10 +358,12 @@ async function doScanForUntrackedTextModels(
    * conclusion `useTextModels.ts` had already reached for its own display matching, applied here where
    * the rows are actually created.
    */
+  // The ON-DISK name (base of filePath; = fileName for every row that is not repo-qualified, see
+  // localModelFile.ts). A repo-qualified file is known under its disk name, not its catalog name.
   const registeredByFileName = new Map(
     registeredModels
-      .filter(model => model.fileName)
-      .map(model => [model.fileName, model] as const),
+      .filter(model => diskFileNameOf(model))
+      .map(model => [diskFileNameOf(model), model] as const),
   );
   let repairedPaths = false;
 
@@ -393,8 +406,7 @@ async function doScanForUntrackedTextModels(
     const fileSize = parseSizeInt(item.size);
     if (fileSize < 1_000_000) continue;
 
-    const quantMatch = item.name.match(/[_-](Q\d+[_\w]*|f16|f32)/i);
-    const quantization = quantMatch ? quantMatch[1].toUpperCase() : 'Unknown';
+    const quantization = parseQuantization(item.name);
     const author = 'Unknown';
 
     if (shouldSkipSuspiciousRecoveredTextModel(author, quantization) && fileSize < MIN_RECOVERED_TEXT_MODEL_BYTES) {
@@ -407,7 +419,7 @@ async function doScanForUntrackedTextModels(
       // registry had no way back to one row per file. A name is unique in this directory, so this id is
       // stable across every scan, reinstall and container move.
       id: `recovered_${item.name}`,
-      name: item.name.replace(/\.gguf$/i, '').replace(/[_-]Q\d+.*/i, ''),
+      name: stripQuantization(item.name),
       author,
       filePath: item.path,
       fileName: item.name,

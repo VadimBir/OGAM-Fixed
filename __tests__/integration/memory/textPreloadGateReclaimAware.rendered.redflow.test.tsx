@@ -1,33 +1,18 @@
 /**
- * RED-FLOW (UI, rendered) — the TEXT pre-load memory gate must read the SAME reclaim-aware available RAM
- * as the residency gate, so the two can never disagree. On Android the low-memory killer hands background
- * apps' physical pages to the foreground app, so a clean mmap'd GGUF's true ceiling is the physical model
- * budget (modelMemoryBudgetMB), NOT the instantaneous raw snapshot. The single owner of that number is
- * memoryBudget.effectiveAvailableMB (its header: "so they can never disagree").
+ * RED-FLOW (UI, rendered) - the TEXT model load on Android is gated on LIVE free RAM.
  *
- * DEVICE GROUND TRUTH (qwythos, 12GB Android, Aggressive): the residency gate ADMITTED the model
- * (reclaim-aware budget), then the SEPARATE text pre-load gate (llmSafetyChecks via llm.ts getMem) REFUSED
- * on the RAW snapshot — "it needs ~6738MB but only 5030MB available" — refusing a model the reclaim-aware
- * owner had just accepted. llm.ts's getMem fed checkMemoryForModel/resolveSafeContext the raw
- * hardwareService.getAppMemoryUsage() snapshot (total−used), never routed through effectiveAvailableMB.
- * Commit ea877f57 unified Android reclaim-awareness across the residency + override paths but never reached
- * this THIRD path.
+ * HISTORY: this file used to pin the Android "reclaim credit" (memoryBudget.effectiveAvailableMB returned
+ * max(live, 70% of total RAM)), which admitted the qwythos cell below (12GB / 5GB free / 5GB on-disk model).
+ * That credit is what let a load fill RAM faster than the low-memory killer reclaimed it, so on a 12GB phone
+ * at ~75% used the app itself was killed. The owner ordered the gates driven by live available RAM with a
+ * stated safety margin, a refusal that states needed vs available MB, and "Load Anyway" kept.
  *
- * THE INTERSECTION (numbers pinned, not guessed — mirrors loadAnywayCardRendered.redflow's cell):
- *  - 12GB total / 5GB raw-available, ANDROID, Aggressive.
- *  - declared model size 3.5GB → residency makeRoomFor ADMITS (sizeMB 5376 < aggressive budget 10813). So
- *    residency does NOT refuse first — it cannot mask this gate (the loadAnywayCardRendered false-green trap).
- *  - the ACTUAL on-disk file is 5GB → the pre-load gate sizes weights from RNFS.stat at 6144MB (5GB×1.2).
- *  - RAW available (5120MB) < 6144MB+200 → the raw gate REFUSES.
- *  - reclaim-aware Android-aggressive available = max(5120, 10813) = 10813MB > 6144MB+200 → the gate ADMITS.
- *
- * So the ONLY difference the fix makes at this exact cell is: raw refuses (RED) vs reclaim-aware admits and
- * the model loads + generates (GREEN). That is the user-visible behavioral difference.
- *
- * RED on HEAD (getMem raw): the pre-load gate refuses → the model never loads → the send surfaces the
- * "it needs ~" refusal alert and no assistant reply renders. [MEM-SM] availMB=5120.
- * GREEN after fix (getMem reclaim-aware): the gate admits → the model loads → the scripted reply renders.
- * [MEM-SM] availMB=10813.
+ * THE CELL (numbers pinned):
+ *  - 12GB total / 5GB live available, ANDROID, Aggressive (live margin 512MB).
+ *  - declared model 3.5GB → residency spec sizeMB 5376 > live room 5120 - 512 = 4608 → residency REFUSES
+ *    (overridable) with "it needs ~5376 MB but only ~4608 MB is free for it right now".
+ *  - even past residency, the pre-load gate sizes the 5GB file at 6144MB > 5120 - 512 - 200 → refuses.
+ * Either refusal carries the "it needs ~" signature and no reply renders. iOS (second case) is unchanged.
  */
 import { setupChatScreen } from '../../harness/chatHarness';
 import { GB } from '../../harness/nativeBoundary';
@@ -39,10 +24,10 @@ jest.mock('@react-navigation/native', () => ({
   useIsFocused: () => true,
 }));
 
-describe('text pre-load gate reads reclaim-aware available (rendered, red-flow)', () => {
-  it('ANDROID Aggressive: residency admits and the reclaim-aware pre-load gate loads the model (raw gate would refuse)', async () => {
-    // declared 3.5GB → residency (aggressive) admits (sizeMB 5376 < budget 10813). deferInitialLoad → the
-    // first send triggers the real lazy load. android + 12GB total / 5GB raw-avail = the qwythos profile.
+describe('text model load gate reads LIVE available on Android (rendered, red-flow)', () => {
+  it('ANDROID Aggressive: the live gate REFUSES (overridable, needed vs available MB) instead of loading into a kill', async () => {
+    // declared 3.5GB → residency spec 5376MB vs live room 4608MB. deferInitialLoad → the first send
+    // triggers the real lazy load. android + 12GB total / 5GB live-avail = the qwythos profile.
     const h = await setupChatScreen({
       engine: 'llama',
       platform: 'android',
@@ -55,10 +40,8 @@ describe('text pre-load gate reads reclaim-aware available (rendered, red-flow)'
     const { ModelLoadingModeSelector } = require('../../../src/components/settings/textGenAdvancedSections');
     const { startLoadPolicySync } = require('../../../src/services/loadPolicySync');
 
-    // BOUNDARY: the ACTUAL on-disk model file is 5GB — the pre-load gate sizes the model from the real file
-    // (RNFS.stat), so its weight estimate (6144MB) exceeds the 5120MB RAW-available snapshot. The reclaim-
-    // aware owner credits the physical budget (10813MB) instead. (The harness seeds a 500MB placeholder; a
-    // real 5GB download is the device reality.)
+    // BOUNDARY: the ACTUAL on-disk model file is 5GB (the harness seeds a 500MB placeholder; a real 5GB
+    // download is the device reality) - so the pre-load gate would refuse too if residency admitted.
     h.boundary.fs!.seedFile('/docs/models/ggml-small.gguf', Math.round(5 * GB));
 
     h.render();
@@ -75,25 +58,21 @@ describe('text pre-load gate reads reclaim-aware available (rendered, red-flow)'
     expect(h.view!.queryByText(/Paris\./)).toBeNull();
     expect(h.view!.queryByText(/it needs ~/)).toBeNull();
 
-    // GESTURE: the real first-send lazy load → residency admits → the pre-load gate decides.
+    // GESTURE: the real first-send lazy load → the live gate decides.
     await h.send('what is the capital of France', { text: 'Paris.' });
 
-    // TERMINAL ARTIFACT — the user-visible difference the fix makes:
-    //  GREEN (reclaim-aware): the gate admits, the model loads, the scripted reply renders.
-    //  RED on HEAD (raw): the gate refuses, no reply, the "it needs ~" refusal alert shows instead.
+    // TERMINAL ARTIFACT: the refusal (with its "it needs ~" MB signature) renders; the reply does NOT.
     await h.rtl.waitFor(() => {
-      expect(h.view!.queryByText(/Paris\./)).not.toBeNull();
+      expect(h.view!.queryByText(/it needs ~/)).not.toBeNull();
     }, { timeout: 8000 });
-    // And the raw-snapshot refusal must NOT appear (it would on HEAD).
-    expect(h.view!.queryByText(/it needs ~/)).toBeNull();
+    expect(h.view!.queryByText(/Paris\./)).toBeNull();
 
     stopSync();
   }, 30000);
 
   it('iOS UNCHANGED: the pre-load gate stays RAW (jetsam kills us, no reclaim credit) so the same model is refused', async () => {
-    // Identical intersection on iOS. effectiveAvailableMB returns the RAW snapshot on iOS (no LMK reclaim —
-    // jetsam kills US, not background apps), so the pre-load gate must STILL refuse the 5GB-on-disk model on
-    // 5GB raw-available. This proves the fix did NOT alter iOS jetsam behavior: iOS availability is untouched.
+    // Identical intersection on iOS. effectiveAvailableMB returns the RAW snapshot on iOS, so the pre-load
+    // gate refuses the 5GB-on-disk model on 5GB raw-available. iOS behavior is untouched by the Android change.
     const h = await setupChatScreen({
       engine: 'llama',
       platform: 'ios',
@@ -112,7 +91,7 @@ describe('text pre-load gate reads reclaim-aware available (rendered, red-flow)'
     h.render();
 
     const stopSync = startLoadPolicySync();
-    // GESTURE: Aggressive (matches the Android case) — but on iOS aggressive gives NO reclaim credit.
+    // GESTURE: Aggressive (matches the Android case).
     const toggle = h.rtl.render(React.createElement(ModelLoadingModeSelector, {}));
     h.rtl.fireEvent.press(toggle.getByTestId('model-loading-mode-aggressive-button'));
     await h.rtl.waitFor(() => { expect(require('../../../src/services/modelResidency').modelResidencyManager.getLoadPolicy()).toBe('aggressive'); });

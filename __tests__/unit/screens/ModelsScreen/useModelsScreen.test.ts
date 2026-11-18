@@ -478,10 +478,10 @@ describe('useModelsScreen', () => {
 
       (Platform as any).OS = 'ios';
       mockPick.mockResolvedValueOnce([{ uri: 'file://nested.zip', name: 'NestedCoreML.zip' }]);
-      // First check has no mlmodelc but has directory
-      RNFS.readDir.mockResolvedValueOnce([
-        { name: 'subdir', isDirectory: () => true },
-      ]);
+      // Top level has only a folder; the .mlmodelc is one level down.
+      RNFS.readDir
+        .mockResolvedValueOnce([{ name: 'subdir', path: '/img/x/subdir', isDirectory: () => true }])
+        .mockResolvedValueOnce([{ name: 'model.mlmodelc', isDirectory: () => true }]);
       resolveCoreMLModelDir.mockResolvedValueOnce('/resolved/nested');
 
       const { result } = renderHook(() => useModelsScreen());
@@ -491,6 +491,70 @@ describe('useModelsScreen', () => {
       });
 
       expect(resolveCoreMLModelDir).toHaveBeenCalled();
+    });
+
+    it('does NOT treat a plain folder as CoreML on Android (MNN zip wrapped in a folder)', async () => {
+      const { modelManager } = require('../../../../src/services');
+      const { resolveCoreMLModelDir } = require('../../../../src/utils/coreMLModelUtils');
+      const RNFS = require('react-native-fs');
+
+      (Platform as any).OS = 'android';
+      mockPick.mockResolvedValueOnce([{ uri: 'file://wrapped.zip', name: 'Wrapped.zip' }]);
+      RNFS.readDir
+        .mockResolvedValueOnce([{ name: 'Wrapped', path: '/img/x/Wrapped', isDirectory: () => true }])
+        .mockResolvedValueOnce([{ name: 'unet.mnn', isDirectory: () => false }]);
+      modelManager.addDownloadedImageModel.mockResolvedValueOnce(undefined);
+
+      const { result } = renderHook(() => useModelsScreen());
+      await act(async () => {
+        await result.current.handleImportLocalModel();
+      });
+
+      expect(resolveCoreMLModelDir).not.toHaveBeenCalled();
+      expect(modelManager.addDownloadedImageModel).toHaveBeenCalledWith(
+        expect.objectContaining({ backend: 'mnn' }),
+      );
+    });
+
+    it('rejects a zip with no runnable backend, cleans up and alerts (never registers backend undefined)', async () => {
+      const { modelManager } = require('../../../../src/services');
+      const RNFS = require('react-native-fs');
+
+      (Platform as any).OS = 'android';
+      mockPick.mockResolvedValueOnce([{ uri: 'file://junk.zip', name: 'Junk.zip' }]);
+      RNFS.readDir.mockResolvedValueOnce([{ name: 'readme.txt', isDirectory: () => false }]);
+      RNFS.exists.mockResolvedValue(true);
+
+      const { result } = renderHook(() => useModelsScreen());
+      await act(async () => {
+        await result.current.handleImportLocalModel();
+      });
+
+      expect(modelManager.addDownloadedImageModel).not.toHaveBeenCalled();
+      expect(RNFS.unlink).toHaveBeenCalledWith(expect.stringMatching(/local_Junk_\d+\.zip$/));
+      expect(RNFS.unlink).toHaveBeenCalledWith(expect.stringMatching(/local_Junk_\d+$/));
+      expect(result.current.alertState.title).toBe('Import Failed');
+    });
+
+    it('cleans up and alerts when unzip throws', async () => {
+      const { modelManager } = require('../../../../src/services');
+      const RNFS = require('react-native-fs');
+      const { unzip } = require('react-native-zip-archive');
+
+      (Platform as any).OS = 'android';
+      mockPick.mockResolvedValueOnce([{ uri: 'file://bad.zip', name: 'Bad.zip' }]);
+      unzip.mockRejectedValueOnce(new Error('corrupt zip'));
+      RNFS.exists.mockResolvedValue(true);
+
+      const { result } = renderHook(() => useModelsScreen());
+      await act(async () => {
+        await result.current.handleImportLocalModel();
+      });
+
+      expect(modelManager.addDownloadedImageModel).not.toHaveBeenCalled();
+      expect(RNFS.unlink).toHaveBeenCalledWith(expect.stringMatching(/local_Bad_\d+$/));
+      expect(result.current.alertState.title).toBe('Import Failed');
+      expect(result.current.alertState.message).toBe('corrupt zip');
     });
 
     it('imports image model with QNN backend (bin files)', async () => {

@@ -120,6 +120,14 @@ export interface MemoryCheckArgs {
    *  replaces the fraction-of-weights heuristic, which over-counts GQA models and under-counts
    *  wide-KV ones (Qwen3-1.7B at 8K q8: heuristic ~300 MB vs 476 MB real) and omitted compute. */
   archBytes?: { kvBytes: number; computeBytes: number };
+  /** Extra live-RAM margin (MB) kept free on top of the fixed 200MB headroom. Android passes the
+   *  live safety margin (memoryBudget.preloadSafetyMarginMB) because its gate reads live RAM; 0 elsewhere. */
+  safetyMarginMB?: number;
+}
+
+/** " + NMB safety margin" when a live margin applies; empty (unchanged wording) otherwise. */
+function marginClause(safetyMarginMB: number): string {
+  return safetyMarginMB > 0 ? ` + ${Math.round(safetyMarginMB)}MB safety margin` : '';
 }
 
 export async function checkMemoryForModel(
@@ -132,6 +140,7 @@ export async function checkMemoryForModel(
 }> {
   const { modelFileSize, contextLength, getAvailableMemory, quantizedCache, archBytes } =
     args;
+  const safetyMarginMB = Math.max(0, args.safetyMarginMB ?? 0);
   try {
     const { available, total } = await getAvailableMemory();
     const availableMB = available / (1024 * 1024);
@@ -149,7 +158,7 @@ export async function checkMemoryForModel(
     const estimatedMB = modelMB + kvCacheMB + computeMB;
     // Require at least 200MB headroom after model load for OS and app
     const MIN_HEADROOM_MB = 200;
-    const safe = availableMB > estimatedMB + MIN_HEADROOM_MB;
+    const safe = availableMB > estimatedMB + MIN_HEADROOM_MB + safetyMarginMB;
     // [MEM-SM] the pre-load fit decision — kept (surfaces the exact "it needs ~X but only Y" call
     // on-device AND in tests via DEBUG_LOGS=1). This is the gate the qwythos refusal came from.
     logger.log(
@@ -157,14 +166,14 @@ export async function checkMemoryForModel(
         modelMB,
       )} kvMB=${Math.round(kvCacheMB)} computeMB=${Math.round(computeMB)} src=${archBytes ? 'gguf' : 'heuristic'} estMB=${Math.round(
         estimatedMB,
-      )} availMB=${Math.round(availableMB)} ctx=${contextLength} safe=${safe}`,
+      )} availMB=${Math.round(availableMB)} marginMB=${safetyMarginMB} ctx=${contextLength} safe=${safe}`,
     );
     if (!safe) {
       return {
         safe: false,
         reason: `Not enough memory: model needs ~${Math.round(
           estimatedMB,
-        )}MB but only ${Math.round(
+        )}MB${marginClause(safetyMarginMB)} but only ${Math.round(
           availableMB,
         )}MB available (device total: ${Math.round(
           totalMB,
@@ -189,6 +198,7 @@ export async function resolveSafeContext(args: {
   override?: boolean;
   getAvailableMemory: () => Promise<{ available: number; total: number }>;
   archBytes?: { kvBytes: number; computeBytes: number };
+  safetyMarginMB?: number;
 }): Promise<{
   ctxLen: number;
   memCheck: Awaited<ReturnType<typeof checkMemoryForModel>>;
@@ -200,6 +210,7 @@ export async function resolveSafeContext(args: {
     override = false,
     getAvailableMemory: getMem,
     archBytes,
+    safetyMarginMB,
   } = args;
   const memCheck = await checkMemoryForModel({
     modelFileSize: fileSize,
@@ -207,10 +218,11 @@ export async function resolveSafeContext(args: {
     getAvailableMemory: getMem,
     quantizedCache,
     archBytes,
+    safetyMarginMB,
   });
   if (!memCheck.safe && !override) {
     throw new OverridableMemoryError(
-      `Not enough memory to load this model at ${requestedCtx.toLocaleString()} context tokens: it needs ~${Math.round(memCheck.estimatedMB)}MB but only ${Math.round(memCheck.availableMB)}MB is available. Close other apps or choose a smaller model.`,
+      `Not enough memory to load this model at ${requestedCtx.toLocaleString()} context tokens: it needs ~${Math.round(memCheck.estimatedMB)}MB${marginClause(safetyMarginMB ?? 0)} but only ${Math.round(memCheck.availableMB)}MB is available. Close other apps or choose a smaller model.`,
     );
   }
   if (!memCheck.safe && override) {

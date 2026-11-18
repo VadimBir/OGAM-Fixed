@@ -54,10 +54,13 @@ export const PersonaSection: React.FC = () => {
         const body = [parsed.description, parsed.personality]
           .filter(Boolean)
           .join('\n\n');
+        // An imported card replaces the persona, so the previous persona's caveats must not survive
+        // into it (a SillyTavern card carries no caveats field to replace them with).
         updateSettings({
           personaName: parsed.name,
-          personaPrompt: body || personaPrompt,
+          personaPrompt: body,
           personaAvatarUri: avatarUri ?? personaAvatarUri,
+          personaCaveats: '',
         });
         setAlertState(showAlert('Persona imported', `Loaded “${parsed.name}” as your persona.`));
       }

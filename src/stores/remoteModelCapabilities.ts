@@ -8,6 +8,10 @@
 
 import logger from '../utils/logger';
 import { templateEmitsReasoning, REASONING_DELIMITERS } from '../utils/messageContent';
+import { REMOTE_FETCH_REDIRECT_POLICY, remoteApiUrl } from '../services/remoteTransportPolicy';
+
+/** Extra request headers for discovery: the caller's Authorization (already TLS-gated). */
+type DiscoveryHeaders = Record<string, string>;
 
 export interface RemoteModelInfo {
   contextLength: number;
@@ -99,16 +103,18 @@ function extractOllamaCapabilities(data: Record<string, unknown>): RemoteModelIn
 export async function fetchRemoteModelInfo(
   endpoint: string,
   modelName: string,
+  headers: DiscoveryHeaders = {},
 ): Promise<RemoteModelInfo> {
   try {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 2000);
 
-    const response = await fetch(`${endpoint}/api/show`, {
+    const response = await fetch(remoteApiUrl(endpoint, '/api/show'), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json', ...headers },
       body: JSON.stringify({ name: modelName }),
       signal: controller.signal,
+      redirect: REMOTE_FETCH_REDIRECT_POLICY,
     });
 
     clearTimeout(timeoutId);
@@ -132,15 +138,17 @@ export async function fetchRemoteModelInfo(
 export async function fetchLmStudioModelInfo(
   endpoint: string,
   modelId: string,
+  headers: DiscoveryHeaders = {},
 ): Promise<RemoteModelInfo> {
   try {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 3000);
 
-    const response = await fetch(`${endpoint}/api/v1/models`, {
+    const response = await fetch(remoteApiUrl(endpoint, '/api/v1/models'), {
       method: 'GET',
-      headers: { Accept: 'application/json' },
+      headers: { Accept: 'application/json', ...headers },
       signal: controller.signal,
+      redirect: REMOTE_FETCH_REDIRECT_POLICY,
     });
 
     clearTimeout(timeoutId);
@@ -171,7 +179,7 @@ export async function fetchLmStudioModelInfo(
 
     // LM Studio doesn't expose thinking capability in /api/v1/models.
     // Probe via a 1-token streaming request to learn whether THIS model thinks.
-    const supportsThinking = await probeLmStudioThinking(endpoint, modelId);
+    const supportsThinking = await probeLmStudioThinking(endpoint, modelId, headers);
 
     return {
       contextLength,
@@ -221,16 +229,21 @@ function deltaHasThinking(delta: Record<string, unknown>): boolean {
   return false;
 }
 
-async function probeLmStudioThinking(endpoint: string, modelId: string): Promise<boolean> {
+async function probeLmStudioThinking(
+  endpoint: string,
+  modelId: string,
+  headers: DiscoveryHeaders = {},
+): Promise<boolean> {
   try {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 10000);
 
     // Use streaming — LM Studio only honours chat_template_kwargs in streaming mode.
     // Read the full SSE response as text (RN fetch supports .text() but not ReadableStream).
-    const response = await fetch(`${endpoint}/v1/chat/completions`, {
+    const response = await fetch(remoteApiUrl(endpoint, '/v1/chat/completions'), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      redirect: REMOTE_FETCH_REDIRECT_POLICY,
+      headers: { 'Content-Type': 'application/json', ...headers },
       body: JSON.stringify({
         model: modelId,
         messages: [{ role: 'user', content: 'Say hi' }],
@@ -284,14 +297,17 @@ async function probeLmStudioThinking(endpoint: string, modelId: string): Promise
  */
 export async function fetchLlamaCppProps(
   endpoint: string,
+  headers: DiscoveryHeaders = {},
 ): Promise<RemoteModelInfo | null> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 3000);
   try {
-    const response = await fetch(`${endpoint}/props`, {
+    // /props is served at the llama-server root, also when the endpoint was saved as `.../v1`.
+    const response = await fetch(remoteApiUrl(endpoint, '/props'), {
       method: 'GET',
-      headers: { Accept: 'application/json' },
+      headers: { Accept: 'application/json', ...headers },
       signal: controller.signal,
+      redirect: REMOTE_FETCH_REDIRECT_POLICY,
     });
 
     if (!response.ok) return null;
@@ -321,13 +337,16 @@ export async function fetchLlamaCppProps(
 const propsInFlight = new Map<string, Promise<RemoteModelInfo | null>>();
 
 /** De-duplicated wrapper around fetchLlamaCppProps — one /props call per endpoint. */
-export function fetchLlamaCppPropsCached(endpoint: string): Promise<RemoteModelInfo | null> {
+export function fetchLlamaCppPropsCached(
+  endpoint: string,
+  headers: DiscoveryHeaders = {},
+): Promise<RemoteModelInfo | null> {
   // Deliberate in-flight-promise cache: return the pending promise un-awaited so concurrent
   // callers share one fetch. Explicit presence check (not a truthiness/await smell) so the
   // Promise-in-conditional rule (S6544) doesn't misread it as a forgotten await.
   const existing = propsInFlight.get(endpoint);
   if (existing !== undefined) return existing;
-  const p = fetchLlamaCppProps(endpoint).finally(() => propsInFlight.delete(endpoint));
+  const p = fetchLlamaCppProps(endpoint, headers).finally(() => propsInFlight.delete(endpoint));
   propsInFlight.set(endpoint, p);
   return p;
 }
@@ -429,13 +448,14 @@ export async function fetchModelCapabilities(
   endpoint: string,
   modelId: string,
   nameBasedDetect: { vision: (id: string) => boolean; toolCalling: (id: string) => boolean },
+  headers: DiscoveryHeaders = {},
 ): Promise<RemoteModelInfo> {
   const [propsInfo, ollamaInfo, lmInfo] = await Promise.all([
     // Deduped per endpoint — /props is server-wide, so all models on one server
     // share a single request instead of firing one each.
-    fetchLlamaCppPropsCached(endpoint),
-    fetchRemoteModelInfo(endpoint, modelId),
-    fetchLmStudioModelInfo(endpoint, modelId),
+    fetchLlamaCppPropsCached(endpoint, headers),
+    fetchRemoteModelInfo(endpoint, modelId, headers),
+    fetchLmStudioModelInfo(endpoint, modelId, headers),
   ]);
 
   // /props wins whenever it answered at all: on a llama.cpp server it is the

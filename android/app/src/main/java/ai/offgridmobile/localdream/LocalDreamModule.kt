@@ -14,6 +14,8 @@ import java.io.IOException
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
+import java.net.InetAddress
+import java.net.ServerSocket
 import java.net.URL
 import java.time.Instant
 import java.util.UUID
@@ -21,6 +23,8 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import ai.offgridmobile.SafePromise
 import kotlinx.coroutines.*
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
 
 /**
@@ -28,7 +32,7 @@ import org.json.JSONObject
  *
  * Architecture:
  * - Spawns libstable_diffusion_core.so as a subprocess
- * - The subprocess runs an HTTP server on localhost:18081
+ * - The subprocess runs an HTTP server on 127.0.0.1:18081, or a free port when 18081 is taken
  * - TypeScript layer talks to the HTTP server directly for generation
  * - This module handles: process lifecycle, QNN lib extraction, image file management
  */
@@ -50,8 +54,40 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
 
         private const val MNN_OPENCL_TUNING_MODE = "WIDE"
         private const val QNN_BASE_SIZE = 512
+        /** OpenCL (GPU VAE) is only sound at exactly 512x512 (see buildGenerationBody). */
+        private const val OPENCL_SOUND_SIZE = 512
+        /** The ONE native default step count: getConstants() and the request fallback both use it.
+         *  JS `DEFAULT_IMAGE_STEPS` (utils/imageGenAdvice.ts) must equal it (jest-asserted). */
+        private const val DEFAULT_STEPS = 20
         private const val EVENT_PROGRESS = "LocalDreamProgress"
         private const val EVENT_ERROR = "LocalDreamError"
+        /** Server lifecycle changes JS did not ask for (cancel restart, NPU patch restart, fallback). */
+        private const val EVENT_STATUS = "LocalDreamStatus"
+
+        /** True when canonical [path] is [root] itself or lies under it. A bare startsWith would
+         *  accept a sibling such as "/data/files_evil" for root "/data/files". */
+        internal fun isPathInside(path: String, root: String): Boolean =
+            path == root || path.startsWith(root.trimEnd(File.separatorChar) + File.separator)
+
+        /** Which qnnlibs asset a start needs: the QNN runtime only for the NPU backend, the core
+         *  executable only when nativeLibraryDir has none. */
+        internal fun shouldCopyRuntimeAsset(fileName: String, copyQnnLibs: Boolean, copyExecutable: Boolean): Boolean =
+            if (fileName == EXECUTABLE_NAME) copyExecutable else copyQnnLibs
+
+        /** [preferred] when no other process holds it on loopback, else a free ephemeral port. */
+        internal fun pickServerPort(preferred: Int): Int {
+            val loopback = InetAddress.getByName("127.0.0.1")
+            val preferredFree = try {
+                ServerSocket(preferred, 1, loopback).close()
+                true
+            } catch (e: IOException) {
+                Log.w(TAG, "Port $preferred is already bound (${e.message}); picking a free port")
+                false
+            }
+            if (preferredFree) return preferred
+            val free = ServerSocket(0, 1, loopback).use { it.localPort }
+            return free
+        }
 
         // Mirrors local-dream's getChipsetSuffix: any SM-prefixed chip → supported
         internal fun isNpuSupportedInternal(): Boolean {
@@ -84,6 +120,13 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
             return searchDir(dir, 0)
         }
 
+        /**
+         * Detect text_embedding_size from the model files.
+         * All SD1.5 models (which is everything in xororz/sd-mnn and sd-qnn) use
+         * CLIP ViT-L/14 with 768-dimensional text embeddings.
+         * Note: "clip_v2" refers to MNN model format v2 (separate weight files),
+         * NOT CLIP architecture v2. The embedding dimension is still 768.
+         */
         internal fun detectTextEmbeddingSize(modelDir: File, isCpu: Boolean): String {
             // SD1.5 models always use 768
             return "768"
@@ -118,12 +161,47 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
          *  W/8 latent 3x, so W must be a multiple of 64). */
         internal fun snapMnnSize(px: Int): Int = ((px + 32) / 64 * 64).coerceIn(128, 512)
 
+        /** What the engine will really render for a request, decided BEFORE generation. */
+        internal data class RenderPlan(
+            val width: Int,
+            val height: Int,
+            val adjusted: Boolean,
+            val reason: String?,
+        )
+
+        /** MNN is forced square (min side) on upstream's 128..512 / 64 grid. */
+        internal fun planMnnSize(reqW: Int, reqH: Int): RenderPlan {
+            val side = snapMnnSize(minOf(reqW, reqH))
+            val adjusted = side != reqW || side != reqH
+            return RenderPlan(
+                side, side, adjusted,
+                if (adjusted) "MNN renders square 128-512 px on a 64 px grid" else null,
+            )
+        }
+
+        /** NPU renders 512x512, or a size whose resolution patch sits in the model directory. */
+        internal fun planQnnSize(modelDir: File, reqW: Int, reqH: Int): RenderPlan {
+            if (reqW == QNN_BASE_SIZE && reqH == QNN_BASE_SIZE) return RenderPlan(reqW, reqH, false, null)
+            if (resolvePatchFile(modelDir, reqW, reqH) != null) return RenderPlan(reqW, reqH, false, null)
+            val available = availableQnnSizes(modelDir).joinToString(", ") { "${it.first}x${it.second}" }
+            return RenderPlan(
+                QNN_BASE_SIZE, QNN_BASE_SIZE, true,
+                "NPU model has no ${reqW}x$reqH resolution patch (available: $available)",
+            )
+        }
+
+        /** OpenCL is requested AND not force-disabled AND the render size is the proven-clean 512x512. */
+        internal fun effectiveUseOpenCL(
+            requested: Boolean, forceCpuCompute: Boolean, width: Int, height: Int,
+        ): Boolean = requested && !forceCpuCompute && width == OPENCL_SOUND_SIZE && height == OPENCL_SOUND_SIZE
+
         internal fun buildCommand(
             executable: File,
             modelDir: File,
             runtimeDir: File,
             isCpu: Boolean,
             patchFile: File? = null,
+            port: Int = SERVER_PORT,
         ): List<String> {
             val embeddingSize = detectTextEmbeddingSize(modelDir, isCpu)
             Log.d(TAG, "Detected text_embedding_size: $embeddingSize")
@@ -142,7 +220,7 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
                     "--unet", File(modelDir, "unet.mnn").absolutePath,
                     "--vae_decoder", File(modelDir, "vae_decoder.mnn").absolutePath,
                     "--tokenizer", File(modelDir, "tokenizer.json").absolutePath,
-                    "--port", SERVER_PORT.toString(),
+                    "--port", port.toString(),
                     "--text_embedding_size", embeddingSize,
                     "--cpu",
                 ).also { cmd ->
@@ -165,7 +243,7 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
                     "--tokenizer", File(modelDir, "tokenizer.json").absolutePath,
                     "--backend", File(runtimeDir, "libQnnHtp.so").absolutePath,
                     "--system_library", File(runtimeDir, "libQnnSystem.so").absolutePath,
-                    "--port", SERVER_PORT.toString(),
+                    "--port", port.toString(),
                     "--text_embedding_size", embeddingSize,
                 ).also { cmd ->
                     if (patchFile != null) cmd.addAll(listOf("--patch", patchFile.absolutePath))
@@ -306,17 +384,26 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    private var serverProcess: Process? = null
-    private var currentModelPath: String? = null
-    private var currentBackend: String? = null
+    // Server state below is mutated only under serverMutex (load / unload / restart / generate);
+    // @Volatile so lock-free readers (isModelLoaded, cancelGeneration, invalidate) see the latest.
+    private val serverMutex = Mutex()
+    @Volatile private var serverProcess: Process? = null
+    @Volatile private var currentModelPath: String? = null
+    @Volatile private var currentBackend: String? = null
     /** Resolved model dir of the running server + the resolution patch it was started with. */
-    private var currentModelDir: File? = null
-    private var currentPatchFile: File? = null
-    private var isServerReady = false
+    @Volatile private var currentModelDir: File? = null
+    @Volatile private var currentPatchFile: File? = null
+    @Volatile private var isServerReady = false
+    /** Port the running server listens on (SERVER_PORT unless it was already bound). */
+    @Volatile private var serverPort = SERVER_PORT
     private val coroutineScope = CoroutineScope(Dispatchers.Default + Job())
-    private var monitorJob: Job? = null
+    @Volatile private var monitorJob: Job? = null
+    /** Server restart after a cancelled generation (see cancelGeneration). */
+    @Volatile private var restartJob: Job? = null
     private val generationCancelled = AtomicBoolean(false)
-    private var activeGenerationConnection: HttpURLConnection? = null
+    /** Unique per generation: preview file names embed it so a cached Image never shows a prior run. */
+    @Volatile private var generationId: String = ""
+    @Volatile private var activeGenerationConnection: HttpURLConnection? = null
     // Bounded ring of the most recent server stdout/stderr lines + last exit code, so a crash
     // rejection can carry the server's OWN error text to a details popup instead of a generic message.
     private val serverLogRing = java.util.ArrayDeque<String>()
@@ -333,7 +420,7 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
     /** Compact, human-readable diagnostics for a crash popup: backend, exit code, recent server log. */
     private fun crashDiagnostics(lastN: Int = 14): String {
         val recent = synchronized(serverLogRing) { serverLogRing.toList() }.takeLast(lastN)
-        val header = "backend=${currentBackend ?: "?"} port=$SERVER_PORT exit=${lastServerExitCode ?: "n/a"}"
+        val header = "backend=${currentBackend ?: "?"} port=$serverPort exit=${lastServerExitCode ?: "n/a"}"
         return if (recent.isEmpty()) "[server] $header (no server output captured)"
         else "[server] $header\n" + recent.joinToString("\n")
     }
@@ -342,7 +429,7 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
 
     override fun getConstants(): Map<String, Any> {
         return mapOf(
-            "DEFAULT_STEPS" to 20,
+            "DEFAULT_STEPS" to DEFAULT_STEPS,
             "DEFAULT_GUIDANCE_SCALE" to 7.5,
             "DEFAULT_WIDTH" to 512,
             "DEFAULT_HEIGHT" to 512,
@@ -362,14 +449,19 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
     // QNN Library Extraction
     // =====================================================================
 
-    private fun prepareRuntimeDir(): File {
+    /**
+     * Copies the qnnlibs assets a start needs into runtime_libs (an equal-size file is kept).
+     * MNN/CPU never loads the QNN runtime (~165 MB), so it copies only the core executable, and
+     * only when nativeLibraryDir has none.
+     */
+    private fun prepareRuntimeDir(copyQnnLibs: Boolean, copyExecutable: Boolean): File {
         val runtimeDir = File(reactApplicationContext.filesDir, RUNTIME_DIR).apply {
             if (!exists()) mkdirs()
         }
 
         try {
             val qnnLibs = reactApplicationContext.assets.list("qnnlibs")
-            qnnLibs?.forEach { fileName ->
+            qnnLibs?.filter { shouldCopyRuntimeAsset(it, copyQnnLibs, copyExecutable) }?.forEach { fileName ->
                 val targetLib = File(runtimeDir, fileName)
 
                 val needsCopy = !targetLib.exists() || run {
@@ -390,7 +482,7 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
                 targetLib.setReadable(true, true)
                 targetLib.setExecutable(true, true)
             }
-            Log.i(TAG, "QNN libraries prepared in: ${runtimeDir.absolutePath}")
+            Log.i(TAG, "Runtime libraries prepared in: ${runtimeDir.absolutePath} (qnn=$copyQnnLibs, executable=$copyExecutable)")
         } catch (e: IOException) {
             Log.w(TAG, "No QNN libraries found in assets (CPU-only mode): ${e.message}")
         }
@@ -400,19 +492,6 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
         return runtimeDir
     }
 
-    // =====================================================================
-    // Model Directory Resolution
-    // =====================================================================
-
-    /**
-     * Resolve the actual model directory. react-native-zip-archive preserves
-     * zip internal paths, so a zip like `ChilloutMix.zip` containing
-     * `ChilloutMix/clip.mnn` extracts to `modelDir/ChilloutMix/clip.mnn`
-     * instead of `modelDir/clip.mnn`.
-     *
-     * This function checks for model files at the root, and if not found,
-     * looks one level deep for a subdirectory that contains them.
-     */
     // =====================================================================
     // Process Lifecycle
     // =====================================================================
@@ -469,61 +548,70 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
 
     @ReactMethod
     fun loadModel(params: ReadableMap, promise: Promise) {
-        coroutineScope.launch {
-            try {
-                val modelPath = params.getString("modelPath")
-                if (modelPath.isNullOrBlank()) {
-                    safeReject(promise, "INVALID_ARGS", "modelPath is required")
-                    return@launch
-                }
+        // IO: stopServer blocks up to 5 s. The mutex keeps load, unload, restart and generate
+        // from interleaving on serverProcess / currentModelPath / isServerReady.
+        coroutineScope.launch(Dispatchers.IO) { serverMutex.withLock { loadModelLocked(params, promise) } }
+    }
 
-                val rawModelDir = File(modelPath)
-                if (!rawModelDir.exists() || !rawModelDir.isDirectory) {
-                    safeReject(promise, "MODEL_NOT_FOUND", "Model directory not found: $modelPath")
-                    return@launch
-                }
-
-                val normalizedBackend = normalizeBackend(params)
-                val (backend, modelDir) = resolveBackendAndDir(normalizedBackend, rawModelDir) ?: run {
-                    val contents = rawModelDir.listFiles()?.map { it.name }?.joinToString(", ") ?: "empty"
-                    safeReject(promise,
-                        "MODEL_FILES_NOT_FOUND",
-                        "Could not find model files (unet.mnn or unet.bin) in $modelPath or its subdirectories. " +
-                            "Directory contents: [$contents]"
-                    )
-                    return@launch
-                }
-
-                Log.d(TAG, "Resolved model directory: ${modelDir.absolutePath}")
-                Log.d(TAG, "Backend selection: requested=$normalizedBackend, selected=$backend")
-
-                if (currentModelPath == modelPath && serverProcess?.isAlive == true && isServerReady) {
-                    Log.d(TAG, "Model already loaded: $modelPath")
-                    safeResolve(promise, true)
-                    return@launch
-                }
-
-                stopServer()
-                Log.d(TAG, "Loading model from: $modelPath, backend: $backend")
-
-                val cpuModelDir = resolveModelDir(rawModelDir, true)
-                val result = startWithFallback(modelPath, backend, modelDir, cpuModelDir)
-
-                if (result.success) {
-                    safeResolve(promise, true)
-                } else {
-                    safeReject(promise, "SERVER_FAILED", result.error ?: "Server failed to start")
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Error loading model", e)
-                stopServer()
-                safeReject(promise, "LOAD_ERROR", "Failed to load model: ${e.message}", e)
+    private suspend fun loadModelLocked(params: ReadableMap, promise: Promise) {
+        // unloadModel leaves generationCancelled true (it aborts a running generation); a fresh load
+        // starts clean. Under serverMutex, so no generation is running here.
+        generationCancelled.set(false)
+        try {
+            val modelPath = params.getString("modelPath")
+            if (modelPath.isNullOrBlank()) {
+                safeReject(promise, "INVALID_ARGS", "modelPath is required")
+                return
             }
+
+            val rawModelDir = File(modelPath)
+            if (!rawModelDir.exists() || !rawModelDir.isDirectory) {
+                safeReject(promise, "MODEL_NOT_FOUND", "Model directory not found: $modelPath")
+                return
+            }
+
+            val normalizedBackend = normalizeBackend(params)
+            val (backend, modelDir) = resolveBackendAndDir(normalizedBackend, rawModelDir) ?: run {
+                val contents = rawModelDir.listFiles()?.map { it.name }?.joinToString(", ") ?: "empty"
+                safeReject(promise,
+                    "MODEL_FILES_NOT_FOUND",
+                    "Could not find model files (unet.mnn or unet.bin) in $modelPath or its subdirectories. " +
+                        "Directory contents: [$contents]"
+                )
+                return
+            }
+
+            Log.d(TAG, "Resolved model directory: ${modelDir.absolutePath}")
+            Log.d(TAG, "Backend selection: requested=$normalizedBackend, selected=$backend")
+
+            if (currentModelPath == modelPath && serverProcess?.isAlive == true && isServerReady) {
+                Log.d(TAG, "Model already loaded: $modelPath")
+                safeResolve(promise, true)
+                return
+            }
+
+            stopServer()
+            Log.d(TAG, "Loading model from: $modelPath, backend: $backend")
+
+            val cpuModelDir = resolveModelDir(rawModelDir, true)
+            val result = startWithFallback(modelPath, backend, modelDir, cpuModelDir)
+
+            if (result.success) {
+                safeResolve(promise, true)
+            } else {
+                safeReject(promise, "SERVER_FAILED", result.error ?: "Server failed to start")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error loading model", e)
+            stopServer()
+            safeReject(promise, "LOAD_ERROR", "Failed to load model: ${e.message}", e)
         }
     }
 
     private data class StartResult(val success: Boolean, val error: String? = null)
 
+    /** Caller holds serverMutex. On any failure (timeout, early exit, cancellation) the started
+     *  process is stopped, so a failed start never leaves a server holding the model in RAM. */
     private suspend fun tryStartServer(
         modelPath: String,
         modelDir: File,
@@ -531,12 +619,11 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
         isCpu: Boolean,
         patchFile: File? = null,
     ): StartResult {
-        val runtimeDir = prepareRuntimeDir()
-
         // Look for executable in nativeLibraryDir first (has execute permission),
         // then fall back to runtime_libs (extracted from assets)
         val nativeDir = reactApplicationContext.applicationInfo.nativeLibraryDir
         val nativeDirFile = File(nativeDir, EXECUTABLE_NAME)
+        val runtimeDir = prepareRuntimeDir(copyQnnLibs = !isCpu, copyExecutable = !nativeDirFile.exists())
         val runtimeDirFile = File(runtimeDir, EXECUTABLE_NAME)
 
         val executableFile = when {
@@ -558,8 +645,13 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
             }
         }
 
+        // A port another process already holds would answer /health for us (a stale server from a
+        // killed app process, or an unrelated app): use a free port instead. The core takes --port.
+        val port = pickServerPort(SERVER_PORT)
+        if (port != SERVER_PORT) Log.w(TAG, "Port $SERVER_PORT busy; starting the server on port $port")
+
         // Build command based on backend
-        val command = buildCommand(executableFile, modelDir, runtimeDir, isCpu, if (isCpu) null else patchFile)
+        val command = buildCommand(executableFile, modelDir, runtimeDir, isCpu, if (isCpu) null else patchFile, port)
 
         // Build environment
         val env = buildEnvironment(runtimeDir)
@@ -576,7 +668,9 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
             environment().putAll(env)
         }
 
-        serverProcess = processBuilder.start()
+        val proc = processBuilder.start()
+        serverProcess = proc
+        serverPort = port
         currentModelPath = modelPath
         currentBackend = backend
         currentModelDir = modelDir
@@ -584,30 +678,42 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
         isServerReady = false
 
         // Start monitoring stdout
-        startMonitor()
+        startMonitor(proc)
 
         // Wait for server to be ready (poll health endpoint)
         // Use 120s for QNN (first-time cache building can take a while)
         // Use 180s for MNN (CPU inference setup can be slow)
         val timeoutMs = if (isCpu) 180000L else 120000L
-        val ready = waitForServer(timeoutMs)
+        val ready = try {
+            waitForServer(proc, port, timeoutMs)
+        } catch (e: CancellationException) {
+            Log.w(TAG, "Server start cancelled; stopping the half-started server")
+            stopServer()
+            throw e
+        }
 
         if (ready) {
             isServerReady = true
-            Log.i(TAG, "Server is ready on port $SERVER_PORT (backend: $backend)")
+            Log.i(TAG, "Server is ready on port $port (backend: $backend)")
             return StartResult(true)
         }
-        return buildStartFailure(timeoutMs)
+        val failure = buildStartFailure(proc, timeoutMs)
+        Log.w(TAG, "Server start failed, stopping it: ${failure.error}")
+        stopServer()
+        return failure
     }
 
-    private fun buildStartFailure(timeoutMs: Long): StartResult {
-        val alive = serverProcess?.isAlive == true
+    private fun buildStartFailure(proc: Process, timeoutMs: Long): StartResult {
+        val alive = proc.isAlive
         if (alive) {
             return StartResult(false,
                 "Server failed to start within ${timeoutMs/1000}s. " +
                 "The model may be too large or the device is low on memory.")
         }
-        val exitCode = try { serverProcess?.exitValue() } catch (_: Exception) { null }
+        val exitCode = try { proc.exitValue() } catch (e: IllegalThreadStateException) {
+            Log.w(TAG, "exitValue unavailable: ${e.message}")
+            null
+        }
         val socModel = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) Build.SOC_MODEL else "unknown"
         return StartResult(false,
             "Server process exited with code $exitCode. " +
@@ -616,43 +722,46 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
     }
 
     /**
-     * Detect text_embedding_size from the model files.
-     * All SD1.5 models (which is everything in xororz/sd-mnn and sd-qnn) use
-     * CLIP ViT-L/14 with 768-dimensional text embeddings.
-     * Note: "clip_v2" refers to MNN model format v2 (separate weight files),
-     * NOT CLIP architecture v2. The embedding dimension is still 768.
+     * Polls /health until our own process answers. Readiness needs BOTH a 200 and [proc] still
+     * alive afterwards: a 200 from another listener while our process died is not our server.
      */
-    private suspend fun waitForServer(timeoutMs: Long): Boolean {
+    private suspend fun waitForServer(proc: Process, port: Int, timeoutMs: Long): Boolean {
         val startTime = System.currentTimeMillis()
         while (System.currentTimeMillis() - startTime < timeoutMs) {
             // Bail early if the process has died
-            if (serverProcess?.isAlive != true) {
+            if (!proc.isAlive) {
                 Log.w(TAG, "Server process died while waiting for it to become ready")
                 return false
             }
 
             try {
-                val url = java.net.URL("http://127.0.0.1:$SERVER_PORT/health")
+                val url = java.net.URL("http://127.0.0.1:$port/health")
                 val conn = url.openConnection() as java.net.HttpURLConnection
                 conn.connectTimeout = 1000
                 conn.readTimeout = 1000
                 conn.requestMethod = "GET"
                 val code = conn.responseCode
                 conn.disconnect()
-                if (code == 200) return true
-            } catch (_: Exception) {
-                // Server not ready yet
+                if (code == 200) {
+                    if (proc.isAlive) return true
+                    Log.w(TAG, "/health answered 200 but our server process is dead")
+                    return false
+                }
+            } catch (e: Exception) {
+                Log.v(TAG, "Server not ready yet: ${e.message}")
             }
             delay(500)
         }
         return false
     }
 
-    private fun startMonitor() {
+    /** Reads [proc]'s output. Captures the process, so a monitor of a stopped server never
+     *  touches the state (isServerReady, error event) of the server that replaced it. */
+    private fun startMonitor(proc: Process) {
         monitorJob?.cancel()
         monitorJob = coroutineScope.launch(Dispatchers.IO) {
             try {
-                serverProcess?.inputStream?.bufferedReader()?.use { reader ->
+                proc.inputStream.bufferedReader().use { reader ->
                     var line: String?
                     while (reader.readLine().also { line = it } != null) {
                         Log.i(TAG, "[server] $line")
@@ -660,9 +769,10 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
                     }
                 }
 
-                val exitCode = serverProcess?.waitFor() ?: -1
+                val exitCode = proc.waitFor()
                 lastServerExitCode = exitCode
                 Log.i(TAG, "Server process exited with code: $exitCode")
+                if (proc !== serverProcess) return@launch  // stopped on purpose / replaced
                 isServerReady = false
 
                 if (exitCode != 0 && exitCode != 143) { // 143 = SIGTERM (expected on stop)
@@ -683,11 +793,16 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
         monitorJob?.cancel()
         monitorJob = null
 
-        serverProcess?.let { proc ->
+        // Detach first: the monitor of this process then sees proc !== serverProcess and emits no
+        // "exited unexpectedly" error for an intentional stop (SIGKILL exit 137 included).
+        val proc = serverProcess
+        serverProcess = null
+        isServerReady = false
+        proc?.let {
             try {
-                proc.destroy()
-                if (!proc.waitFor(5, TimeUnit.SECONDS)) {
-                    proc.destroyForcibly()
+                it.destroy()
+                if (!it.waitFor(5, TimeUnit.SECONDS)) {
+                    it.destroyForcibly()
                 }
                 Log.i(TAG, "Server process stopped")
             } catch (e: Exception) {
@@ -695,21 +810,29 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
             }
         }
 
-        serverProcess = null
         currentModelPath = null
         currentBackend = null
         currentModelDir = null
         currentPatchFile = null
-        isServerReady = false
     }
 
     @ReactMethod
     fun unloadModel(promise: Promise) {
-        try {
-            stopServer()
-            safeResolve(promise, true)
-        } catch (e: Exception) {
-            safeReject(promise, "UNLOAD_ERROR", "Failed to unload model: ${e.message}", e)
+        // Abort a running generation first, so it releases serverMutex instead of making unload wait
+        // for the whole generation; a pending cancel-restart is cancelled (it stops its own process).
+        generationCancelled.set(true)
+        restartJob?.cancel()
+        activeGenerationConnection?.let { conn ->
+            try { conn.disconnect() } catch (e: Exception) { Log.w(TAG, "disconnect on unload: ${e.message}") }
+        }
+        // Off the bridge thread: stopServer blocks up to 5 s waiting for the process to exit.
+        coroutineScope.launch(Dispatchers.IO) {
+            try {
+                serverMutex.withLock { stopServer() }
+                safeResolve(promise, true)
+            } catch (e: Exception) {
+                safeReject(promise, "UNLOAD_ERROR", "Failed to unload model: ${e.message}", e)
+            }
         }
     }
 
@@ -731,11 +854,61 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun cancelGeneration(promise: Promise) {
         generationCancelled.set(true)
-        activeGenerationConnection?.let {
-            try { it.disconnect() } catch (_: Exception) {}
-        }
+        val conn = activeGenerationConnection
         activeGenerationConnection = null
+        if (conn != null) {
+            try { conn.disconnect() } catch (e: Exception) { Log.w(TAG, "disconnect on cancel: ${e.message}") }
+            // The core exposes only /health and /generate (no cancel endpoint), and nothing shows it
+            // stops sampling when the client disconnects. So a cancelled in-flight generation would
+            // keep the CPU/NPU busy and the next request would queue behind it: restart the server.
+            scheduleRestartAfterCancel()
+        }
         safeResolve(promise, true)
+    }
+
+    /** Restarts the loaded model's server under serverMutex (after the cancelled generation has
+     *  released it). Emits LocalDreamStatus restarting / ready / failed. */
+    private fun scheduleRestartAfterCancel() {
+        restartJob?.cancel()
+        restartJob = coroutineScope.launch(Dispatchers.IO) {
+            serverMutex.withLock {
+                val modelPath = currentModelPath
+                val dir = currentModelDir
+                val backend = currentBackend
+                val patch = currentPatchFile
+                if (modelPath == null || dir == null || backend == null) return@withLock
+                Log.i(TAG, "Restarting server after cancel (backend=$backend)")
+                try {
+                    emitStatus("restarting", "Stopping the cancelled generation")
+                    stopServer()
+                    val r = tryStartServer(modelPath, dir, backend, backend == "mnn", patch)
+                    if (r.success) emitStatus("ready", null)
+                    else emitStatus("failed", "Server restart after cancel failed: ${r.error}")
+                } catch (e: CancellationException) {
+                    throw e  // unload / invalidate: tryStartServer already stopped its process
+                } catch (e: Exception) {
+                    // An uncaught exception in this launch would crash the app process.
+                    Log.e(TAG, "Server restart after cancel failed", e)
+                    stopServer()
+                    emitStatus("failed", "Server restart after cancel failed: ${e.message}")
+                }
+            }
+        }
+    }
+
+    private suspend fun emitStatus(status: String, message: String?) {
+        Log.i(TAG, "[STATUS] $status${if (message != null) ": $message" else ""}")
+        withContext(Dispatchers.Main) {
+            try {
+                sendEvent(EVENT_STATUS, Arguments.createMap().apply {
+                    putString("status", status)
+                    if (message != null) putString("message", message) else putNull("message")
+                })
+            } catch (e: Exception) {
+                // React context torn down: the status only informs JS, never blocks the caller.
+                Log.w(TAG, "Could not emit $EVENT_STATUS: ${e.message}")
+            }
+        }
     }
 
     // =====================================================================
@@ -747,7 +920,7 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
      */
     private fun checkServerHealth(): Boolean {
         return try {
-            val url = URL("http://127.0.0.1:$SERVER_PORT/health")
+            val url = URL("http://127.0.0.1:$serverPort/health")
             val conn = url.openConnection() as HttpURLConnection
             conn.connectTimeout = 3000
             conn.readTimeout = 3000
@@ -777,33 +950,90 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
      * with the matching resolution patch when needed. NPU without a patch for the size → 512x512
      * (a wrong-shaped latent into the fixed graph is the rainbow). MNN → upstream's 64 grid.
      */
+    private fun requestedSize(params: ReadableMap): Pair<Int, Int> =
+        clampDimension(if (params.hasKey("width")) params.getInt("width") else 512) to
+            clampDimension(if (params.hasKey("height")) params.getInt("height") else 512)
+
+    /** Pure plan (no server restart) of what the CURRENTLY loaded backend renders for this request. */
+    private fun planRenderSize(params: ReadableMap): RenderPlan {
+        val (reqW, reqH) = requestedSize(params)
+        val dir = currentModelDir
+        return if (currentBackend != "qnn" || dir == null || currentModelPath == null) {
+            planMnnSize(reqW, reqH)
+        } else {
+            planQnnSize(dir, reqW, reqH)
+        }
+    }
+
     private suspend fun resolveRenderSize(params: ReadableMap): Pair<Int, Int> {
-        val reqW = clampDimension(if (params.hasKey("width")) params.getInt("width") else 512)
-        val reqH = clampDimension(if (params.hasKey("height")) params.getInt("height") else 512)
+        val (reqW, reqH) = requestedSize(params)
+        val plan = planRenderSize(params)
         val dir = currentModelDir
         val modelPath = currentModelPath
-        if (currentBackend != "qnn" || dir == null || modelPath == null) {
-            val side = snapMnnSize(minOf(reqW, reqH))
-            if (side != reqW || side != reqH) Log.i(TAG, "[IMG-SIZE] mnn ${reqW}x$reqH -> ${side}x$side (square 128..512, 64 grid)")
-            return side to side
-        }
-        val wanted = resolvePatchFile(dir, reqW, reqH)
-        val (w, h) = when {
-            reqW == QNN_BASE_SIZE && reqH == QNN_BASE_SIZE -> QNN_BASE_SIZE to QNN_BASE_SIZE
-            wanted != null -> reqW to reqH
-            else -> {
-                Log.w(TAG, "[IMG-SIZE] npu has no patch for ${reqW}x$reqH (available: ${availableQnnSizes(dir)}) -> 512x512")
-                QNN_BASE_SIZE to QNN_BASE_SIZE
-            }
-        }
-        val patch = if (w == QNN_BASE_SIZE && h == QNN_BASE_SIZE) null else wanted
+        if (plan.adjusted) Log.w(TAG, "[IMG-SIZE] ${reqW}x$reqH -> ${plan.width}x${plan.height}: ${plan.reason}")
+        if (currentBackend != "qnn" || dir == null || modelPath == null) return plan.width to plan.height
+        val w = plan.width
+        val h = plan.height
+        val patch = if (w == QNN_BASE_SIZE && h == QNN_BASE_SIZE) null else resolvePatchFile(dir, w, h)
         if (patch?.absolutePath != currentPatchFile?.absolutePath) {
             Log.i(TAG, "[IMG-SIZE] npu restart for ${w}x$h patch=${patch?.name ?: "none"}")
+            emitStatus("restarting", "Reloading the NPU model for ${w}x$h")
             stopServer()
             val r = tryStartServer(modelPath, dir, "qnn", false, patch)
-            if (!r.success) throw java.io.IOException("NPU restart for ${w}x$h failed: ${r.error}")
+            if (r.success) {
+                emitStatus("ready", null)
+                return w to h
+            }
+            // tryStartServer already stopped the failed process. Fall back to the MNN/CPU files of
+            // the same model, as loadModel does (startWithFallback), at MNN's own render size.
+            val cpuModelDir = resolveModelDir(File(modelPath), true)
+                ?: run {
+                    emitStatus("failed", "NPU restart for ${w}x$h failed: ${r.error}")
+                    throw java.io.IOException("NPU restart for ${w}x$h failed: ${r.error}")
+                }
+            Log.w(TAG, "[IMG-SIZE] NPU restart failed (${r.error}), falling back to MNN/CPU")
+            emitStatus("fallback", "NPU restart for ${w}x$h failed; switching to CPU (MNN)")
+            val fb = tryStartServer(modelPath, cpuModelDir, "mnn", true)
+            if (!fb.success) {
+                emitStatus("failed", "NPU restart failed: ${r.error}. MNN fallback also failed: ${fb.error}")
+                throw java.io.IOException("NPU restart for ${w}x$h failed: ${r.error}. MNN fallback also failed: ${fb.error}")
+            }
+            emitStatus("ready", null)
+            val mnn = planMnnSize(reqW, reqH)
+            return mnn.width to mnn.height
         }
         return w to h
+    }
+
+    /**
+     * Up-front answer to "what will this request really render?" - no generation, no restart.
+     * Lets UI/callers show the effective size and OpenCL state instead of discovering them after.
+     * With no model loaded the backend is unknown, so the request is echoed unadjusted.
+     */
+    @ReactMethod
+    fun getEffectiveImageSize(params: ReadableMap, promise: Promise) {
+        try {
+            val (reqW, reqH) = requestedSize(params)
+            val backend = currentBackend
+            val plan = if (backend == null) RenderPlan(reqW, reqH, false, "no model loaded") else planRenderSize(params)
+            val requestedOpenCL = params.hasKey("useOpenCL") && params.getBoolean("useOpenCL")
+            safeResolve(promise, Arguments.createMap().apply {
+                putInt("requestedWidth", reqW)
+                putInt("requestedHeight", reqH)
+                putInt("width", plan.width)
+                putInt("height", plan.height)
+                putBoolean("adjusted", plan.adjusted)
+                if (plan.reason != null) putString("reason", plan.reason) else putNull("reason")
+                if (backend != null) putString("backend", backend) else putNull("backend")
+                putBoolean("openClRequested", requestedOpenCL)
+                putBoolean(
+                    "useOpenCL",
+                    backend == "mnn" && effectiveUseOpenCL(requestedOpenCL, false, plan.width, plan.height),
+                )
+            })
+        } catch (e: Exception) {
+            safeReject(promise, "SIZE_PLAN_ERROR", "Failed to plan image size: ${e.message}", e)
+        }
     }
 
     private fun buildGenerationBody(
@@ -811,7 +1041,7 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
     ): JSONObject = JSONObject().apply {
         put("prompt", params.getString("prompt") ?: "")
         put("negative_prompt", params.getString("negativePrompt") ?: "")
-        put("steps", (if (params.hasKey("steps")) params.getInt("steps") else 20).coerceIn(1, 100))
+        put("steps", (if (params.hasKey("steps")) params.getInt("steps") else DEFAULT_STEPS).coerceIn(1, 100))
         put("cfg", if (params.hasKey("guidanceScale")) params.getDouble("guidanceScale") else 7.5)
         put("seed", if (params.hasKey("seed")) params.getInt("seed") else (Math.random() * 2147483647).toInt())
         // Clamp dimensions and steps to sane bounds. A corrupt/NaN value marshalled from JS (seen
@@ -838,7 +1068,7 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
         // `forceCpuCompute` still forces it off for the OpenCL-fault retry (see generateImage);
         // the JS toggle also now defaults off (localDreamGenerator / appStore).
         val requestedOpenCL = if (params.hasKey("useOpenCL")) params.getBoolean("useOpenCL") else false
-        val useOpenCL = requestedOpenCL && !forceCpuCompute && reqWidth == 512 && reqHeight == 512
+        val useOpenCL = effectiveUseOpenCL(requestedOpenCL, forceCpuCompute, reqWidth, reqHeight)
         put("use_opencl", useOpenCL)
         put("show_diffusion_process", true)
         put("show_diffusion_stride", if (params.hasKey("previewInterval")) params.getInt("previewInterval") else 2)
@@ -864,7 +1094,7 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
     }
 
     private fun openGenerationConnection(): HttpURLConnection {
-        val url = URL("http://127.0.0.1:$SERVER_PORT/generate")
+        val url = URL("http://127.0.0.1:$serverPort/generate")
         return (url.openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
             doOutput = true
@@ -875,13 +1105,22 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
         }
     }
 
+    private fun previewDir(): File = File(reactApplicationContext.cacheDir, "preview")
+
+    /** Deletes the step previews of the previous / finished generation (called at start and end). */
+    private fun clearPreviewDir() {
+        previewDir().listFiles()?.forEach { f ->
+            if (!f.delete()) Log.w(TAG, "Could not delete preview ${f.name}")
+        }
+    }
+
     private fun savePreviewImage(
         previewBase64: String, step: Int, reqWidth: Int, reqHeight: Int,
     ): String? = try {
-        val previewDir = File(reactApplicationContext.cacheDir, "preview").apply {
+        val previewDir = previewDir().apply {
             if (!exists()) mkdirs()
         }
-        val previewPath = File(previewDir, "preview_step_$step.png").absolutePath
+        val previewPath = File(previewDir, "preview_${generationId}_step_$step.png").absolutePath
         saveServerImageToPng(previewBase64, reqWidth, reqHeight, previewPath)
         previewPath
     } catch (e: Exception) {
@@ -908,7 +1147,7 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
     }
 
     private sealed class SseParseResult {
-        data class Complete(val data: JSONObject) : SseParseResult()
+        data class Complete(val data: JSONObject, val body: JSONObject) : SseParseResult()
         object Cancelled : SseParseResult()
         object NoResult : SseParseResult()
     }
@@ -945,10 +1184,10 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
         }
 
         if (generationCancelled.get()) return SseParseResult.Cancelled
-        return if (completeData != null) SseParseResult.Complete(completeData!!) else SseParseResult.NoResult
+        return if (completeData != null) SseParseResult.Complete(completeData!!, body) else SseParseResult.NoResult
     }
 
-    private fun buildFinalResult(completeData: JSONObject): WritableMap {
+    private fun buildFinalResult(completeData: JSONObject, body: JSONObject, params: ReadableMap): WritableMap {
         val imageBase64 = completeData.getString("image")
         val width = completeData.getInt("width")
         val height = completeData.getInt("height")
@@ -967,26 +1206,14 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
             putString("imagePath", outputPath)
             putInt("width", width)
             putInt("height", height)
+            // What the caller asked for vs what was rendered, and whether OpenCL really ran, so a
+            // silent adjustment (NPU no patch, MNN square, OpenCL off below 512) is visible to JS.
+            val (reqW, reqH) = requestedSize(params)
+            putInt("requestedWidth", reqW)
+            putInt("requestedHeight", reqH)
+            putBoolean("useOpenCL", body.optBoolean("use_opencl", false))
             putInt("seed", seed)
             putDouble("generationTimeMs", generationTimeMs.toDouble())
-        }
-    }
-
-    private fun handleEofException(e: java.io.EOFException, promise: Promise) {
-        if (generationCancelled.get()) {
-            safeReject(promise, "CANCELLED", "Generation cancelled")
-            return
-        }
-        val alive = serverProcess?.isAlive == true
-        Log.e(TAG, "EOFException during generation. Server alive: $alive", e)
-        if (!alive) {
-            isServerReady = false
-            safeReject(promise, "SERVER_CRASHED",
-                "Server process died during generation. Reload the model and try again.\n\n" + crashDiagnostics())
-        } else {
-            safeReject(promise, "CONNECTION_ERROR",
-                "Connection to server was closed unexpectedly. " +
-                "The server may have crashed during inference. Try again.\n\n" + crashDiagnostics())
         }
     }
 
@@ -1003,40 +1230,53 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
 
     @ReactMethod
     fun generateImage(params: ReadableMap, promise: Promise) {
+        // Reset on the bridge thread, in call order: a cancel issued after this call but before the
+        // generation gets serverMutex (e.g. behind a cancel-restart) is still honoured.
+        generationCancelled.set(false)
         coroutineScope.launch(Dispatchers.IO) {
-            if (!isServerReady || serverProcess?.isAlive != true) {
-                safeReject(promise, "SERVER_NOT_READY", "Server is not running. Load a model first.")
-                return@launch
-            }
-            if (!checkServerHealth()) {
-                isServerReady = false
-                safeReject(promise, "SERVER_NOT_READY",
-                    "Server process is not responsive. Try unloading and reloading the model.")
-                return@launch
-            }
+            serverMutex.withLock { generateImageLocked(params, promise) }
+        }
+    }
 
-            generationCancelled.set(false)
+    /** Caller holds serverMutex, so load / unload / restart cannot swap the server mid-generation. */
+    private suspend fun generateImageLocked(params: ReadableMap, promise: Promise) {
+        if (generationCancelled.get()) {
+            safeReject(promise, "CANCELLED", "Generation cancelled")
+            return
+        }
+        if (!isServerReady || serverProcess?.isAlive != true) {
+            safeReject(promise, "SERVER_NOT_READY", "Server is not running. Load a model first.")
+            return
+        }
+        if (!checkServerHealth()) {
+            isServerReady = false
+            safeReject(promise, "SERVER_NOT_READY",
+                "Server process is not responsive. Try unloading and reloading the model.")
+            return
+        }
 
-            try {
-                resolveGenerationResult(runOneGeneration(params, forceCpuCompute = false), promise)
-            } catch (e: java.io.EOFException) {
-                // The server tore down the stream mid-inference. With the request now validated
-                // (dimensions clamped, steps bounded) a genuine EOF is a real server fault, not a
-                // bad-parameter crash we can paper over. Surface it with diagnostics and let the
-                // JS popup show the server's own output — no silent restart/CPU-fallback juggling.
-                if (generationCancelled.get()) {
-                    safeReject(promise, "CANCELLED", "Generation cancelled")
-                    return@launch
-                }
-                isServerReady = false
-                safeReject(promise, "SERVER_CRASHED",
-                    "The image server closed the stream during inference. " +
-                    "Reload the model and try again.\n\n" + crashDiagnostics())
-            } catch (e: Exception) {
-                handleGeneralException(e, promise)
-            } finally {
-                activeGenerationConnection = null
+        generationId = System.currentTimeMillis().toString(36) + "_" + java.util.UUID.randomUUID().toString().take(8)
+        clearPreviewDir()
+        try {
+            resolveGenerationResult(runOneGeneration(params, forceCpuCompute = false), params, promise)
+        } catch (e: java.io.EOFException) {
+            // The server tore down the stream mid-inference. With the request now validated
+            // (dimensions clamped, steps bounded) a genuine EOF is a real server fault, not a
+            // bad-parameter crash we can paper over. Surface it with diagnostics and let the
+            // JS popup show the server's own output - no silent restart/CPU-fallback juggling.
+            if (generationCancelled.get()) {
+                safeReject(promise, "CANCELLED", "Generation cancelled")
+                return
             }
+            isServerReady = false
+            safeReject(promise, "SERVER_CRASHED",
+                "The image server closed the stream during inference. " +
+                "Reload the model and try again.\n\n" + crashDiagnostics())
+        } catch (e: Exception) {
+            handleGeneralException(e, promise)
+        } finally {
+            activeGenerationConnection = null
+            clearPreviewDir()
         }
     }
 
@@ -1054,6 +1294,9 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
 
             connection = openGenerationConnection()
             activeGenerationConnection = connection
+            // Checked AFTER publishing the connection: a cancel either sees it (and disconnects) or
+            // set the flag before this read, so the request is never sent after a cancel.
+            if (generationCancelled.get()) return SseParseResult.Cancelled
             OutputStreamWriter(connection.outputStream).use { it.write(body.toString()); it.flush() }
 
             val responseCode = connection.responseCode
@@ -1070,9 +1313,9 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    private fun resolveGenerationResult(result: SseParseResult, promise: Promise) {
+    private fun resolveGenerationResult(result: SseParseResult, params: ReadableMap, promise: Promise) {
         when (result) {
-            is SseParseResult.Complete -> safeResolve(promise, buildFinalResult(result.data))
+            is SseParseResult.Complete -> safeResolve(promise, buildFinalResult(result.data, result.body, params))
             is SseParseResult.Cancelled -> safeReject(promise, "CANCELLED", "Generation cancelled")
             is SseParseResult.NoResult -> safeReject(promise, "NO_RESULT", "Server did not return a complete event")
         }
@@ -1163,7 +1406,7 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
      */
     @ReactMethod
     fun getServerPort(promise: Promise) {
-        safeResolve(promise, SERVER_PORT)
+        safeResolve(promise, serverPort)
     }
 
     /**
@@ -1184,6 +1427,19 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
         safeResolve(promise, soc)
     }
 
+    /** Rejects (CACHE_ERROR) unless [modelPath] resolves inside filesDir. canonicalPath can throw
+     *  IOException, so it runs inside the try instead of escaping the bridge call. */
+    private fun isInsideAppFiles(modelPath: String, promise: Promise): Boolean {
+        val inside = try {
+            isPathInside(File(modelPath).canonicalPath, reactApplicationContext.filesDir.canonicalPath)
+        } catch (e: IOException) {
+            safeReject(promise, "CACHE_ERROR", "Invalid model path: ${e.message}", e)
+            return false
+        }
+        if (!inside) safeReject(promise, "CACHE_ERROR", "Model path is outside the app directory")
+        return inside
+    }
+
     /**
      * Clear OpenCL kernel cache files (.mnnc) from a model directory.
      * Forces MNN to retune OpenCL kernels on the next generation,
@@ -1191,12 +1447,7 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
      */
     @ReactMethod
     fun clearOpenCLCache(modelPath: String, promise: Promise) {
-        val appFilesDir = reactApplicationContext.filesDir.canonicalPath
-        val canonical = File(modelPath).canonicalPath
-        if (!canonical.startsWith(appFilesDir)) {
-            safeReject(promise, "CACHE_ERROR", "Model path is outside the app directory")
-            return
-        }
+        if (!isInsideAppFiles(modelPath, promise)) return
         coroutineScope.launch(Dispatchers.IO) {
             try {
                 val modelDir = File(modelPath)
@@ -1227,12 +1478,7 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
      */
     @ReactMethod
     fun hasOpenCLCache(modelPath: String, promise: Promise) {
-        val appFilesDir = reactApplicationContext.filesDir.canonicalPath
-        val canonical = File(modelPath).canonicalPath
-        if (!canonical.startsWith(appFilesDir)) {
-            safeReject(promise, "CACHE_ERROR", "Model path is outside the app directory")
-            return
-        }
+        if (!isInsideAppFiles(modelPath, promise)) return
         coroutineScope.launch(Dispatchers.IO) {
             try {
                 val modelDir = File(modelPath)

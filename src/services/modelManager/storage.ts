@@ -10,6 +10,7 @@ import { collapseDuplicateFileRows, collapseDuplicateImageRows } from './collaps
 import { reconcilePrimaryPaths, resolveStoredPath } from './reconcileStoredPaths';
 import { useAppStore } from '../../stores';
 import { isLiteRTFileName } from '../../utils/modelHelpers';
+import { withModelRegistryLock } from './registryLock';
 
 // Re-exported because this module was the published home of these helpers before they were extracted
 // into the one place both registries share.
@@ -318,12 +319,14 @@ export async function persistDownloadedModel(
   model: DownloadedModel,
   modelsDir: string,
 ): Promise<void> {
-  const models = await loadDownloadedModels(modelsDir);
-  const existingIndex = models.findIndex(m => m.id === model.id);
-  if (existingIndex >= 0) {
-    models[existingIndex] = model;
-  } else {
-    models.push(model);
-  }
-  await saveModelsList(models);
+  await withModelRegistryLock(async () => {
+    const models = await loadDownloadedModels(modelsDir);
+    const existingIndex = models.findIndex(m => m.id === model.id);
+    if (existingIndex >= 0) {
+      models[existingIndex] = model;
+    } else {
+      models.push(model);
+    }
+    await saveModelsList(models);
+  });
 }

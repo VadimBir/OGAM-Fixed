@@ -95,14 +95,14 @@ describe('buildModelParams — a quantized KV cache always gets flash attention'
 
 describe('estimateSdCppMemory (stable-diffusion.cpp)', () => {
   const base = { fileSizeBytes: 2.13e9, family: 'sd1', width: 512, height: 512, flashAttn: true, vaeTiling: true };
-  it('q4_0 shrinks only the convertible share; convs + VAE keep the file precision', () => {
+  it('q4_0 shrinks only the linear share; every conv (UNet + VAE) stays f16', () => {
     const f16 = estimateSdCppMemory({ ...base, weightType: 'auto' });
     const q4 = estimateSdCppMemory({ ...base, weightType: 'q4_0' });
     const q8 = estimateSdCppMemory({ ...base, weightType: 'q8_0' });
     expect(f16.sourceBytesPerParam).toBeCloseTo(2, 1);
     expect(q8.weightsMB).toBeLessThan(f16.weightsMB);
     expect(q4.weightsMB).toBeLessThan(q8.weightsMB);
-    // conv (45% of UNet) + VAE stay fp16 → q4 weights stay well above a naive 0.56/2 scaling.
+    // convs (68.8% of the SD1 UNet) + VAE stay f16 -> q4 weights stay well above a naive 0.56/2 scaling.
     expect(q4.weightsMB).toBeGreaterThan(f16.weightsMB * 0.5);
   });
   it('never "quantizes up": a q8 file stays at its own size under q8_0', () => {
@@ -123,9 +123,25 @@ describe('estimateSdCppMemory (stable-diffusion.cpp)', () => {
     const noFa = estimateSdCppMemory({ ...base, flashAttn: false });
     expect(noFa.unetComputeMB - fa.unetComputeMB).toBe(512); // 4096² x 8 heads x 4 B
   });
-  it('a 1 GB sd1 file at 512² (q8-sized, FA + tiling) is ~1.7 GB, not the old 2.5x = 2.5 GB', () => {
+  it('a 1 GB sd1 file at 512² (FA + tiling) is ~2.4 GB: convs are f16 whatever the file type', () => {
     const est = estimateSdCppMemory({ ...base, fileSizeBytes: 1e9 });
-    expect(est.totalMB).toBeGreaterThan(1600);
-    expect(est.totalMB).toBeLessThan(1800);
+    expect(est.totalMB).toBeGreaterThan(2300);
+    expect(est.totalMB).toBeLessThan(2600);
+  });
+  it('sd1 f16 file, auto: convs 2 B, linear + embeddings at the file type (~2035 MiB, no load buffers)', () => {
+    const est = estimateSdCppMemory({ ...base, weightType: 'auto' });
+    expect(est.weightsMB).toBeGreaterThan(2000);
+    expect(est.weightsMB).toBeLessThan(2100);
+    expect(est.loadBufferMB).toBe(0);
+  });
+  it('a quant override adds threads x 75 MiB of load buffers; embeddings keep the file type', () => {
+    const q4t4 = estimateSdCppMemory({ ...base, weightType: 'q4_0', threads: 4 });
+    const q4t8 = estimateSdCppMemory({ ...base, weightType: 'q4_0', threads: 8 });
+    expect(q4t4.loadBufferMB).toBe(300);
+    expect(q4t8.loadBufferMB).toBe(600);
+    expect(q4t8.totalMB).toBeGreaterThan(q4t4.totalMB);
+    // 38.0 M embedding params stay 2 B (file f16): q4 weights = (353 M linear x 0.5625) + 76 + 1184 + 168 MB.
+    expect(q4t4.weightsMB).toBeGreaterThan(1540);
+    expect(q4t4.weightsMB).toBeLessThan(1570);
   });
 });

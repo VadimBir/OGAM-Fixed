@@ -40,6 +40,19 @@ function getToolIcon(toolName?: string): string {
   }
 }
 
+/**
+ * A tool result with status 'error' reaches the UI as the model-facing failure text built by
+ * toolResultModelContent (`Tool "<name>" failed (<category>): ...`); a user cancel carries
+ * imageToolFailureMessage's `generate_image cancelled:` inside it. The message has no status field,
+ * so the label reads the failure from that text.
+ */
+function generateImageLabel(content?: string): string {
+  if (!content?.startsWith('Tool "generate_image" failed (')) return 'Generated image';
+  return content.includes('generate_image cancelled:')
+    ? 'Image generation cancelled'
+    : 'Image generation failed';
+}
+
 function getToolLabel(toolName?: string, content?: string): string {
   switch (toolName) {
     case 'web_search': {
@@ -62,7 +75,7 @@ function getToolLabel(toolName?: string, content?: string): string {
     case 'model_fallback':
       return 'Model changed';
     case 'generate_image':
-      return 'Generated image';
+      return generateImageLabel(content);
     default:
       return toolName || 'Tool result';
   }

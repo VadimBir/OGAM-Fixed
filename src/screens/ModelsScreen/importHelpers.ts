@@ -3,6 +3,7 @@ import { modelManager } from '../../services';
 import { showAlert, AlertState } from '../../components/CustomAlert';
 import { DownloadedModel } from '../../types';
 import { isLiteRTFileName } from '../../utils/modelHelpers';
+import { isMMProjFile } from '../../services/mmproj';
 
 export type GgufFileRef = { uri: string; name: string; size: number };
 
@@ -12,13 +13,11 @@ export type GgufImportDeps = {
   addDownloadedModel: (model: DownloadedModel) => void;
 };
 
+// The one projector rule (services/mmproj.ts), so a picked file is classified exactly as a
+// downloaded one. The local copy matched `clip` as a substring.
 export function isMmProj(name: string): boolean {
   const lower = name.toLowerCase();
-  return (
-    lower.includes('mmproj') ||
-    lower.includes('projector') ||
-    (lower.includes('clip') && lower.endsWith('.gguf'))
-  );
+  return lower.includes('mmproj') || lower.includes('projector') || isMMProjFile(lower);
 }
 
 export function classifyGgufPair(

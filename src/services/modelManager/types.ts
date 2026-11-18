@@ -21,6 +21,8 @@ export type BackgroundDownloadContext =
       file: ModelFile;
       localPath: string;
       mmProjLocalPath: string | null;
+      /** A file was already at localPath when this download began: a cancel must not delete it. */
+      mainPreExisted?: boolean;
       removeProgressListener: () => void;
       mmProjDownloadId?: string;
       mmProjCompleted: boolean;

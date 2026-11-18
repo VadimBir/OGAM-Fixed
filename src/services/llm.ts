@@ -12,9 +12,9 @@ import {
   buildCompletionParams, buildThinkingCompletionParams, supportsNativeThinking,
   getGpuLayersForDevice, BYTES_PER_GB,
   validateModelFile, checkMemoryForModel, safeCompletion, resolveSafeContext,
-  describeGpuFallback, isTruncatedResult,
+  describeGpuFallback, isTruncatedResult, modelMaxContextFromMetadata,
 } from './llmHelpers';
-import { awaitMemoryReclaim, effectiveAvailableMB } from './memoryBudget';
+import { awaitMemoryReclaim, effectiveAvailableMB, preloadSafetyMarginMB } from './memoryBudget';
 import { modelResidencyManager } from './modelResidency';
 import { hardwareService } from './hardware';
 import { formatLlamaMessages, buildOAIMessages } from './llmMessages';
@@ -76,32 +76,50 @@ class LLMService {
     const effectiveNThreads = settings.nThreads === 0 ? recommendedThreads : settings.nThreads;
     const speculativeDecoding = await resolveSpeculative(modelPath, settings.speculativeDecoding);
     const fileSize = (await statFile(modelPath))?.size ?? 0;
-    // Model size + total RAM gate the mmap-off (repack speed) path: disabling mmap loads the
-    // whole model into non-reclaimable RAM and OOM-kills the app for all but small models.
-    const deviceTotalMemoryGB = hardwareService.getTotalMemoryGB();
-    const params = buildModelParams(modelPath, { ...settings, nThreads: effectiveNThreads, speculativeDecoding, modelFileSizeBytes: fileSize, deviceTotalMemoryGB });
+    // Model size + LIVE free RAM gate the mmap-off (repack speed) path: disabling mmap loads the
+    // whole model into non-reclaimable anonymous RAM, so it is allowed only for a model at most
+    // half of live free RAM after the live margin (shouldDisableMmap). Unknown → mmap stays on.
+    let liveAvailableMB: number | undefined;
+    try {
+      const mem = await hardwareService.getAppMemoryUsage();
+      liveAvailableMB = mem ? mem.available / (1024 * 1024) : undefined;
+    } catch {
+      liveAvailableMB = undefined;
+    }
+    let modelMaxContext: number | null = null;
+    try {
+      modelMaxContext = modelMaxContextFromMetadata(await loadLlamaModelInfo(modelPath) as Record<string, unknown>);
+    } catch (e) {
+      logger.warn('[LLM] Could not read trained context; using requested context', e);
+    }
+    const params = buildModelParams(modelPath, { ...settings, nThreads: effectiveNThreads, speculativeDecoding, modelFileSizeBytes: fileSize, liveAvailableMB, modelMaxContext });
+    if (modelMaxContext && (settings.contextLength || 0) > modelMaxContext) {
+      logger.log(`[LLM] Context clamped ${settings.contextLength} -> ${modelMaxContext} (model trained context)`);
+    }
     logger.log(`[LLM] Resolved params: threads=${params.nThreads}, batch=${params.nBatch}, ctx=${params.ctxLen}, gpuLayers=${params.nGpuLayers}, mmap=${(params.baseParams as { use_mmap?: boolean }).use_mmap}`);
     // Use the EFFECTIVE cache type, not the raw setting: OpenCL/HTP coerce the KV cache
     // to f16 (see buildModelParams), so keying off settings.cacheType alone would let the
     // guard use the cheaper quantized estimate and approve a context that then OOMs.
     const quantizedCache = !params.usesF16Cache;
-    // This pre-load check can credit reclaimable pages for clean mmap-backed GGUF weights.
-    // The residency manager independently gates dirty/accelerator loads on live RAM.
+    // Android: the gate reads LIVE available RAM (no reclaim credit) and keeps the live safety
+    // margin free (memoryBudget owns both numbers). iOS: raw reading, no extra margin (unchanged).
     // Policy comes from the residency manager (the authoritative owner).
+    const policy = modelResidencyManager.getLoadPolicy();
+    const safetyMarginMB = preloadSafetyMarginMB({ platform: Platform.OS, policy });
     const getMem = async (): Promise<{ available: number; total: number; used: number }> => {
       const raw = await hardwareService.getAppMemoryUsage();
       const availableMB = effectiveAvailableMB(raw.available / (1024 * 1024), raw.total / (1024 * 1024), {
         platform: Platform.OS,
-        policy: modelResidencyManager.getLoadPolicy(),
+        policy,
       });
       return { ...raw, available: availableMB * 1024 * 1024 };
     };
     const archBytes = await this.readArchBytes(modelPath, params, fileSize);
-    let memCheck = await checkMemoryForModel({ modelFileSize: fileSize, contextLength: params.ctxLen, getAvailableMemory: getMem, quantizedCache, archBytes });
+    let memCheck = await checkMemoryForModel({ modelFileSize: fileSize, contextLength: params.ctxLen, getAvailableMemory: getMem, quantizedCache, archBytes, safetyMarginMB });
     if (!memCheck.safe) {
       // Keep the selected context. A failed estimate asks for Load Anyway; an explicit
       // override passes the selected value to native init even when memory is tight.
-      const decision = await resolveSafeContext({ fileSize, requestedCtx: params.ctxLen, quantizedCache, override, getAvailableMemory: getMem, archBytes });
+      const decision = await resolveSafeContext({ fileSize, requestedCtx: params.ctxLen, quantizedCache, override, getAvailableMemory: getMem, archBytes, safetyMarginMB });
       memCheck = decision.memCheck;
     }
     logger.log(`[LLM] Memory check: estimatedMB=${memCheck.estimatedMB.toFixed(0)}, availableMB=${memCheck.availableMB.toFixed(0)}, safe=${memCheck.safe}, ctx=${params.ctxLen}`);
@@ -364,10 +382,10 @@ class LLMService {
     this.activeCompletionPromise = completionWork.then(() => { }, () => { });
     try { return await completionWork; } finally { this.isGenerating = false; this.activeCompletionPromise = null; }
   }
-  async generateResponseWithTools(messages: Message[], options: { tools: any[]; onStream?: StreamCallback; onComplete?: CompleteCallback }): Promise<{ fullResponse: string; toolCalls: ToolCall[]; interrupted?: boolean }> {
+  async generateResponseWithTools(messages: Message[], options: { tools: any[]; onStream?: StreamCallback; onComplete?: CompleteCallback; disableThinking?: boolean }): Promise<{ fullResponse: string; toolCalls: ToolCall[]; interrupted?: boolean }> {
     const work = generateWithToolsImpl({
       context: this.context, isGenerating: this.isGenerating,
-      isThinkingEnabled: this.isThinkingEnabled(),
+      isThinkingEnabled: this.isThinkingEnabled() && !options.disableThinking,
       isGemma4Model: this.isGemma4Model(),
       disableCtxShift: this.shouldDisableCtxShift(),
       manageContextWindow: (msgs, extra?) => this.manageContextWindow(msgs, extra),
@@ -377,6 +395,7 @@ class LLMService {
       setIsGenerating: (v) => { this.isGenerating = v; },
     }, messages, {
       tools: options.tools,
+      disableThinking: options.disableThinking,
       onStream: options.onStream,
       onComplete: options.onComplete
         ? ((onComplete) => (fullResponse: string, reasoningContent: string) => onComplete({ content: fullResponse, reasoningContent }))(options.onComplete) : undefined,

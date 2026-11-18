@@ -1,5 +1,7 @@
 import RNFS from 'react-native-fs';
-import { validateModelFile, checkMemoryForModel, safeCompletion } from '../../../src/services/llmSafetyChecks';
+import { validateModelFile, checkMemoryForModel, resolveSafeContext, safeCompletion } from '../../../src/services/llmSafetyChecks';
+import { effectiveAvailableMB, preloadSafetyMarginMB } from '../../../src/services/memoryBudget';
+import { OverridableMemoryError } from '../../../src/utils/modelLoadErrors';
 import { defaultNativeFileSystemBoundary } from '../../harness/nativeFileSystem';
 
 jest.mock('react-native-fs', () => {
@@ -130,6 +132,52 @@ describe('checkMemoryForModel', () => {
     expect(quant.estimatedMB).toBeLessThan(f16.estimatedMB);
     expect(f16.safe).toBe(false);
     expect(quant.safe).toBe(true);
+  });
+});
+
+describe('Android live gate arithmetic — 12GB phone with 3GB free', () => {
+  const MB = 1024 * 1024;
+  const GB = 1024 * MB;
+  // Exactly what llm.ts feeds the gate on Android: the live reading through effectiveAvailableMB
+  // (no reclaim credit) plus the balanced live margin (1024MB) from preloadSafetyMarginMB.
+  const availMB = effectiveAvailableMB(3072, 12288, { platform: 'android' });
+  const marginMB = preloadSafetyMarginMB({ platform: 'android' });
+  const getMem = async () => ({ available: availMB * MB, total: 12 * GB });
+  // Fixed KV + compute so the numbers are exact: 256MB + 128MB.
+  const archBytes = { kvBytes: 256 * MB, computeBytes: 128 * MB };
+
+  it('sees 3072MB live and keeps a 1024MB margin', () => {
+    expect(availMB).toBe(3072);
+    expect(marginMB).toBe(1024);
+  });
+
+  it('admits a 1GB model: 1229 + 384 = 1613MB, + 200 + 1024 = 2837MB < 3072MB', async () => {
+    const r = await checkMemoryForModel({ modelFileSize: 1 * GB, contextLength: 4096, getAvailableMemory: getMem, archBytes, safetyMarginMB: marginMB });
+    expect(Math.round(r.estimatedMB)).toBe(1613);
+    expect(r.safe).toBe(true);
+  });
+
+  it('refuses a 2GB model: 2458 + 384 = 2842MB, + 200 + 1024 = 4066MB > 3072MB, and states both in MB', async () => {
+    const r = await checkMemoryForModel({ modelFileSize: 2 * GB, contextLength: 4096, getAvailableMemory: getMem, archBytes, safetyMarginMB: marginMB });
+    expect(r.safe).toBe(false);
+    expect(r.reason).toContain('needs ~2842MB + 1024MB safety margin but only 3072MB available');
+  });
+
+  it('the same 2GB model would pass without the margin (2842 + 200 = 3042 < 3072) - the margin is the deciding term', async () => {
+    const r = await checkMemoryForModel({ modelFileSize: 2 * GB, contextLength: 4096, getAvailableMemory: getMem, archBytes });
+    expect(r.safe).toBe(true);
+  });
+
+  it('resolveSafeContext throws an OVERRIDABLE refusal with needed vs available MB; Load Anyway passes', async () => {
+    const args = { fileSize: 2 * GB, requestedCtx: 4096, quantizedCache: true, getAvailableMemory: getMem, archBytes, safetyMarginMB: marginMB };
+    await expect(resolveSafeContext(args)).rejects.toBeInstanceOf(OverridableMemoryError);
+    await expect(resolveSafeContext(args)).rejects.toThrow('it needs ~2842MB + 1024MB safety margin but only 3072MB is available');
+    await expect(resolveSafeContext({ ...args, override: true })).resolves.toMatchObject({ ctxLen: 4096 });
+  });
+
+  it('iOS wording is unchanged when no margin applies', async () => {
+    const r = await checkMemoryForModel({ modelFileSize: 2 * GB, contextLength: 4096, getAvailableMemory: async () => ({ available: 1000 * MB, total: 12 * GB }), archBytes });
+    expect(r.reason).toContain('needs ~2842MB but only 1000MB available');
   });
 });
 

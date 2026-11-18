@@ -2,7 +2,10 @@ import React, { useState } from 'react';
 import { View, Text, Image, TouchableOpacity, Clipboard } from 'react-native';
 import type { StyleProp, ViewStyle } from 'react-native';
 import { useTheme, useThemedStyles } from '../../theme';
-import { useActiveCharacterAvatarUri } from '../../hooks/useActiveCharacterAvatar';
+import {
+  useActiveCharacterAvatarUri,
+  usePersonaAvatarUri,
+} from '../../hooks/useActiveCharacterAvatar';
 import { callHook, HOOKS } from '../../bootstrap/hookRegistry';
 import Icon from 'react-native-vector-icons/Feather';
 import {
@@ -400,6 +403,25 @@ const AssistantAvatar: React.FC<{
   );
 };
 
+// Small persona avatar shown to the RIGHT of the user's own message (the mirror of AssistantAvatar).
+// Uses the user persona's avatar (Settings > Persona), falling back to the same "user" glyph the
+// persona editor shows when no avatar is set.
+const UserAvatar: React.FC<{
+  styles: ReturnType<typeof createStyles>;
+  colors: ReturnType<typeof useTheme>['colors'];
+}> = ({ styles, colors }) => {
+  const avatarUri = usePersonaAvatarUri();
+  return (
+    <View style={styles.userAvatar} testID="user-avatar">
+      {avatarUri ? (
+        <Image source={{ uri: avatarUri }} style={styles.assistantAvatarImg} />
+      ) : (
+        <Icon name="user" size={15} color={colors.textMuted} />
+      )}
+    </View>
+  );
+};
+
 export const ChatMessage: React.FC<ChatMessageProps> = ({
   message,
   supportingContext,
@@ -598,7 +620,11 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
   return (
     <>
       {isUser ? (
-        animatedBody
+        // User message: persona-avatar circle on the right, mirroring the assistant row.
+        <View style={styles.userRow}>
+          <View style={styles.assistantRowBody}>{animatedBody}</View>
+          <UserAvatar styles={styles} colors={colors} />
+        </View>
       ) : (
         // Assistant reply: small character-avatar circle on the left (SillyTavern-style).
         <View style={styles.assistantRow}>

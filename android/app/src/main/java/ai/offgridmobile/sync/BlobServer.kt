@@ -83,6 +83,9 @@ class BlobServer(
 
     private fun serve(client: Socket) {
         client.use {
+            // A peer that connects and then goes silent would otherwise pin this thread (and the
+            // half-written destination file) forever: a read blocked 30 s fails the transfer.
+            client.soTimeout = CLIENT_READ_TIMEOUT_MS
             val input = client.getInputStream().buffered()
             val output = BufferedOutputStream(client.getOutputStream())
             val request = readHead(input) ?: return respond(output, "404 Not Found")
@@ -222,6 +225,7 @@ class BlobServer(
     }
 
     private companion object {
+        const val CLIENT_READ_TIMEOUT_MS = 30_000
         const val MAX_HEADERS = 32
         const val MAX_LINE = 4096
         const val PREFIX = "/blob/"

@@ -1,5 +1,6 @@
 import { modelManager } from './modelManager';
-import { mmProjLocalName } from './modelManager/download';
+import { mmProjLocalName, splitGgufRefusal, ALREADY_DOWNLOADED_PREFIX } from './modelManager/download';
+import logger from '../utils/logger';
 import { useDownloadStore, isActiveStatus } from '../stores/downloadStore';
 import { useAppStore } from '../stores';
 import { activeModelService } from './activeModelService';
@@ -10,6 +11,29 @@ import type { ModelFile, DownloadedModel } from '../types';
  *  before a real native download has been started (which may wait for a concurrency
  *  slot). Reconciled to the real id by download.ts's retryEntry once the start begins. */
 const queuedPlaceholderId = (modelKey: string) => `queued:${modelKey}`;
+
+/**
+ * Fetch only the vision projector of a model whose weights were already installed, then report the
+ * model (with vision when the fetch worked, as text-needing-repair when it did not).
+ */
+function fetchMissingProjector(
+  modelId: string,
+  file: ModelFile,
+  model: DownloadedModel,
+  opts: StartModelDownloadOpts,
+): void {
+  modelManager.repairMmProj(modelId, file, { modelKey: model.id })
+    .then(async () => {
+      const refreshed = (await modelManager.getDownloadedModels()).find(m => m.id === model.id) ?? model;
+      useAppStore.getState().addDownloadedModel(refreshed);
+      opts.onRegistered?.(refreshed);
+    })
+    .catch((error: unknown) => {
+      logger.warn(`[startModelDownload] projector fetch for installed ${model.id} failed: ${error instanceof Error ? error.message : String(error)}`);
+      // Registered as text with the vision gap recorded (mmProjFileName), so Repair Vision is offered.
+      opts.onRegistered?.(model);
+    });
+}
 
 export interface StartModelDownloadOpts {
   /** Select a downloaded user model when the download began without a selection.
@@ -45,6 +69,14 @@ export async function startModelDownload(
     opts.autoSelectIfEmpty === true &&
     useAppStore.getState().activeModelId === null;
   const modelKey = makeModelKey(modelId, file.name);
+  // A split GGUF would fetch part 1 only - a file llama.cpp cannot load. Refuse it up front with a
+  // clear reason instead of a "successful" download that never loads.
+  const refusal = splitGgufRefusal(file);
+  if (refusal) {
+    logger.warn(`[startModelDownload] refused split GGUF ${modelId}/${file.name} (${file.splitPartCount} parts)`);
+    opts.onError?.(new Error(refusal));
+    return;
+  }
   // Duplicate-start guard: a download already active for this logical file (rapid
   // double-tap, race after retry) is a no-op. add() also enforces this; checking
   // up-front avoids the unnecessary native call.
@@ -97,13 +129,21 @@ export async function startModelDownload(
       // "downloaded" from downloadedModels, not a lingering 100% store entry.
       useAppStore.getState().addDownloadedModel(model);
       const app = useAppStore.getState();
-      if (mayAutoSelect && app.activeModelId === null) {
-        const selected =
-          app.downloadedModels.find(item => item.id === app.lastTextModelId) ??
-          app.downloadedModels[0];
-        if (selected) activeModelService.selectTextModel(selected.id);
+      // Select THE MODEL JUST DOWNLOADED when nothing is selected. Picking lastTextModelId (an
+      // older choice) or downloadedModels[0] (whatever sorts first) selected some other model,
+      // so the download the user just waited for was not the one chat used.
+      if (mayAutoSelect && app.activeModelId === null && app.downloadedModels.some(item => item.id === model.id)) {
+        activeModelService.selectTextModel(model.id);
       }
       useDownloadStore.getState().remove(modelKey);
+      // The main file was already installed and complete, only the projector is missing: fetch the
+      // projector ALONE (the repair path) instead of re-downloading - and on cancel deleting - the
+      // installed weights.
+      const projectorMissing = !!file.mmProjFile && !(model.engine === 'llama' && model.mmProjPath);
+      if (String(info.downloadId).startsWith(ALREADY_DOWNLOADED_PREFIX) && projectorMissing && file.mmProjFile?.downloadUrl) {
+        fetchMissingProjector(modelId, file, model, opts);
+        return;
+      }
       opts.onRegistered?.(model);
     }, fail);
   } catch (e) {

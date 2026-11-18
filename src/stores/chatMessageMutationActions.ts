@@ -76,6 +76,37 @@ function updateMessageInConversation(
   };
 }
 
+/**
+ * A compaction summary stands in for messages[0..cutoff]. Editing or removing any of those messages
+ * (or the cutoff itself) leaves it describing a history that no longer exists, and the next turn would
+ * send it beside the changed messages (applyCompactionPrefix). Drop it so the next turn works from the
+ * real history and re-compacts if needed. `firstTouchedIndex` is the lowest index the mutation edits or
+ * removes (-1 = none); indexes are those of `conversation` BEFORE the mutation.
+ */
+export function dropStaleCompaction(
+  conversation: Conversation,
+  firstTouchedIndex: number,
+): Conversation {
+  const cutoffId = conversation.compactionCutoffMessageId;
+  if (!conversation.compactionSummary && !cutoffId) return conversation;
+  const cutoffIndex = cutoffId
+    ? conversation.messages.findIndex(message => message.id === cutoffId)
+    : -1;
+  const stale =
+    cutoffIndex === -1 ||
+    (firstTouchedIndex !== -1 && firstTouchedIndex <= cutoffIndex);
+  if (!stale) return conversation;
+  return {
+    ...conversation,
+    compactionSummary: undefined,
+    compactionCutoffMessageId: undefined,
+  };
+}
+
+function indexOfMessage(conversation: Conversation, messageId: string): number {
+  return conversation.messages.findIndex(message => message.id === messageId);
+}
+
 function mapConversation(
   conversations: Conversation[],
   conversationId: string,
@@ -93,10 +124,17 @@ export function createMessageMutationActions(
     updateMessageContent: (conversationId, messageId, content) => {
       owner.updateConversations(conversations =>
         mapConversation(conversations, conversationId, conversation =>
-          updateMessageInConversation(conversation, messageId, message => ({
-            ...message,
-            content,
-          })),
+          updateMessageInConversation(
+            dropStaleCompaction(
+              conversation,
+              indexOfMessage(conversation, messageId),
+            ),
+            messageId,
+            message => ({
+              ...message,
+              content,
+            }),
+          ),
         ),
       );
       const message = owner
@@ -154,15 +192,22 @@ export function createMessageMutationActions(
     ) => {
       owner.updateConversations(conversations =>
         mapConversation(conversations, conversationId, conversation =>
-          updateMessageInConversation(conversation, messageId, message => ({
-            ...message,
-            content: transcription,
-            attachments: message.attachments?.map(attachment =>
-              attachment.id === attachmentId
-                ? { ...attachment, textContent: transcription }
-                : attachment,
+          updateMessageInConversation(
+            dropStaleCompaction(
+              conversation,
+              indexOfMessage(conversation, messageId),
             ),
-          })),
+            messageId,
+            message => ({
+              ...message,
+              content: transcription,
+              attachments: message.attachments?.map(attachment =>
+                attachment.id === attachmentId
+                  ? { ...attachment, textContent: transcription }
+                  : attachment,
+              ),
+            }),
+          ),
         ),
       );
       const message = owner
@@ -179,7 +224,10 @@ export function createMessageMutationActions(
         .find(message => message.id === messageId);
       owner.updateConversations(conversations =>
         mapConversation(conversations, conversationId, conversation => ({
-          ...conversation,
+          ...dropStaleCompaction(
+            conversation,
+            indexOfMessage(conversation, messageId),
+          ),
           messages: conversation.messages.filter(
             message => message.id !== messageId,
           ),
@@ -203,8 +251,12 @@ export function createMessageMutationActions(
             message => message.id === messageId,
           );
           if (messageIndex === -1) return conversation;
+          const firstRemoved =
+            messageIndex + 1 < conversation.messages.length
+              ? messageIndex + 1
+              : -1;
           return {
-            ...conversation,
+            ...dropStaleCompaction(conversation, firstRemoved),
             messages: conversation.messages.slice(0, messageIndex + 1),
             updatedAt: nextUpdatedAt(conversation.updatedAt),
           };

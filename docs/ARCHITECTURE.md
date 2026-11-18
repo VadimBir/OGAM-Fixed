@@ -35,7 +35,7 @@ Multi-model LLM inference using llama.cpp compiled for ARM64 Android via llama.r
 - **Custom system prompts** via project-based conversation contexts
 - **KV cache management** with manual clear capability for memory optimization
 - **Configurable KV cache type** — Choose between f16 (default), q8_0, and q4_0 quantization for memory/quality tradeoffs
-- **Flash attention** — User-configurable toggle for faster inference (automatically disabled when GPU layers > 0 on Android due to llama.cpp compatibility)
+- **Flash attention** — Android: always on (flash_attn_type 'on' via resolveFlashAttnType, toggle shown disabled). iOS: user-configurable toggle
 - **Markdown rendering** — Rich text output with syntax highlighting, lists, and formatting
 - **llama.cpp parameter constraints** — Automatic enforcement of GPU/flash attention/KV cache compatibility to prevent native crashes (SIGSEGV, SIGABRT)
 
@@ -358,7 +358,7 @@ autoDetectMethod: 'pattern' | 'llm'
 - Batch size (32-512) - Processing chunk size
 - GPU layers (0-99) - GPU offload configuration
 - Enable GPU (on/off) - Toggle GPU acceleration
-- Flash attention (on/off) - Faster inference (auto-disabled with GPU layers > 0 on Android)
+- Flash attention (on/off) - Faster inference (Android: always on, shown disabled; iOS: user toggle)
 - KV cache type (f16/q8_0/q4_0) - Cache quantization for memory/quality tradeoff
 - Enabled tools - Configure which tools are available for tool-calling models
 

@@ -124,9 +124,10 @@ class LiteRTModule(private val reactContext: ReactApplicationContext) :
                 // grows with the budget, and an over-budget request aborts engine creation
                 // (SIGABRT in nativeCreateEngine) or segfaults during inference. Degrading
                 // to a smaller context keeps the app working instead of crashing.
-                configuredMaxTokens = resolveSafeMaxTokens(modelPath, maxNumTokens)
-                // Unload any existing engine first
+                // Unload any existing engine FIRST: measuring free RAM while the previous model is
+                // still resident under-counts it and clamps the new context needlessly.
                 cleanupEngine()
+                configuredMaxTokens = resolveSafeMaxTokens(modelPath, maxNumTokens)
 
                 val requestedBackend = parseBackend(backendStr)
                 Log.i(TAG, "loadModel — attempting backend chain from $backendStr")
@@ -757,7 +758,19 @@ class LiteRTModule(private val reactContext: ReactApplicationContext) :
                         val deferred = CompletableDeferred<String>()
                         pendingToolCalls[callId] = deferred
 
-                        val eventJson = """{"id":"$callId","name":"$toolName","arguments":$argsJson}"""
+                        // Built with Gson, not a string template: a quote/backslash in the tool name
+                        // or non-JSON args from the SDK made the event unparseable in JS.
+                        val argsElement = try {
+                            JsonParser.parseString(argsJson.ifBlank { "{}" })
+                        } catch (e: com.google.gson.JsonParseException) {
+                            Log.w(TAG, "tool_call — args are not JSON, sending {}: ${e.message}")
+                            com.google.gson.JsonObject()
+                        }
+                        val eventJson = com.google.gson.JsonObject().apply {
+                            addProperty("id", callId)
+                            addProperty("name", toolName)
+                            add("arguments", argsElement)
+                        }.toString()
                         debugLog("tool_call — callId=$callId name=$toolName argsLen=${argsJson.length}")
                         sendEvent(EVENT_TOOL_CALL, eventJson)
 
@@ -799,10 +812,17 @@ class LiteRTModule(private val reactContext: ReactApplicationContext) :
         sendEvent(EVENT_DEBUG_LOG, msg)
     }
 
-    override fun onCatalystInstanceDestroy() {
-        Log.i(TAG, "onCatalystInstanceDestroy — cleaning up")
+    /** React teardown. RN 0.83 calls invalidate() (ModuleHolder / TurboModuleManager) and never the
+     *  deprecated onCatalystInstanceDestroy, so the engine (model weights) is released here. */
+    override fun invalidate() {
+        Log.i(TAG, "invalidate — cleaning up")
         scope.cancel()
         runBlocking { cleanupEngine() }
-        super.onCatalystInstanceDestroy()
+        super.invalidate()
+    }
+
+    @Deprecated("Use invalidate()", ReplaceWith("invalidate()"))
+    override fun onCatalystInstanceDestroy() {
+        invalidate()
     }
 }

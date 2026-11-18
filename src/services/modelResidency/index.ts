@@ -9,7 +9,7 @@
  *
  * See docs/design/MODEL_ROUTING.md §5.1–5.2.
  */
-import { AppState } from 'react-native';
+import { AppState, Platform } from 'react-native';
 import { hardwareService } from '../hardware';
 import logger from '../../utils/logger';
 import {
@@ -17,7 +17,13 @@ import {
   computeBudgetMB,
   Resident,
 } from './policy';
-import { LoadPolicy } from '../memoryBudget';
+import { LoadPolicy, liveRamMarginMB } from '../memoryBudget';
+import {
+  TrimSeverity,
+  classifyTrim,
+  trimReleaseTiers,
+  subscribeToAndroidTrim,
+} from './memoryPressure';
 import {
   formatMakeRoomForLine,
   formatOverrideForcingLine,
@@ -75,6 +81,19 @@ class ModelResidencyManager {
     } catch {
       /* non-RN env (some tests) - no AppState */
     }
+    // Android has no AppState 'memoryWarning'; DeviceMemoryModule forwards onTrimMemory /
+    // onLowMemory instead. Same single owner of the pressure response.
+    try {
+      subscribeToAndroidTrim(p => {
+        const severity = classifyTrim(p);
+        logger.log(
+          `[ModelResidency] trim level=${p.level} source=${p.source ?? 'trim'} lowMemory=${!!p.lowMemory} availMB=${p.availMB ?? '?'} → ${severity}`,
+        );
+        this.handleTrimMemory(severity).catch(() => {});
+      });
+    } catch {
+      /* native module absent (tests / iOS) */
+    }
   }
 
   /** Residents as the pure policy sees them, with a live `canEvict()===false`
@@ -115,6 +134,71 @@ class ModelResidencyManager {
           );
         this.residents.delete(key);
       }
+    });
+  }
+
+  /**
+   * Android trim response (onTrimMemory / onLowMemory, see ./memoryPressure). Releases idle
+   * residents tier by tier: sidecars, then the image model, then - critical only - the text
+   * model. Skips pinned residents, an owner veto (canEvict), and a resident whose generation
+   * is in flight (isBusy). A rejected native unload keeps the resident counted. Returns the
+   * released keys. Runs under the FIFO lock like every load/unload.
+   */
+  async handleTrimMemory(severity: TrimSeverity): Promise<string[]> {
+    const tiers = trimReleaseTiers(severity);
+    if (tiers.length === 0) return [];
+    return this.runExclusive(`trim:${severity}`, async () => {
+      const released: string[] = [];
+      for (const tier of tiers) {
+        for (const [key, r] of [...this.residents.entries()]) {
+          if (r.pinned || !tier.includes(r.type)) continue;
+          if (r.canEvict && !r.canEvict()) continue;
+          const busy = r.isBusy ? await Promise.resolve(r.isBusy()).catch(() => true) : false;
+          if (busy) {
+            logger.log(`[ModelResidency] trim ${severity}: ${key} busy (generation in flight) - kept`);
+            continue;
+          }
+          try {
+            await r.unload();
+            this.residents.delete(key);
+            released.push(key);
+            logger.log(`[ModelResidency] trim ${severity}: released idle ${r.type} (${key})`);
+          } catch (err) {
+            logger.log(`[ModelResidency] trim ${severity}: unload ${key} failed:`, err);
+          }
+        }
+      }
+      return released;
+    });
+  }
+
+  /**
+   * After an image generation finishes (Android only): release the idle image model when
+   * live free RAM is below the live safety margin, so the next text load or the OS does not
+   * have to fight the multi-GB dirty image working set. Returns true when released.
+   */
+  async releaseIdleImageIfMemoryLow(): Promise<boolean> {
+    if (Platform.OS !== 'android') return false;
+    if (!this.residents.has('image')) return false;
+    await hardwareService.refreshMemoryInfo().catch(() => {});
+    const availMB = Math.round(hardwareService.getAvailableMemoryGB() * 1024);
+    const marginMB = liveRamMarginMB(this.loadPolicy);
+    if (availMB >= marginMB) return false;
+    return this.runExclusive('release:image-low-memory', async () => {
+      const r = this.residents.get('image');
+      if (!r || r.pinned) return false;
+      if (r.canEvict && !r.canEvict()) return false;
+      const busy = r.isBusy ? await Promise.resolve(r.isBusy()).catch(() => true) : false;
+      if (busy) return false;
+      try {
+        await r.unload();
+      } catch (err) {
+        logger.log('[ModelResidency] post-generation image release failed:', err);
+        return false;
+      }
+      this.residents.delete('image');
+      logger.log(`[ModelResidency] released idle image after generation: availMB=${availMB} < marginMB=${marginMB}`);
+      return true;
     });
   }
 
@@ -166,9 +250,10 @@ class ModelResidencyManager {
 
   getBudgetMB(): number {
     if (this.budgetOverrideMB != null) return this.budgetOverrideMB;
-    // The budget is the device + platform PHYSICAL-RAM cap (a fraction of total RAM).
+    // iOS: the budget is the device + platform PHYSICAL-RAM cap (a fraction of total RAM).
+    // Android: live RAM (liveBudgetMB) - see the Android branch below.
     //
-    // We do NOT min() this with os_proc_available_memory. That metric is the DIRTY
+    // On iOS we do NOT min() this with os_proc_available_memory. That metric is the DIRTY
     // (anonymous) memory headroom before jetsam - but llama.cpp mmaps the GGUF, so a
     // model's weights are CLEAN, file-backed pages that the OS pages in/out freely and
     // that do NOT count against the jetsam limit. Budgeting the full model size against
@@ -180,14 +265,36 @@ class ModelResidencyManager {
       hardwareService.getTotalMemoryGB() * 1024,
       { policy: this.loadPolicy },
     );
+    // Android: live RAM drives the budget for every model (see budgetForSpec).
+    if (Platform.OS === 'android') return this.liveBudgetMB(physicalCapMB);
     return Math.round(Math.max(MIN_BUDGET_MB, physicalCapMB));
   }
 
   /**
+   * Live-RAM budget: real free RAM now + what evicting our own residents would free, minus
+   * the live headroom, capped at the physical ceiling. No small-model floor: at critically
+   * low free RAM even a small load must wait or be overridden.
+   */
+  private liveBudgetMB(physicalCapMB: number): number {
+    const availableMB = hardwareService.getAvailableMemoryGB() * 1024;
+    const residentMB = [...this.residents.values()].reduce(
+      (sum, r) => sum + r.sizeMB,
+      0,
+    );
+    // Aggressive mode holds a smaller headroom (the lenient safeguard). Still non-zero.
+    const headroomMB =
+      this.loadPolicy === 'aggressive'
+        ? AGGRESSIVE_DIRTY_HEADROOM_MB
+        : DIRTY_AVAILABILITY_HEADROOM_MB;
+    const dynamicMB = availableMB + residentMB - headroomMB;
+    return Math.round(Math.max(0, Math.min(physicalCapMB, dynamicMB)));
+  }
+
+  /**
    * Budget for loading a SPECIFIC model, branching on its memory characteristic
-   * (data, not type): mmap-backed GGUF is bounded by physical RAM only; a dirty
-   * (CoreML/ONNX image) model is ALSO bounded by real free RAM (os_proc_available)
-   * + what evicting our own resident models would free, so it never loads into swap.
+   * (data, not type): on iOS mmap-backed GGUF is bounded by physical RAM only; a dirty
+   * (CoreML/ONNX image) model - and on Android every model - is ALSO bounded by real free
+   * RAM + what evicting our own resident models would free, so it never loads into swap.
    */
   private budgetForSpec(spec: ResidentSpec): number {
     if (this.budgetOverrideMB != null) return this.budgetOverrideMB;
@@ -203,32 +310,19 @@ class ModelResidencyManager {
     const dirtyPressure =
       !!spec.dirtyMemory ||
       [...this.residents.values()].some(r => r.dirtyMemory);
-    if (!dirtyPressure) {
+    // Android: EVERY load is live-gated. The physical-RAM-only path admitted an 8GB model at
+    // ~3GB free on a 12GB phone (75% used by other apps); the load filled RAM faster than the
+    // low-memory killer reclaimed it and the app itself was killed. iOS keeps the clean
+    // mmap path below (its gate is unchanged).
+    if (!dirtyPressure && Platform.OS !== 'android') {
       // mmap'd, no dirty pressure: physical RAM is the ceiling (clean, file-backed
       // weights page in even when instantaneous available is low).
       return Math.round(Math.max(MIN_BUDGET_MB, physicalCapMB));
     }
-    // Dirty/accelerator pages cannot rely on hypothetical OS reclamation. In particular,
-    // Android's physical-budget credit can turn 1GB of live available RAM into an 8GB
-    // admission budget while a diffusion model allocates several GB of anonymous memory.
-    // Use the fresh OS reading for dirty loads on both platforms; clean mmap weights above
-    // retain the physical-budget policy.
-    const availableMB = hardwareService.getAvailableMemoryGB() * 1024;
-    const residentMB = [...this.residents.values()].reduce(
-      (sum, r) => sum + r.sizeMB,
-      0,
-    );
-    // Aggressive mode holds a smaller real-free-RAM headroom for dirty loads (the
-    // lenient safeguard) so e.g. a 3GB LiteRT model the balanced guard rejects on a
-    // 12GB phone is allowed through. Still non-zero - never a guaranteed jetsam.
-    const dirtyHeadroomMB =
-      this.loadPolicy === 'aggressive'
-        ? AGGRESSIVE_DIRTY_HEADROOM_MB
-        : DIRTY_AVAILABILITY_HEADROOM_MB;
-    const dynamicMB = availableMB + residentMB - dirtyHeadroomMB;
-    // The small-model floor is valid for clean, pageable weights, not dirty
-    // allocations: at critically low free RAM even a sub-1GB dirty load must wait.
-    return Math.round(Math.max(0, Math.min(physicalCapMB, dynamicMB)));
+    // Dirty/accelerator pages (and every Android load) cannot rely on hypothetical OS
+    // reclamation: use the fresh OS reading. Aggressive mode holds a smaller headroom so
+    // e.g. a 3GB LiteRT model the balanced guard rejects on a 12GB phone is allowed through.
+    return this.liveBudgetMB(physicalCapMB);
   }
 
   getResidents(): Resident[] {
@@ -292,7 +386,7 @@ class ModelResidencyManager {
   async makeRoomFor(
     spec: ResidentSpec,
     opts?: { override?: boolean },
-  ): Promise<{ evicted: string[]; fits: boolean }> {
+  ): Promise<{ evicted: string[]; fits: boolean; neededMB?: number; availableMB?: number }> {
     // Re-read real free RAM so the decision reflects current pressure, not a stale
     // boot-time snapshot (other apps may have grabbed memory since).
     await hardwareService.refreshMemoryInfo().catch(() => {});
@@ -345,7 +439,18 @@ class ModelResidencyManager {
     if ((!plan.fits || dirtyCeilingExceeded) && !override) {
       // Won't fit even after the planned evictions (total budget OR the dirty ceiling) - DON'T
       // evict (otherwise we'd strand the device with nothing). The caller blocks the load (overridable).
-      return { evicted: [], fits: false };
+      // Report needed vs. the room the incoming model would get, so the refusal states both in MB.
+      const keptMB = residents
+        .filter(r => r.key !== spec.key && !plan.evict.some(e => e.key === r.key))
+        .reduce((sum, r) => sum + r.sizeMB, 0);
+      let roomMB = budgetMB - keptMB;
+      if (spec.dirtyMemory) roomMB = Math.min(roomMB, dirtyCeilingMB - keptDirtyMB);
+      return {
+        evicted: [],
+        fits: false,
+        neededMB: Math.round(spec.sizeMB),
+        availableMB: Math.max(0, Math.round(roomMB)),
+      };
     }
     // Override ("Load Anyway"): the user explicitly accepted the risk (this call or
     // earlier this session). planEviction already collected every evictable resident

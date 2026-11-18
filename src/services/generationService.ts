@@ -90,6 +90,8 @@ class GenerationService {
   wasAborted(): boolean { return this.abortRequested; }
   private pendingStop: Promise<void> | null = null;
   private queueProcessor: QueueProcessor | null = null;
+  /** A queued batch has been handed to the processor and its promise has not settled yet. */
+  private queueDispatchInFlight: boolean = false;
   private currentRemoteAbortController: AbortController | null = null;
   private remoteTimeToFirstToken: number | undefined;
   private contextUsage: Pick<GenerationMeta, 'contextPromptTokens' | 'contextWindowTokens' | 'contextEstimate'> | undefined;
@@ -506,13 +508,26 @@ class GenerationService {
     this.processNextInQueue();
   }
 
+  /**
+   * Dispatch the next batch: the head item plus every queued item for the SAME conversation (coalesced
+   * into one turn). Items for other conversations stay queued, in order, for the next drain: merging
+   * them would post their text into the head item's conversation. Without a processor (no ChatScreen
+   * mounted) nothing is taken off the queue; the next setQueueProcessor owner drains it.
+   * One batch at a time: while a batch's processor promise is pending, later triggers (resetState's
+   * timer, an image turn's drainQueue) are deferred to that promise settling, so two batches can never
+   * start concurrently; on settle, whatever is still queued drains if no text turn is running.
+   */
   private processNextInQueue(): void {
     if (this.state.queuedMessages.length === 0 || !this.queueProcessor) return;
-    const all = this.state.queuedMessages;
-    this.state = { ...this.state, queuedMessages: [] };
+    if (this.queueDispatchInFlight) return;
+    const queued = this.state.queuedMessages;
+    const headConversationId = queued[0].conversationId;
+    const all = queued.filter(m => m.conversationId === headConversationId);
+    const rest = queued.filter(m => m.conversationId !== headConversationId);
+    this.state = { ...this.state, queuedMessages: rest };
     this.notifyListeners();
     const combined: QueuedMessage = all.length === 1 ? all[0] : {
-      id: all[0].id, conversationId: all[0].conversationId,
+      id: all[0].id, conversationId: headConversationId,
       text: all.map(m => m.text).join('\n\n'),
       attachments: all.flatMap(m => m.attachments || []),
       messageText: all.map(m => m.messageText).join('\n\n'),
@@ -521,7 +536,15 @@ class GenerationService {
       imageMode: all.some(m => m.imageMode === 'force') ? 'force' : all[0].imageMode,
       assistantEnabled: all.some(m => m.assistantEnabled),
     };
-    this.queueProcessor(combined).catch(e => { logger.error('[GenerationService] Queue processor error:', e); });
+    this.queueDispatchInFlight = true;
+    this.queueProcessor(combined)
+      .catch(e => { logger.error('[GenerationService] Queue processor error:', e); })
+      .finally(() => {
+        this.queueDispatchInFlight = false;
+        // Items left for other conversations (or queued during this batch) must not wait for an
+        // unrelated future turn: a batch that ended without a text turn never reaches resetState.
+        if (this.state.queuedMessages.length > 0) this.drainQueue();
+      });
   }
 
   private resetState(): void {

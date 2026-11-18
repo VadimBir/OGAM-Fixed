@@ -16,6 +16,7 @@ import { estimateImageModelRamBytes } from '../imageModelMemory';
 import { modelManager } from '../modelManager';
 import { hardwareService } from '../hardware';
 import { modelResidencyManager } from '../modelResidency';
+import { memoryRefusalDetail } from './utils';
 import logger from '../../utils/logger';
 import RNFS from 'react-native-fs';
 import {
@@ -346,7 +347,7 @@ export async function checkImageModelCanLoad(
   }
   // Residency manager is authoritative for memory: evict others to fit the budget
   // before loading. If it can't fit even after eviction, block — unless "Load Anyway".
-  const { fits } = await modelResidencyManager.makeRoomFor(
+  const room = await modelResidencyManager.makeRoomFor(
     {
       key: 'image',
       type: 'image',
@@ -357,13 +358,14 @@ export async function checkImageModelCanLoad(
     },
     { override: opts?.override },
   );
-  if (!fits) {
+  if (!room.fits) {
     // Refusal UNDER override = survival floor (hard limit) → non-overridable, so the
     // UI stops re-offering "Load Anyway" as a no-op that re-runs the same failing load.
     const overridable = !opts?.override;
+    const detail = memoryRefusalDetail(room);
     return { canLoad: false, overridable, error: overridable
-      ? `Not enough memory to load ${model.name}. Free up space or choose a smaller model.`
-      : `Not enough memory to load ${model.name}, even after freeing other models. Close other apps or choose a smaller model.` };
+      ? `Not enough memory to load ${model.name}${detail}. Free up space or choose a smaller model.`
+      : `Not enough memory to load ${model.name}, even after freeing other models${detail}. Close other apps or choose a smaller model.` };
   }
   return { canLoad: true };
 }

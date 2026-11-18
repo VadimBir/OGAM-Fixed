@@ -5,7 +5,7 @@
 
 import { DownloadedModel, ONNXImageModel } from '../../types';
 import { loadLlamaModelInfo } from 'llama.rn';
-import { buildModelParams } from '../llmHelpers';
+import { buildModelParams, modelMaxContextFromMetadata } from '../llmHelpers';
 import { estimateLlamaMemory } from '../llamaMemoryEstimate';
 import { hardwareService } from '../hardware';
 import { llmService } from '../llm';
@@ -19,7 +19,15 @@ import {
 } from './types';
 import { useAppStore } from '../../stores';
 import { estimateImageModelRamBytes } from '../imageModelMemory';
-import { modelMemoryBudgetMB, modelWarningThresholdMB, LoadPolicy } from '../memoryBudget';
+import { Platform } from 'react-native';
+import logger from '../../utils/logger';
+import {
+  modelMemoryBudgetMB,
+  modelWarningThresholdMB,
+  effectiveAvailableMB,
+  preloadSafetyMarginMB,
+  LoadPolicy,
+} from '../memoryBudget';
 
 // ---------------------------------------------------------------------------
 // Budget helpers
@@ -40,6 +48,45 @@ const getMemoryWarningThresholdGB = async (): Promise<number> => {
   return modelWarningThresholdMB(totalMB) / 1024;
 };
 
+/**
+ * Budget + warning threshold for the single-model pre-load check, from the SAME live-RAM reading
+ * and functions the authoritative gate uses (llm.ts getMem -> effectiveAvailableMB, minus
+ * preloadSafetyMarginMB), so a "Safe to load" here is not followed by a refusal there.
+ *
+ * Live available RAM already excludes the models that are loaded now, so their estimate (`otherGB`)
+ * is added back: the caller compares required + other against this budget, which reduces to
+ * required <= live - margin. The warning threshold keeps its ratio to the budget (from the
+ * total-RAM tiers). Falls back to the total-RAM budgets, logged, when no live reading is available.
+ */
+const getLiveBudgetGB = async (
+  policy: LoadPolicy,
+  otherGB: number,
+): Promise<{ budgetGB: number; warningGB: number }> => {
+  const deviceInfo = await hardwareService.getDeviceInfo();
+  const totalMB = deviceInfo.totalMemory / (1024 * 1024);
+  try {
+    const raw = await hardwareService.getAppMemoryUsage();
+    if (!raw || !Number.isFinite(raw.available) || !Number.isFinite(raw.total)) {
+      throw new Error('no live memory reading');
+    }
+    const liveMB = effectiveAvailableMB(raw.available / (1024 * 1024), raw.total / (1024 * 1024), {
+      platform: Platform.OS,
+      policy,
+    });
+    const marginMB = preloadSafetyMarginMB({ platform: Platform.OS, policy });
+    const budgetGB = Math.max(0, liveMB - marginMB) / 1024 + otherGB;
+    const totalBudgetMB = modelMemoryBudgetMB(totalMB, undefined, policy);
+    const ratio = totalBudgetMB > 0 ? modelWarningThresholdMB(totalMB) / totalBudgetMB : 1;
+    return { budgetGB, warningGB: budgetGB * Math.min(1, ratio) };
+  } catch (e) {
+    logger.warn('[MemoryCheck] live RAM reading unavailable, using total-RAM budget:', e);
+    return {
+      budgetGB: modelMemoryBudgetMB(totalMB, undefined, policy) / 1024,
+      warningGB: modelWarningThresholdMB(totalMB) / 1024,
+    };
+  }
+};
+
 // ---------------------------------------------------------------------------
 // Size estimators
 // ---------------------------------------------------------------------------
@@ -52,7 +99,7 @@ export async function estimateTextModelMemoryMB(model: DownloadedModel): Promise
   if (model.engine !== 'llama') return Math.ceil(fallback / (1024 * 1024));
   try {
     const metadata = await loadLlamaModelInfo(model.filePath) as Record<string, unknown>;
-    const params = buildModelParams(model.filePath, settings);
+    const params = buildModelParams(model.filePath, { ...settings, modelMaxContext: modelMaxContextFromMetadata(metadata) });
     // params.cacheType is the type actually sent (an unset setting resolves to q8_0, not f16).
     const estimate = estimateLlamaMemory(metadata, {
       ctxLen: params.ctxLen, cacheType: params.cacheType, nBatch: params.nBatch,
@@ -159,8 +206,6 @@ export async function checkMemoryForModel(
   params: CheckMemoryParams,
 ): Promise<MemoryCheckResult> {
   const { modelId, modelType, ids, lists, policy, sessionOverride } = params;
-  const memoryBudgetGB = await getMemoryBudgetGB(policy);
-  const warningThresholdGB = await getMemoryWarningThresholdGB();
 
   const model =
     modelType === 'text'
@@ -182,6 +227,10 @@ export async function checkMemoryForModel(
 
   const requiredMemoryGB = await estimateModelMemoryGB(model, modelType);
   const currentlyLoadedMemoryGB = await getOtherLoadedMemoryGB(modelType, ids, lists);
+  const { budgetGB: memoryBudgetGB, warningGB: warningThresholdGB } = await getLiveBudgetGB(
+    policy ?? 'balanced',
+    currentlyLoadedMemoryGB,
+  );
   const totalRequiredMemoryGB = requiredMemoryGB + currentlyLoadedMemoryGB;
   const remainingBudgetGB = memoryBudgetGB - totalRequiredMemoryGB;
 

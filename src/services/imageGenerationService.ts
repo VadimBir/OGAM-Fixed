@@ -2,6 +2,7 @@ import { Alert } from 'react-native';
 import { imageEngineRouter as onnxImageGeneratorService } from './imageEngineRouter';
 import { sdCppLoadConfigFromSettings } from './sdCppGenerator';
 import { activeModelService } from './activeModelService';
+import { modelResidencyManager } from './modelResidency';
 import { useAppStore } from '../stores';
 import { GeneratedImage } from '../types';
 import logger from '../utils/logger';
@@ -29,13 +30,47 @@ import {
   GenerateImageParams,
   ActiveImageModel,
   RunGenerationOptions,
+  ActiveImageEngine,
+  ImageGenFailureReason,
+  ImageGenUsedParams,
+  ImageGenerationOutcome,
 } from './imageGenerationTypes';
 
 export { isInFlight } from './imageGenerationTypes';
 export type {
   ImageGenPhase,
   ImageGenerationState,
+  ImageGenerationOutcome,
+  ImageGenFailureReason,
 } from './imageGenerationTypes';
+
+/** SdCppUnsupportedFeatureError.code (sdCppGenerator.ts); matched by code so a mocked module still works. */
+const SDCPP_UNSUPPORTED_FEATURE_CODE = 'ERR_SDCPP_UNSUPPORTED_FEATURE';
+const UNSUPPORTED_IMG2IMG_MESSAGE =
+  'img2img/inpaint not supported by this engine';
+
+/** Per-request record of how a generate call ended, filled by every terminal path. */
+interface ImageRequestTrack {
+  failure: { reason: ImageGenFailureReason; message: string } | null;
+  used: Pick<ImageGenUsedParams, 'engine' | 'guidance' | 'sampler'> | null;
+}
+
+/** Memory pressure wins over the call site's own reason: the same wall shows up as a load error
+ *  or as an engine error, and the model must be told "free memory", not "retry". */
+function imageFailureReason(
+  message: string,
+  cause: unknown,
+  fallback: ImageGenFailureReason,
+): ImageGenFailureReason {
+  if (
+    isOverridableMemoryError(cause) ||
+    reasonFromLoadError(message) === 'insufficient-memory' ||
+    (cause !== undefined && reasonFromLoadError(cause) === 'insufficient-memory')
+  ) {
+    return 'out_of_memory';
+  }
+  return fallback;
+}
 
 class ImageGenerationService {
   // The ONLY stored state is `phase` (+ the data fields). `isGenerating` is NOT
@@ -58,6 +93,8 @@ class ImageGenerationService {
   private remoteRequest: AbortController | null = null;
   /** Last generate request, so a failure card's Retry button can re-run it. */
   private _lastParams: GenerateImageParams | null = null;
+  /** The in-flight request's outcome record (one request at a time: the busy guard). */
+  private request: ImageRequestTrack | null = null;
 
   /** Public snapshot: isGenerating is computed from phase, never stored. */
   getState(): ImageGenerationState {
@@ -97,7 +134,22 @@ class ImageGenerationService {
   }
 
   /** Own the terminal error state and its retry actions. */
-  private _fail(error: string, opts?: { cause?: unknown; remote?: boolean }): null {
+  private _fail(
+    error: string,
+    opts?: { cause?: unknown; remote?: boolean; reason?: ImageGenFailureReason },
+  ): null {
+    if (this.request) {
+      this.request.failure = {
+        reason:
+          opts?.reason ??
+          imageFailureReason(
+            error,
+            opts?.cause,
+            /no (remote )?image model/i.test(error) ? 'no_model' : 'engine_error',
+          ),
+        message: error,
+      };
+    }
     this.updateState({
       phase: 'error',
       progress: null,
@@ -213,10 +265,11 @@ class ImageGenerationService {
     } catch (error: any) {
       // Pass the TYPED error as `cause` — an OverridableMemoryError here is what lets
       // the failure card offer "Load Anyway". Stringifying it (as before) hid it.
-      this._fail(
-        `Failed to load image model: ${error?.message || 'Unknown error'}`,
-        { cause: error },
-      );
+      const message = `Failed to load image model: ${error?.message || 'Unknown error'}`;
+      this._fail(message, {
+        cause: error,
+        reason: imageFailureReason(message, error, 'load_failed'),
+      });
       return false;
     }
   }
@@ -321,6 +374,10 @@ class ImageGenerationService {
         return null;
       }
       this.updateState(completedImageGenerationState(result));
+      // Android: hand the multi-GB idle image working set back when live free RAM is low.
+      modelResidencyManager.releaseIdleImageIfMemoryLow().catch(err => {
+        logger.warn('[ImageGenerationService] Post-generation image release failed:', err);
+      });
       return saveImageGenerationResult(result, {
         params,
         activeImageModel,
@@ -333,7 +390,18 @@ class ImageGenerationService {
     } catch (error: any) {
       const errorMsg = error?.message || 'Image generation failed';
       if (errorMsg.includes('cancelled')) {
+        if (this.request) {
+          this.request.failure = { reason: 'cancelled', message: errorMsg };
+        }
         this.resetState();
+      } else if (error?.code === SDCPP_UNSUPPORTED_FEATURE_CODE) {
+        // sd.cpp has no img2img/inpaint parameters (SdCppUnsupportedFeatureError). Not a crash:
+        // say so plainly instead of the generic engine-failure path.
+        logger.warn('[ImageGenerationService] Unsupported sd.cpp feature:', error);
+        this._fail(UNSUPPORTED_IMG2IMG_MESSAGE, {
+          cause: error,
+          reason: 'engine_error',
+        });
       } else {
         logger.error('[ImageGenerationService] Generation error:', error);
 
@@ -348,10 +416,31 @@ class ImageGenerationService {
           ? 'Image generation failed — the model encountered an error and was unloaded. Please try again.'
           : errorMsg;
 
-        this._fail(userMessage);
+        // Classify from the RAW engine message: the friendly pipeline-crash text drops the memory cue.
+        this._fail(userMessage, {
+          reason: imageFailureReason(errorMsg, error, 'engine_error'),
+        });
       }
       return null;
     }
+  }
+
+  /**
+   * The engine a generate request would run on right now, in generateImage's own order: a remote
+   * image server with a model, else the selected downloaded local model. The single availability
+   * answer (the generate_image tool is offered only when this is non-null).
+   */
+  activeImageEngine(): ActiveImageEngine {
+    const remoteServer = useRemoteServerStore
+      .getState()
+      .getActiveRemoteMediaServer('image');
+    if (remoteServer?.mediaModels?.image) {
+      return { kind: 'remote', server: remoteServer };
+    }
+    const { activeImageModelId, downloadedImageModels } =
+      useAppStore.getState();
+    const model = downloadedImageModels.find(m => m.id === activeImageModelId);
+    return model ? { kind: 'local', model } : null;
   }
 
   /**
@@ -362,18 +451,73 @@ class ImageGenerationService {
     params: GenerateImageParams,
     opts?: { override?: boolean },
   ): Promise<GeneratedImage | null> {
+    const outcome = await this.generateImageWithOutcome(params, opts);
+    return outcome.ok ? outcome.image : null;
+  }
+
+  /**
+   * generateImage with a typed result: the image plus the values actually used, or the failure
+   * reason. Callers that must report back (the generate_image tool) use this; UI callers keep
+   * generateImage. The UI side effects (state, failure card) are identical for both.
+   */
+  async generateImageWithOutcome(
+    params: GenerateImageParams,
+    opts?: { override?: boolean },
+  ): Promise<ImageGenerationOutcome> {
     if (isInFlight(this.state.phase)) {
       logger.log(
         '[ImageGenerationService] Already generating, ignoring request',
       );
-      return null;
+      return {
+        ok: false,
+        reason: 'busy',
+        message: 'Another image is still being generated.',
+      };
     }
+    const request: ImageRequestTrack = { failure: null, used: null };
+    this.request = request;
+    try {
+      const image = await this._generate(params, opts, request);
+      if (image) {
+        const local = request.used?.engine !== 'remote';
+        return {
+          ok: true,
+          image,
+          used: {
+            engine: local ? 'local' : 'remote',
+            width: image.width,
+            height: image.height,
+            ...(local
+              ? {
+                  steps: image.steps,
+                  seed: image.seed,
+                  guidance: request.used?.guidance,
+                  sampler: request.used?.sampler,
+                }
+              : {}),
+          },
+        };
+      }
+      if (request.failure) return { ok: false, ...request.failure };
+      return this.cancelRequested
+        ? { ok: false, reason: 'cancelled', message: 'Image generation was cancelled.' }
+        : { ok: false, reason: 'engine_error', message: 'The image engine returned no image.' };
+    } finally {
+      if (this.request === request) this.request = null;
+    }
+  }
+
+  private async _generate(
+    params: GenerateImageParams,
+    opts: { override?: boolean } | undefined,
+    request: ImageRequestTrack,
+  ): Promise<GeneratedImage | null> {
     this.cancelRequested = false;
     this._lastParams = params; // so a failure card's Retry can re-run this exact request
-    const remoteServer = useRemoteServerStore
-      .getState()
-      .getActiveRemoteMediaServer('image');
-    if (remoteServer?.mediaModels?.image) {
+    const engine = this.activeImageEngine();
+    if (engine?.kind === 'remote') {
+      request.used = { engine: 'remote' };
+      const remoteServer = engine.server;
       const enhancedPrompt = await this._enhancePrompt(params);
       if (this.cancelRequested) {
         this.resetState();
@@ -388,12 +532,9 @@ class ImageGenerationService {
         },
       }, { ...opts, enhancedPrompt });
     }
-    const { settings, activeImageModelId, downloadedImageModels } =
-      useAppStore.getState();
-    const activeImageModel = downloadedImageModels.find(
-      m => m.id === activeImageModelId,
-    );
-    if (!activeImageModel) return this._fail('No image model selected');
+    if (!engine) return this._fail('No image model selected');
+    const activeImageModel = engine.model;
+    const { settings, activeImageModelId } = useAppStore.getState();
 
     const messageId = params.conversationId ? generateId() : null;
 
@@ -413,6 +554,11 @@ class ImageGenerationService {
       params,
       imageParameters.size,
     );
+    request.used = {
+      engine: 'local',
+      guidance: guidanceScale,
+      sampler: engineOptions.sampler,
+    };
 
     this.updateState({
       phase: settings.enhanceImagePrompts ? 'enhancing' : 'loading',
@@ -476,7 +622,7 @@ class ImageGenerationService {
       guidanceScale,
       imageWidth,
       imageHeight,
-      useOpenCL: settings.imageUseOpenCL ?? true,
+      useOpenCL: settings.imageUseOpenCL ?? false,
       engineOptions,
     });
   }

@@ -22,6 +22,7 @@ import {
   CACHE_TYPE_OPTIONS,
 } from '../../hooks/useTextGenerationAdvanced';
 import { hardwareService } from '../../services/hardware';
+import logger from '../../utils/logger';
 import {
   REASONING_BUDGET_AUTO,
 } from '@offgrid/models';
@@ -130,18 +131,22 @@ export { SpeculativeDecodingToggle } from './SpeculativeDecodingToggle';
 
 export const FlashAttentionToggle: React.FC = () => {
   const { updateSettings } = useAppStore();
-  const { isFlashAttnOn, isQuantizedCache, handleFlashAttnToggle } = useTextGenerationAdvanced();
+  const { isFlashAttnOn, isQuantizedCache, isAndroid, handleFlashAttnToggle } = useTextGenerationAdvanced();
+  let description = 'Faster inference and lower memory. Required for quantized KV cache (q8_0/q4_0). Requires model reload.';
+  if (isAndroid) {
+    description = 'Always on (Android): text models always run with flash attention.';
+  } else if (isQuantizedCache) {
+    description = 'Locked on: the quantized KV cache (q8_0/q4_0) requires it. Set KV Cache Type to f16 to turn it off.';
+  }
   return (
     <SegmentedRow<'off' | 'on'>
       label="Flash Attention"
-      description={isQuantizedCache
-        ? 'Locked on: the quantized KV cache (q8_0/q4_0) requires it. Set KV Cache Type to f16 to turn it off.'
-        : 'Faster inference and lower memory. Required for quantized KV cache (q8_0/q4_0). Requires model reload.'}
+      description={description}
       options={BOOL_OPTIONS}
       current={isFlashAttnOn ? 'on' : 'off'}
       onSelect={(id) => (id === 'on' ? updateSettings({ flashAttn: true }) : handleFlashAttnToggle(false))}
       testIdFor={(id) => `flash-attn-${id}-button`}
-      isDisabled={(id) => id === 'off' && isQuantizedCache}
+      isDisabled={(id) => isAndroid || (id === 'off' && isQuantizedCache)}
     />
   );
 };
@@ -265,22 +270,40 @@ export const ShowGenerationDetailsToggle: React.FC = () => {
 
 // ─── CPU Threads & Batch Size ────────────────────────────────────────────────
 
+/** Slider ceiling when the core count is unknown (iOS reports a fixed 4, not the real count). */
+const CPU_THREADS_FALLBACK_MAX = 12;
+
 export const CpuThreadsSlider: React.FC = () => {
   const styles = useThemedStyles(createTextGenAdvancedStyles);
-  const { updateSettings } = useAppStore();
-  const { cpuThreadsSliderValue, cpuThreadsDisplayValue } = useTextGenerationAdvanced();
+  const { settings, updateSettings } = useAppStore();
+  const { cpuThreadsDisplayValue } = useTextGenerationAdvanced();
+  const [coreCount, setCoreCount] = useState<number | null>(null);
+  useEffect(() => {
+    // Only Android reads the real count (/proc/cpuinfo); elsewhere keep the fixed ceiling.
+    if (Platform.OS !== 'android') return;
+    let cancelled = false;
+    hardwareService.getCpuCoreCount()
+      .then(count => { if (!cancelled && count > 0) setCoreCount(count); })
+      .catch((error: unknown) => logger.warn('[CpuThreadsSlider] core count unavailable:', error));
+    return () => { cancelled = true; };
+  }, []);
+  // 0 (and unset) is AUTO. The slider's minimum used to be 1, so Auto could be shown but never
+  // chosen again once a number was picked. Position 0 is now Auto.
+  const stored = settings?.nThreads && settings.nThreads > 0 ? settings.nThreads : 0;
+  // More threads than cores only contends; the ceiling is the device's cores (never below a value
+  // already stored, so an older choice still renders on its own slider).
+  const max = Math.max(coreCount ?? CPU_THREADS_FALLBACK_MAX, stored);
   return (
     <View style={styles.container}>
       <SliderSetting
         testID="cpu-threads-stepper"
         label="CPU Threads"
         description="Parallel threads for inference"
-        value={cpuThreadsSliderValue}
-        // Unset means AUTO, and the slider's own minimum is 1 — so the screen read "1" while the
-        // engine was running the hardware-recommended count. Show what will actually be used.
-        formatValue={() => cpuThreadsDisplayValue}
-        min={1} max={12} step={1}
-        onChange={(v) => updateSettings({ nThreads: v })}
+        value={stored}
+        // While the stored value is Auto, show the count the engine will actually run.
+        formatValue={(v) => (v > 0 ? String(v) : stored === 0 ? cpuThreadsDisplayValue : 'Auto')}
+        min={0} max={max} step={1}
+        onChange={(v) => updateSettings({ nThreads: v > 0 ? v : 0 })}
       />
     </View>
   );

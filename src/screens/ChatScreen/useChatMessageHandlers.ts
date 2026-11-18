@@ -56,7 +56,10 @@ async function retryFromAssistantMessage({ message, genDeps, p, convId, msgs }: 
   if (prev) {
     p.deleteMessagesAfter(convId, prev.id);
     await regenerateResponseFn(genDeps, { setDebugInfo: p.setDebugInfo, userMessage: prev, recordedKind, assistantEnabled: p.assistantEnabled });
+    return;
   }
+  logger.warn(`[RESEND-SM] retry assistant msg id=${message.id} idx=${idx}: no earlier user message, nothing to regenerate`);
+  genDeps.setAlertState(showAlert('Cannot retry', 'There is no earlier user message to regenerate this reply from.'));
 }
 
 export async function handleRetryMessageFn(
@@ -94,6 +97,8 @@ export async function handleRetryMessageFn(
 }
 
 type EditParams = {
+  /** The composer's Assistant selection, carried exactly like RetryParams.assistantEnabled. */
+  assistantEnabled?: boolean;
   message: Message;
   newContent: string;
   activeConversationId: string | null | undefined;
@@ -111,6 +116,13 @@ export async function handleEditMessageFn(genDeps: GenerationDeps, p: EditParams
   }
   // Same as retry: no model loaded → alert instead of a silent no-op.
   if (!p.hasActiveModel) { genDeps.setAlertState(showAlert('No Model Selected', 'Please select a model first.')); return; }
+  // Same as retry: edit does not go through the composer button, so re-apply its Assistant tool selection
+  // BEFORE the edit rewrites the turn and deletes the old reply; unavailable tools bail with the same alert.
+  if (p.assistantEnabled && !enableAssistantTools()) {
+    logger.log('[RESEND-SM] edit BAIL: assistant task tools unavailable');
+    genDeps.setAlertState(showAlert('Assistant unavailable', 'Connect an active Desktop to use Assistant tools, then retry.'));
+    return;
+  }
   // Same as resend: a synced reply is a live preview until its op lands, so clear it before regenerating.
   supersedeSyncedReplies(p.activeConversationId);
   // Preserve the turn's modality across an edit: an edited image prompt re-runs the image pipeline
@@ -133,7 +145,7 @@ export async function handleEditMessageFn(genDeps: GenerationDeps, p: EditParams
     p.updateMessageContent(p.activeConversationId, p.message.id, p.newContent);
   }
   p.deleteMessagesAfter(p.activeConversationId, p.message.id);
-  await regenerateResponseFn(genDeps, { setDebugInfo: p.setDebugInfo, userMessage: { ...p.message, content: p.newContent }, recordedKind });
+  await regenerateResponseFn(genDeps, { setDebugInfo: p.setDebugInfo, userMessage: { ...p.message, content: p.newContent }, recordedKind, assistantEnabled: p.assistantEnabled });
 }
 
 export async function handleTranscribeAgainFn(p: {
@@ -219,7 +231,7 @@ export function handleDeleteConversationFn(
     'Are you sure you want to delete this conversation? This will also delete all images generated in this chat.',
     [
       { text: 'Cancel', style: 'cancel' },
-      { text: 'Delete', style: 'destructive', onPress: () => { executeDeleteConversationFn(genDeps).catch(() => {}); } },
+      { text: 'Delete', style: 'destructive', onPress: () => { executeDeleteConversationFn(genDeps).catch(e => { logger.warn('[ChatHandlers] delete conversation failed', e); }); } },
     ],
   ));
 }

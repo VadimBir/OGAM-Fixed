@@ -100,18 +100,18 @@ export const ImageQualityAdvancedSliders: React.FC = () => {
             <Switch
               testID="image-gpu-acceleration"
               accessibilityLabel={`GPU Acceleration, ${
-                (settings.imageUseOpenCL ?? true) ? 'ON' : 'OFF'
+                (settings.imageUseOpenCL ?? false) ? 'ON' : 'OFF'
               }`}
-              value={settings.imageUseOpenCL ?? true}
+              value={settings.imageUseOpenCL ?? false}
               onValueChange={(value) => updateSettings({ imageUseOpenCL: value })}
               trackColor={{ false: colors.surfaceLight, true: colors.primary }}
               thumbColor={colors.surface}
             />
           </View>
           <Text style={styles.settingDescription}>
-            Use GPU for faster image generation. First run may be slower while optimizing for your device.
+            Use GPU for faster image generation. Applies at 512x512 only (other sizes decode on the CPU to avoid corrupted images). First run may be slower while optimizing for your device.
           </Text>
-          {(settings.imageUseOpenCL ?? true) && <ClearGPUCacheButton />}
+          {(settings.imageUseOpenCL ?? false) && <ClearGPUCacheButton />}
         </View>
       )}
     </>

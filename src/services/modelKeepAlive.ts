@@ -5,7 +5,7 @@
  * instead of dropping the loaded model. Opt-out via settings.keepModelsAlive (default on).
  * No-op off Android.
  */
-import { NativeModules, Platform } from 'react-native';
+import { NativeModules, NativeEventEmitter, Platform } from 'react-native';
 import { useAppStore } from '../stores';
 import { activeModelService } from './activeModelService';
 import type { ActiveModelInfo } from './activeModelService/types';
@@ -23,13 +23,20 @@ export function keepAliveLabel(info: ActiveModelInfo): string | null {
   return names.length ? names.join(' + ') : null;
 }
 
+/** Native event (ModelKeepAliveModule.EVENT_STOP_REQUESTED) {reason: "notification" | "task_removed"}. */
+export const KEEPALIVE_STOP_EVENT = 'ModelKeepAliveStopRequested';
+
 let activeUnsubscribe: (() => void) | null = null;
 
 export function startModelKeepAliveSync(): () => void {
   if (activeUnsubscribe) return activeUnsubscribe;
   if (Platform.OS !== 'android' || !native) return () => {};
   let running: string | null = null;
+  // True while the models are being unloaded after a native stop request: apply() must not
+  // restart the service the user just stopped (models still read "loaded" until unload ends).
+  let stopping = false;
   const apply = () => {
+    if (stopping) return;
     const enabled = useAppStore.getState().settings?.keepModelsAlive ?? true;
     const label = enabled ? keepAliveLabel(activeModelService.getActiveModels()) : null;
     if (label === running) return;
@@ -43,10 +50,25 @@ export function startModelKeepAliveSync(): () => void {
     }
     logger.log(`[KEEPALIVE] ${label ? `on: ${label}` : 'off'}`);
   };
+  // "I cannot stop it": notification Stop / swipe-away stop the native service; the models must
+  // be released too or the process keeps the RAM. activeModelService does not import this
+  // module, so there is no import cycle and a direct call is safe.
+  const stopSub = new NativeEventEmitter(NativeModules.ModelKeepAliveModule).addListener(
+    KEEPALIVE_STOP_EVENT,
+    (event?: { reason?: string }) => {
+      logger.log(`[KEEPALIVE] stop requested (${event?.reason ?? 'unknown'}): unloading all models`);
+      running = null;
+      stopping = true;
+      activeModelService.unloadAllModels(true)
+        .catch(e => logger.warn('[KEEPALIVE] unload after stop request failed', e))
+        .finally(() => { stopping = false; });
+    },
+  );
   const unsubModels = activeModelService.subscribe(apply);
   const unsubStore = useAppStore.subscribe(apply);
   apply();
   activeUnsubscribe = () => {
+    stopSub.remove();
     unsubModels();
     unsubStore();
     native.stop().catch(() => {});

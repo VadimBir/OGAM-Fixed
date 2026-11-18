@@ -55,6 +55,9 @@ export interface ModelFile {
   // LiteRT-specific: whether this .litertlm file accepts audio input directly
   // (e.g. Gemma 4 E2B/E4B). Same plumbing as liteRTVision.
   liteRTAudio?: boolean;
+  // Split GGUF (`<name>-00001-of-0000N.gguf`): the catalog lists ONE row for part 1 with the summed
+  // size and this count. Only the first part would be fetched, so the download is refused.
+  splitPartCount?: number;
 }
 
 export type ModelEngine = 'llama' | 'litert';
@@ -130,6 +133,8 @@ export interface PersistedDownloadInfo {
   mmProjFileSize?: number;
   mmProjLocalPath?: string | null;
   mmProjDownloadId?: string;
+  /** On-disk name of the main file when it differs from `fileName` (repo-qualified, see localModelFile). */
+  localFileName?: string;
   // Image model metadata (for restoring downloads after app kill)
   imageModelName?: string;
   imageModelDescription?: string;

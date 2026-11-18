@@ -19,6 +19,7 @@ import { render, fireEvent } from '@testing-library/react-native';
 import { NavigationContainer } from '@react-navigation/native';
 import { useAppStore } from '../../../src/stores/appStore';
 import { resetStores } from '../../utils/testHelpers';
+import { DEFAULT_IMAGE_STEPS } from '../../../src/utils/imageGenAdvice';
 
 // Mock Slider component
 jest.mock('@react-native-community/slider', () => {
@@ -660,7 +661,7 @@ describe('ModelSettingsScreen', () => {
         expect(getByTestId('gpu-layers-stepper-slider')).toBeTruthy();
       });
 
-      it('does not clamp gpuLayers when flashAttn turned on with layers > 1', () => {
+      it('Flash Attention is always on and disabled on Android; gpuLayers untouched', () => {
         useAppStore
           .getState()
           .updateSettings({
@@ -668,10 +669,12 @@ describe('ModelSettingsScreen', () => {
             flashAttn: false,
             gpuLayers: 8,
           });
-        const { getByTestId } = renderWithSections('text');
+        const { getByTestId, getByText } = renderWithSections('text');
+        expect(getByText(/Always on \(Android\)/)).toBeTruthy();
+        // Both segments are disabled: presses do nothing, the stored flag is not changed.
         fireEvent.press(getByTestId('flash-attn-on-button'));
-        expect(useAppStore.getState().settings.flashAttn).toBe(true);
-        // GPU layers are no longer clamped when enabling flash attention
+        fireEvent.press(getByTestId('flash-attn-off-button'));
+        expect(useAppStore.getState().settings.flashAttn).toBe(false);
         expect(useAppStore.getState().settings.gpuLayers).toBe(8);
       });
 
@@ -949,7 +952,7 @@ describe('ModelSettingsScreen', () => {
       expect(getByText('0.90')).toBeTruthy(); // topP || 0.9
       expect(getByText('1.10')).toBeTruthy(); // repeatPenalty || 1.1
       expect(getAllByText('1').length).toBeGreaterThan(0); // undefined falls back to cpuThreadsSliderValue (1)
-      expect(getByText('50')).toBeTruthy(); // imageSteps || the platform default
+      expect(getAllByText(String(DEFAULT_IMAGE_STEPS)).length).toBeGreaterThan(0); // imageSteps || DEFAULT_IMAGE_STEPS
       expect(getByText('7.5')).toBeTruthy(); // imageGuidanceScale || 7.5
     });
 

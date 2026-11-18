@@ -8,6 +8,8 @@ import {
 import { generateRandomSeed } from '../utils/generateId';
 import logger from '../utils/logger';
 import { resolveOwnedDocumentPath } from '../utils/resolveDocumentPath';
+import { DEFAULT_IMAGE_STEPS } from '../utils/imageGenAdvice';
+import type { EffectiveImageSize } from './imageEngineParams';
 
 const { LocalDreamModule, CoreMLDiffusionModule } = NativeModules;
 const PROGRESS_LOG_SAMPLE_STEPS = 5;
@@ -20,6 +22,13 @@ const DiffusionModule = Platform.select({
 });
 
 type ProgressCallback = (progress: ImageGenerationProgress) => void;
+
+/** Native LocalDreamStatus event (LocalDreamModule.kt EVENT_STATUS): server lifecycle changes JS did not ask for. */
+export interface LocalDreamStatusEvent {
+  status: 'restarting' | 'ready' | 'failed' | 'fallback';
+  message: string | null;
+}
+type StatusListener = (event: LocalDreamStatusEvent) => void;
 type PreviewCallback = (preview: { previewPath: string; step: number; totalSteps: number }) => void;
 
 /**
@@ -37,6 +46,36 @@ class LocalDreamGeneratorService {
   private loadedThreads: number | null = null;
   private generating = false;
   private eventEmitter: NativeEventEmitter | null = null;
+  private statusSubscription: { remove(): void } | null = null;
+  private statusListeners = new Set<StatusListener>();
+  private lastStatus: LocalDreamStatusEvent | null = null;
+
+  /**
+   * Persistent (not per-generation): the native server restart after a cancel emits "restarting" /
+   * "ready" AFTER generateImage has already rejected, so a per-generation listener would miss it.
+   * Android only; the iOS Core ML module has no such event.
+   */
+  private ensureStatusListener(): void {
+    if (this.statusSubscription || Platform.OS !== 'android' || !this.isAvailable()) return;
+    this.statusSubscription = this.getEmitter().addListener('LocalDreamStatus', (event: LocalDreamStatusEvent) => {
+      this.lastStatus = event;
+      logger.log(`[LocalDream] status=${event?.status}${event?.message ? `: ${event.message}` : ''}`);
+      this.statusListeners.forEach(l => {
+        try { l(event); } catch (e) { logger.warn('[LocalDream] status listener threw', e); }
+      });
+    });
+  }
+
+  /** Subscribe to server lifecycle status (restarting|ready|failed|fallback). Returns unsubscribe. */
+  subscribeToStatus(listener: StatusListener): () => void {
+    this.ensureStatusListener();
+    this.statusListeners.add(listener);
+    return () => { this.statusListeners.delete(listener); };
+  }
+
+  getLastStatus(): LocalDreamStatusEvent | null {
+    return this.lastStatus;
+  }
 
   private getEmitter(): NativeEventEmitter {
     if (!this.eventEmitter) {
@@ -92,6 +131,7 @@ class LocalDreamGeneratorService {
       params.preferGpu = opts.preferGpu;
     }
 
+    this.ensureStatusListener();
     const result = await DiffusionModule.loadModel(params);
     this.loadedThreads = typeof threads === 'number' ? threads : this.loadedThreads;
     return result;
@@ -143,7 +183,7 @@ class LocalDreamGeneratorService {
     const np = {
       prompt,
       negativePrompt: params.negativePrompt || '',
-      steps: params.steps || 8,
+      steps: params.steps || DEFAULT_IMAGE_STEPS,
       guidanceScale: params.guidanceScale || 7.5,
       seed: params.seed ?? generateRandomSeed(),
       // KNOWN ISSUE: sizes < 512 render as rainbow noise on the native engine (MNN CPU/GPU still
@@ -152,7 +192,8 @@ class LocalDreamGeneratorService {
       height: params.height || 512,
       previewInterval: params.previewInterval ?? 2,
       // Default OFF: the on-device GPU VAE only decodes cleanly at 512x512; at smaller sizes it
-      // shears into a rainbow (native gates it to 512x512, but keep the default conservative).
+      // shears into a rainbow. Native sends use_opencl=true only at exactly 512x512 (see
+      // LocalDreamModule.effectiveUseOpenCL); getEffectiveSize() reports that decision up front.
       useOpenCL: params.useOpenCL ?? false,
       // Sampler: the core only knows 'dpm' (default) and 'euler_a'; anything else is not sent.
       ...(params.sampler === 'dpm' || params.sampler === 'euler_a' ? { scheduler: params.sampler } : {}),
@@ -169,8 +210,54 @@ class LocalDreamGeneratorService {
     return np;
   }
 
+  /**
+   * What this request will REALLY render, computed natively before generating (no restart):
+   * NPU without a resolution patch -> 512x512, MNN -> square 128..512, OpenCL only at 512x512.
+   * Without a loaded model, on iOS, or on an older native build the request is echoed unadjusted.
+   */
+  async getEffectiveSize(
+    params: { width?: number; height?: number; useOpenCL?: boolean },
+  ): Promise<EffectiveImageSize> {
+    const requestedWidth = params.width || 512;
+    const requestedHeight = params.height || 512;
+    const echo: EffectiveImageSize = {
+      engine: 'localdream',
+      requestedWidth,
+      requestedHeight,
+      width: requestedWidth,
+      height: requestedHeight,
+      adjusted: false,
+      reason: null,
+      useOpenCL: null,
+    };
+    if (!this.isAvailable() || typeof DiffusionModule.getEffectiveImageSize !== 'function') return echo;
+    try {
+      const r = await DiffusionModule.getEffectiveImageSize({
+        width: requestedWidth,
+        height: requestedHeight,
+        useOpenCL: params.useOpenCL ?? false,
+      });
+      return {
+        ...echo,
+        requestedWidth: r.requestedWidth ?? requestedWidth,
+        requestedHeight: r.requestedHeight ?? requestedHeight,
+        width: r.width ?? requestedWidth,
+        height: r.height ?? requestedHeight,
+        adjusted: !!r.adjusted,
+        reason: r.reason ?? null,
+        useOpenCL: typeof r.useOpenCL === 'boolean' ? r.useOpenCL : null,
+      };
+    } catch (e) {
+      logger.log('[LocalDream] getEffectiveImageSize failed, echoing request:', e);
+      return echo;
+    }
+  }
+
   private buildResult(params: ImageGenerationParams, result: any): GeneratedImage {
     logger.log(`[WIRE-IMAGE] ${JSON.stringify(result)}`); // [WIRE] raw native generateImage result shape from-device
+    if (result?.width !== (params.width || 512) || result?.height !== (params.height || 512)) {
+      logger.log(`[IMG-SIZE] requested ${params.width || 512}x${params.height || 512}, rendered ${result?.width}x${result?.height}, useOpenCL=${result?.useOpenCL}`);
+    }
     return {
       id: result.id,
       prompt: params.prompt,
@@ -178,7 +265,7 @@ class LocalDreamGeneratorService {
       imagePath: result.imagePath,
       width: result.width,
       height: result.height,
-      steps: params.steps || 8,
+      steps: params.steps || DEFAULT_IMAGE_STEPS,
       seed: result.seed,
       modelId: '',
       // ISO-8601, the one form every consumer of this field can read - the gallery's date, and the
@@ -205,6 +292,7 @@ class LocalDreamGeneratorService {
     }
 
     this.generating = true;
+    this.ensureStatusListener();
     const progressSubscription = this.subscribeToProgress(onProgress, onPreview);
 
     try {
@@ -298,7 +386,7 @@ class LocalDreamGeneratorService {
   getConstants() {
     if (!this.isAvailable()) {
       return {
-        DEFAULT_STEPS: 20,
+        DEFAULT_STEPS: DEFAULT_IMAGE_STEPS,
         DEFAULT_GUIDANCE_SCALE: 7.5,
         DEFAULT_WIDTH: 512,
         DEFAULT_HEIGHT: 512,

@@ -20,6 +20,7 @@ import {
   ensureSessionCacheDir,
   getSessionPath,
   shouldDisableMmap,
+  resolveFlashAttnType,
 } from '../../../src/services/llmHelpers';
 import { INFERENCE_BACKENDS } from '../../../src/types';
 import { Platform } from 'react-native';
@@ -79,14 +80,19 @@ describe('shouldDisableMmap — android repackable quant branch', () => {
   const origOS = Platform.OS;
   afterEach(() => { (Platform as any).OS = origOS; });
 
-  it('returns true on android for a q4_0 model path', () => {
+  it('returns true on android for a small q4_0 model with ample live RAM', () => {
     (Platform as any).OS = 'android';
-    expect(shouldDisableMmap('/models/llama.Q4_0.gguf')).toBe(true);
+    expect(shouldDisableMmap('/models/llama.Q4_0.gguf', { modelFileSizeBytes: 512 * 1024 ** 2, liveAvailableMB: 4096 })).toBe(true);
   });
 
-  it('returns true on android for an iq4_nl model path', () => {
+  it('returns true on android for a small iq4_nl model with ample live RAM', () => {
     (Platform as any).OS = 'android';
-    expect(shouldDisableMmap('/models/llama.IQ4_NL.gguf')).toBe(true);
+    expect(shouldDisableMmap('/models/llama.IQ4_NL.gguf', { modelFileSizeBytes: 512 * 1024 ** 2, liveAvailableMB: 4096 })).toBe(true);
+  });
+
+  it('returns false on android for a q4_0 path with no size / live RAM (mmap stays on)', () => {
+    (Platform as any).OS = 'android';
+    expect(shouldDisableMmap('/models/llama.Q4_0.gguf')).toBe(false);
   });
 
   it('returns false on android for a non-repackable quant', () => {
@@ -96,17 +102,17 @@ describe('shouldDisableMmap — android repackable quant branch', () => {
 });
 
 describe('buildModelParams — OpenCL backend branch', () => {
-  it('forces flash off, omits cache_type params, and coerces requested cache to f16', () => {
+  it('honors the quantized cache on OpenCL (no backend f16 coercion) and keeps flash attention', () => {
+    // backendForcesF16Cache returns false for every backend (llmHelpers.ts), so OpenCL passes the
+    // chosen q8_0 through and flash attention is not forced off.
     const params = buildModelParams('/model.gguf', {
       inferenceBackend: INFERENCE_BACKENDS.OPENCL,
       cacheType: 'q8_0',
     });
     const base = params.baseParams as any;
-    // gpuBackendIncompatible → flash off
-    expect(base.flash_attn_type).toBe('off');
-    // OpenCL omits explicit cache_type_k/v entirely
-    expect(base.cache_type_k).toBeUndefined();
-    expect(base.cache_type_v).toBeUndefined();
+    expect(base.flash_attn_type).toBe('auto'); // test env is iOS
+    expect(base.cache_type_k).toBe('q8_0');
+    expect(base.cache_type_v).toBe('q8_0');
     // backend !== CPU → GPU enabled with DEFAULT_GPU_LAYERS fallback
     expect(params.nGpuLayers).toBeGreaterThanOrEqual(0);
   });
@@ -127,6 +133,44 @@ describe('buildModelParams — OpenCL backend branch', () => {
   it('uses f16 cache when flash attn explicitly off', () => {
     const params = buildModelParams('/model.gguf', { flashAttn: false });
     expect((params.baseParams as any).cache_type_k).toBe('f16');
+  });
+});
+
+describe('flash attention on Android - always on', () => {
+  const origOS = Platform.OS;
+  afterEach(() => { (Platform as any).OS = origOS; });
+
+  it('resolveFlashAttnType: android → on regardless of setting/cache; elsewhere off only for off+f16', () => {
+    expect(resolveFlashAttnType({ android: true, requestedOff: true, cacheType: 'f16' })).toBe('on');
+    expect(resolveFlashAttnType({ android: true, requestedOff: false, cacheType: 'q8_0' })).toBe('on');
+    expect(resolveFlashAttnType({ android: false, requestedOff: true, cacheType: 'f16' })).toBe('off');
+    expect(resolveFlashAttnType({ android: false, requestedOff: true, cacheType: 'q8_0' })).toBe('auto');
+    expect(resolveFlashAttnType({ android: false, requestedOff: false, cacheType: 'f16' })).toBe('auto');
+  });
+
+  it.each([
+    INFERENCE_BACKENDS.CPU,
+    INFERENCE_BACKENDS.OPENCL,
+    INFERENCE_BACKENDS.HTP,
+  ])('android %s with the Flash-Attn setting OFF and an f16 cache still sends flash_attn_type "on"', (backend) => {
+    (Platform as any).OS = 'android';
+    const base = buildModelParams('/model.gguf', { inferenceBackend: backend, flashAttn: false, cacheType: 'f16' }).baseParams as any;
+    expect(base.flash_attn_type).toBe('on');
+    expect(base.cache_type_k).toBe('f16'); // an explicit cache choice is honored
+  });
+
+  it('android: an unset cache type defaults to q8_0 even when the Flash-Attn setting is off', () => {
+    (Platform as any).OS = 'android';
+    const base = buildModelParams('/model.gguf', { flashAttn: false }).baseParams as any;
+    expect(base.flash_attn_type).toBe('on');
+    expect(base.cache_type_k).toBe('q8_0');
+  });
+
+  it('iOS unchanged: Flash-Attn off with an unset cache → off + f16', () => {
+    (Platform as any).OS = 'ios';
+    const base = buildModelParams('/model.gguf', { flashAttn: false }).baseParams as any;
+    expect(base.flash_attn_type).toBe('off');
+    expect(base.cache_type_k).toBe('f16');
   });
 });
 

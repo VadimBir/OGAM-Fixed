@@ -2,6 +2,7 @@ import { localDreamGeneratorService } from './localDreamGenerator';
 import { sdCppGeneratorService, type SdCppLoadConfig } from './sdCppGenerator';
 import { ImageGenerationParams, ImageGenerationProgress, GeneratedImage } from '../types';
 import logger from '../utils/logger';
+import { resolveSdCppEffectiveSize, type EffectiveImageSize } from './imageEngineParams';
 
 type ProgressCallback = (progress: ImageGenerationProgress) => void;
 type PreviewCallback = (preview: { previewPath: string; step: number; totalSteps: number }) => void;
@@ -77,6 +78,14 @@ class ImageEngineRouter {
   ): Promise<GeneratedImage> {
     if (this.active === 'sdcpp') return sdCppGeneratorService.generateImage(params, onProgress);
     return localDreamGeneratorService.generateImage(params, onProgress, onPreview);
+  }
+
+  /** The size the ACTIVE engine will really render for this request (see EffectiveImageSize). */
+  async getEffectiveSize(
+    params: { width?: number; height?: number; useOpenCL?: boolean },
+  ): Promise<EffectiveImageSize> {
+    if (this.active === 'sdcpp') return resolveSdCppEffectiveSize(params);
+    return localDreamGeneratorService.getEffectiveSize(params);
   }
 
   cancelGeneration(): Promise<boolean> {

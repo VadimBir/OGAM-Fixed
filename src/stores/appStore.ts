@@ -364,6 +364,9 @@ export const useAppStore = create<AppState>()(
             ],
           };
         }),
+      // Every id that can still name the removed model is cleared. Clearing activeModelId alone
+      // left lastTextModelId pointing at it, and selectedTextModelIdOf falls back to that id - so
+      // the deleted model stayed "selected" and the next chat tried to load a file that is gone.
       removeDownloadedModel: modelId =>
         set(state => ({
           downloadedModels: state.downloadedModels.filter(
@@ -371,6 +374,10 @@ export const useAppStore = create<AppState>()(
           ),
           activeModelId:
             state.activeModelId === modelId ? null : state.activeModelId,
+          lastTextModelId:
+            state.lastTextModelId === modelId ? null : state.lastTextModelId,
+          loadedTextModelId:
+            state.loadedTextModelId === modelId ? null : state.loadedTextModelId,
         })),
       activeModelId: null,
       setActiveModelId: modelId => set({ activeModelId: modelId }),
@@ -407,9 +414,20 @@ export const useAppStore = create<AppState>()(
           }));
         }
       },
+      // Resets the generation knobs, NOT the user's own content: the system prompt, the persona and
+      // the imported LoRA list survive. Dropping imageLoras left every imported LoRA file on disk
+      // (image_loras/) with no row to enable or delete it, and a re-import refused the same name.
       resetSettings: () => {
         const before = get().settings;
-        const after = { ...DEFAULT_SETTINGS };
+        const after: AppSettings = {
+          ...DEFAULT_SETTINGS,
+          systemPrompt: before.systemPrompt,
+          personaName: before.personaName,
+          personaPrompt: before.personaPrompt,
+          personaCaveats: before.personaCaveats,
+          personaAvatarUri: before.personaAvatarUri,
+          imageLoras: before.imageLoras,
+        };
         set({ settings: after });
         emitChangedModelSettings(before, after);
       },

@@ -91,7 +91,9 @@ class MeshResidencyService : Service() {
 
     companion object {
         const val CHANNEL_ID = "offgrid-personal-mesh"
-        const val NOTIFICATION_ID = 4711
+        // Unique per foreground service: 4711 = model download (WorkerDownload), 4712 = model
+        // keep-alive. A shared id made one service's startForeground replace the other's notification.
+        const val NOTIFICATION_ID = 4713
         const val FOREGROUND_SERVICE_TYPE =
             ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
         private const val EXTRA_GENERATION = "mesh_residency_generation"

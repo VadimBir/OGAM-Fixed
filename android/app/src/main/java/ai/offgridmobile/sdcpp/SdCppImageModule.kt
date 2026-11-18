@@ -56,6 +56,16 @@ class SdCppImageModule(reactContext: ReactApplicationContext) :
     @Volatile private var handle: Long = 0L
     @Volatile private var loadedModelPath: String? = null
     @Volatile private var generating = false
+    /** Set by cancelGeneration while a run is queued or running; consumed before nativeGenerate. */
+    @Volatile private var cancelRequested = false
+    // Guards generating / cancelRequested / inNative / nativeCancelSent so a cancel is applied to
+    // exactly one run: never to a finished run's successor.
+    private val cancelLock = Any()
+    private var inNative = false
+    private var nativeCancelSent = false
+    /** A nativeCancel landed while the previous run was already finishing: the native flag may
+     *  still be set and make the next nativeGenerate throw CANCELLED immediately. */
+    private var staleNativeCancelPossible = false
 
     override fun getName(): String = "SdCppImageModule"
 
@@ -142,6 +152,10 @@ class SdCppImageModule(reactContext: ReactApplicationContext) :
         val wtype = params.getString("weightType") ?: "auto"
         val flashAttn = params.hasKey("flashAttn") && params.getBoolean("flashAttn")
         val mmap = !params.hasKey("mmap") || params.getBoolean("mmap")
+        // Optional memory options; absent = upstream defaults (resident weights, auto LoRA, im2col VAE).
+        val paramsBackend = params.getString("paramsBackend") ?: ""
+        val loraApplyMode = params.getString("loraApplyMode") ?: "auto"
+        val vaeConvDirect = params.hasKey("vaeConvDirect") && params.getBoolean("vaeConvDirect")
         executor.execute {
             try {
                 if (handle != 0L) {
@@ -150,7 +164,17 @@ class SdCppImageModule(reactContext: ReactApplicationContext) :
                     loadedModelPath = null
                 }
                 val t0 = System.currentTimeMillis()
-                val h = SdCppNative.nativeLoad(modelPath, vaePath, taesdPath, threads, wtype, flashAttn, mmap)
+                val h = try {
+                    SdCppNative.nativeLoadEx(
+                        modelPath, vaePath, taesdPath, threads, wtype, flashAttn, mmap,
+                        paramsBackend, loraApplyMode, vaeConvDirect,
+                    )
+                } catch (e: UnsatisfiedLinkError) {
+                    // Old prebuilt libsdcpp_jni.so without nativeLoadEx: load with the base options.
+                    Log.w(TAG, "nativeLoadEx missing in libsdcpp_jni.so, falling back to nativeLoad " +
+                        "(paramsBackend/loraApplyMode/vaeConvDirect ignored): ${e.message}")
+                    SdCppNative.nativeLoad(modelPath, vaePath, taesdPath, threads, wtype, flashAttn, mmap)
+                }
                 handle = h
                 loadedModelPath = modelPath
                 Log.i(TAG, "[SDCPP-LOAD] ${SdCppNative.nativeModelVersion(h)} in ${System.currentTimeMillis() - t0} ms: $modelPath")
@@ -178,8 +202,18 @@ class SdCppImageModule(reactContext: ReactApplicationContext) :
 
     @ReactMethod
     fun cancelGeneration(promise: Promise) {
-        val h = handle
-        if (h != 0L && generating) SdCppNative.nativeCancel(h)
+        synchronized(cancelLock) {
+            // Idle cancel is a no-op (must not poison the next run). Queued run: the flag is
+            // consumed before nativeGenerate. Running run: also stop the native core.
+            if (generating) {
+                cancelRequested = true
+                val h = handle
+                if (inNative && h != 0L) {
+                    SdCppNative.nativeCancel(h)
+                    nativeCancelSent = true
+                }
+            }
+        }
         resolve(promise, true)
     }
 
@@ -211,7 +245,10 @@ class SdCppImageModule(reactContext: ReactApplicationContext) :
                 loraMults.add(if (l.hasKey("weight")) l.getDouble("weight").toFloat() else 1f)
             }
         }
-        generating = true
+        synchronized(cancelLock) {
+            generating = true
+            cancelRequested = false
+        }
         executor.execute {
             val names = arrayOfNulls<String>(2)
             val t0 = System.currentTimeMillis()
@@ -226,10 +263,41 @@ class SdCppImageModule(reactContext: ReactApplicationContext) :
                         })
                     }
                 }
-                val out = SdCppNative.nativeGenerate(
-                    handle, prompt, negative, width, height, steps, cfg, seed, sampler, scheduler,
-                    clipSkip, vaeTiling, loraPaths.toTypedArray(), loraMults.toFloatArray(), names, listener,
-                ) ?: throw IllegalStateException("stable-diffusion.cpp returned no image")
+                val runNative = {
+                    synchronized(cancelLock) {
+                        if (cancelRequested) {
+                            cancelRequested = false
+                            throw IllegalStateException("CANCELLED: cancelled before generation started")
+                        }
+                        inNative = true
+                        nativeCancelSent = false
+                    }
+                    try {
+                        SdCppNative.nativeGenerate(
+                            handle, prompt, negative, width, height, steps, cfg, seed, sampler, scheduler,
+                            clipSkip, vaeTiling, loraPaths.toTypedArray(), loraMults.toFloatArray(), names, listener,
+                        )
+                    } finally {
+                        synchronized(cancelLock) { inNative = false }
+                    }
+                }
+                val raw = try {
+                    runNative()
+                } catch (e: RuntimeException) {
+                    // CANCELLED from the previous run's late nativeCancel, not from this run's user:
+                    // the native flag was consumed by this throw, so one retry runs clean.
+                    val stale = synchronized(cancelLock) { staleNativeCancelPossible && !cancelRequested }
+                    if (e.message?.startsWith("CANCELLED:") == true && stale) {
+                        synchronized(cancelLock) { staleNativeCancelPossible = false }
+                        runNative()
+                    } else throw e
+                }
+                synchronized(cancelLock) {
+                    // Returned normally although a cancel was sent: the native core did not consume it.
+                    staleNativeCancelPossible = nativeCancelSent
+                    nativeCancelSent = false
+                }
+                val out = raw ?: throw IllegalStateException("stable-diffusion.cpp returned no image")
                 val hdr = ByteBuffer.wrap(out, 0, 12).order(ByteOrder.LITTLE_ENDIAN)
                 val w = hdr.int
                 val h = hdr.int
@@ -251,10 +319,18 @@ class SdCppImageModule(reactContext: ReactApplicationContext) :
                     putDouble("generationTimeMs", ms.toDouble())
                 })
             } catch (e: Throwable) {
-                Log.e(TAG, "generate failed", e)
-                reject(promise, "GENERATION_ERROR", e.message ?: "stable-diffusion.cpp generation failed", e)
+                if (e.message?.startsWith("CANCELLED:") == true) {
+                    Log.i(TAG, "generate cancelled")
+                    reject(promise, "CANCELLED", "Generation cancelled", e)
+                } else {
+                    Log.e(TAG, "generate failed", e)
+                    reject(promise, "GENERATION_ERROR", e.message ?: "stable-diffusion.cpp generation failed", e)
+                }
             } finally {
-                generating = false
+                synchronized(cancelLock) {
+                    generating = false
+                    cancelRequested = false
+                }
             }
         }
     }

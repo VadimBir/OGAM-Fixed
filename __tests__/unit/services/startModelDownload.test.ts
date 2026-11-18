@@ -6,11 +6,19 @@
  */
 const mockDownloadModelBackground = jest.fn();
 const mockWatchDownload = jest.fn();
+const mockRepairMmProj = jest.fn();
+const mockGetDownloadedModels = jest.fn();
 jest.mock('../../../src/services/modelManager', () => ({
   modelManager: {
     downloadModelBackground: (...a: unknown[]) => mockDownloadModelBackground(...a),
     watchDownload: (...a: unknown[]) => mockWatchDownload(...a),
+    repairMmProj: (...a: unknown[]) => mockRepairMmProj(...a),
+    getDownloadedModels: (...a: unknown[]) => mockGetDownloadedModels(...a),
   },
+}));
+const mockSelectTextModel = jest.fn();
+jest.mock('../../../src/services/activeModelService', () => ({
+  activeModelService: { selectTextModel: (...a: unknown[]) => mockSelectTextModel(...a) },
 }));
 
 const mockStore: { downloads: Record<string, { status: string }>; add: jest.Mock; remove: jest.Mock; setStatus: jest.Mock } = {
@@ -22,8 +30,9 @@ jest.mock('../../../src/stores/downloadStore', () => ({
 }));
 
 const mockAddDownloadedModel = jest.fn();
+const mockAppState: Record<string, unknown> = {};
 jest.mock('../../../src/stores', () => ({
-  useAppStore: { getState: () => ({ addDownloadedModel: mockAddDownloadedModel }) },
+  useAppStore: { getState: () => ({ addDownloadedModel: mockAddDownloadedModel, ...mockAppState }) },
 }));
 jest.mock('../../../src/utils/modelKey', () => ({ makeModelKey: (id: string, f: string) => `${id}/${f}` }));
 
@@ -36,6 +45,7 @@ const KEY = 'author/model/model.gguf';
 beforeEach(() => {
   jest.clearAllMocks();
   mockStore.downloads = {};
+  for (const key of Object.keys(mockAppState)) delete mockAppState[key];
 });
 
 describe('startModelDownload', () => {
@@ -126,5 +136,82 @@ describe('startModelDownload', () => {
 
     expect(mockStore.setStatus).toHaveBeenCalledWith('dl-1', 'failed', { message: 'net' });
     expect(onError).toHaveBeenCalledWith(expect.objectContaining({ message: 'net' }));
+  });
+
+  it('refuses a split GGUF with a clear reason and starts nothing', async () => {
+    const onError = jest.fn();
+    await startModelDownload(MODEL_ID, { name: 'big-Q4_K_M-00001-of-00003.gguf', splitPartCount: 3 } as any, { onError });
+    expect(mockDownloadModelBackground).not.toHaveBeenCalled();
+    expect(mockStore.add).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledWith(expect.objectContaining({
+      message: expect.stringContaining('split into 3 files'),
+    }));
+  });
+
+  it('auto-selects THE NEW download (not lastTextModelId / downloadedModels[0]) when nothing is selected', async () => {
+    mockAppState.activeModelId = null;
+    mockAppState.lastTextModelId = 'older/model.gguf';
+    mockAppState.downloadedModels = [{ id: 'older/model.gguf' }, { id: KEY }];
+    mockDownloadModelBackground.mockResolvedValue({ downloadId: 'dl-1' });
+    let onComplete: ((m: any) => void) | undefined;
+    mockWatchDownload.mockImplementation((_id, c) => { onComplete = c; });
+
+    await startModelDownload(MODEL_ID, FILE, { autoSelectIfEmpty: true });
+    onComplete!({ id: KEY, engine: 'llama' });
+
+    expect(mockSelectTextModel).toHaveBeenCalledWith(KEY);
+  });
+
+  it('does not auto-select when a model was already selected at start', async () => {
+    mockAppState.activeModelId = 'chosen/model.gguf';
+    mockAppState.downloadedModels = [{ id: KEY }];
+    mockDownloadModelBackground.mockResolvedValue({ downloadId: 'dl-1' });
+    let onComplete: ((m: any) => void) | undefined;
+    mockWatchDownload.mockImplementation((_id, c) => { onComplete = c; });
+
+    await startModelDownload(MODEL_ID, FILE, { autoSelectIfEmpty: true });
+    onComplete!({ id: KEY, engine: 'llama' });
+
+    expect(mockSelectTextModel).not.toHaveBeenCalled();
+  });
+
+  it('installed weights + missing projector: fetches the projector ALONE, then reports the model with vision', async () => {
+    const visionFile = {
+      name: 'model.gguf', size: 10,
+      mmProjFile: { name: 'mmproj-F16.gguf', size: 5, downloadUrl: 'https://x/mmproj-F16.gguf' },
+    } as any;
+    mockDownloadModelBackground.mockResolvedValue({ downloadId: `already-downloaded:${KEY}` });
+    let onComplete: ((m: any) => void) | undefined;
+    mockWatchDownload.mockImplementation((_id, c) => { onComplete = c; });
+    mockRepairMmProj.mockResolvedValue(undefined);
+    const withVision = { id: KEY, engine: 'llama', mmProjPath: '/m/model-mmproj-F16.gguf' };
+    mockGetDownloadedModels.mockResolvedValue([withVision]);
+    const onRegistered = jest.fn();
+
+    await startModelDownload(MODEL_ID, visionFile, { onRegistered });
+    onComplete!({ id: KEY, engine: 'llama', mmProjFileName: 'mmproj-F16.gguf' });
+    await new Promise(resolve => setImmediate(resolve));
+
+    expect(mockRepairMmProj).toHaveBeenCalledWith(MODEL_ID, visionFile, { modelKey: KEY });
+    expect(onRegistered).toHaveBeenCalledWith(withVision);
+  });
+
+  it('a failed projector-only fetch still reports the (text) model so Repair Vision is offered', async () => {
+    const visionFile = {
+      name: 'model.gguf', size: 10,
+      mmProjFile: { name: 'mmproj-F16.gguf', size: 5, downloadUrl: 'https://x/mmproj-F16.gguf' },
+    } as any;
+    mockDownloadModelBackground.mockResolvedValue({ downloadId: `already-downloaded:${KEY}` });
+    let onComplete: ((m: any) => void) | undefined;
+    mockWatchDownload.mockImplementation((_id, c) => { onComplete = c; });
+    mockRepairMmProj.mockRejectedValue(new Error('offline'));
+    const onRegistered = jest.fn();
+
+    await startModelDownload(MODEL_ID, visionFile, { onRegistered });
+    const textOnly = { id: KEY, engine: 'llama', mmProjFileName: 'mmproj-F16.gguf' };
+    onComplete!(textOnly);
+    await new Promise(resolve => setImmediate(resolve));
+
+    expect(onRegistered).toHaveBeenCalledWith(textOnly);
   });
 });

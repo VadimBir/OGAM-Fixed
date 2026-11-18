@@ -1,8 +1,8 @@
 /**
  * Memory budget — shared physical caps and model-load policies by device/platform.
  *
- * Both consumers use these physical caps; dirty models additionally require a
- * live-available-RAM check in the residency manager:
+ * Both consumers use these physical caps; dirty models (and every model on Android)
+ * additionally require a live-available-RAM check:
  *  - the residency manager (capacity planning + eviction), and
  *  - the pre-load memory check (checkMemoryForModel).
  *
@@ -15,8 +15,9 @@
  *  - 6-8GB: 0.60,
  *  - 12GB+: 0.78 iOS / 0.70 Android (so a 12GB iPhone runs a 7GB model a flat 60%
  *    wrongly rejected).
- * This fraction is the absolute PHYSICAL ceiling; dirty model loads also respect
- * live available RAM so the residency manager does not load into swap.
+ * This fraction is the absolute PHYSICAL ceiling; dirty model loads (and, on Android,
+ * every model load) also respect live available RAM so the residency manager does not
+ * load into swap.
  *
  * Previously two places computed this independently (a 0.6 in the residency policy
  * AND a separate device-tiered fraction in the model-load check); unifying it here
@@ -62,19 +63,45 @@ export const AGGRESSIVE_RESERVE_MB = 800;
 // any caller, so it enforced nothing, and the product decision is that "Load Anyway" gives the user
 // FULL control — they accept the OOM risk, the app does not impose a hard floor they can't cross.
 
+/**
+ * Live-RAM safety margin (MB): the part of the LIVE available reading (Android
+ * ActivityManager.availMem, iOS os_proc_available_memory) a model load must leave untouched
+ * for the OS, the low-memory killer and the app's own JS/UI heap. The residency manager's
+ * dirty-load headroom (modelResidency/residents.ts) aliases these, so there is one owner.
+ */
+export const LIVE_RAM_MARGIN_MB = 1024;
+/** Aggressive mode keeps a smaller live margin - lenient, never zero. */
+export const AGGRESSIVE_LIVE_RAM_MARGIN_MB = 512;
+
 type Plat = 'ios' | 'android' | string;
 
+/** Live-RAM margin (MB) the model-load gates keep free, by policy. */
+export function liveRamMarginMB(policy: LoadPolicy = 'balanced'): number {
+  return policy === 'aggressive' ? AGGRESSIVE_LIVE_RAM_MARGIN_MB : LIVE_RAM_MARGIN_MB;
+}
+
 /**
- * Reclaimable-aware ceiling for clean, mmap-backed model weights, in MB.
+ * Extra margin (MB) the text pre-load gate (checkMemoryForModel) adds on top of its fixed
+ * 200MB headroom. Android: the live-RAM margin, because the gate now reads live available
+ * RAM (see effectiveAvailableMB). iOS: 0 (its gate is unchanged).
+ */
+export function preloadSafetyMarginMB(
+  opts: { platform?: Plat; policy?: LoadPolicy } = {},
+): number {
+  const { platform = Platform.OS, policy = 'balanced' } = opts;
+  return platform === 'android' ? liveRamMarginMB(policy) : 0;
+}
+
+/**
+ * Available RAM (MB) a model load may count on RIGHT NOW.
  *
- * `realAvailMB` is the raw os_proc available snapshot. On Android it UNDER-counts what a
- * foreground app can sometimes get: background/cached apps may be reclaimed. Clean,
- * file-backed weights can be paged as needed, so their ceiling is the physical model
- * budget rather than the instantaneous snapshot. On iOS this remains the raw snapshot.
- *
- * This reclaim credit is suitable only for clean, mmap-backed model weights.
- * Dirty/accelerator loads must use the live OS available reading instead: Android
- * may kill the foreground app before enough hypothetical background RAM is reclaimed.
+ * `realAvailMB` is the live OS reading. Android previously returned
+ * max(live, physical budget) - a "reclaim credit" that assumed the low-memory killer would
+ * free background apps fast enough for a foreground load. On a 12GB phone at 75% used that
+ * credited ~8.4GB while ~3GB was free, the load filled RAM faster than the system reclaimed
+ * it, and the app itself was killed. Android now uses the live reading, capped at the
+ * physical budget; callers add the live safety margin (preloadSafetyMarginMB). A refusal
+ * stays overridable through "Load Anyway". iOS: the raw reading, unchanged.
  */
 export function effectiveAvailableMB(
   realAvailMB: number,
@@ -83,7 +110,7 @@ export function effectiveAvailableMB(
 ): number {
   const { platform = Platform.OS, policy = 'balanced' } = opts;
   return platform === 'android'
-    ? Math.max(realAvailMB, modelMemoryBudgetMB(totalRamMB, platform, policy))
+    ? Math.max(0, Math.min(realAvailMB, modelMemoryBudgetMB(totalRamMB, platform, policy)))
     : realAvailMB;
 }
 

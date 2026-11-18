@@ -10,6 +10,8 @@ import {
 import { buildDownloadedModel, persistDownloadedModel } from './storage';
 import { copyFileWithProgress } from './copyFile';
 import { isLiteRTFileName } from '../../utils/modelHelpers';
+import { parseQuantization, stripQuantization } from '../../utils/quantization';
+import logger from '../../utils/logger';
 
 export interface ImportLocalModelOpts {
   sourceUri: string;
@@ -67,9 +69,45 @@ export async function importLocalModel(opts: ImportLocalModelOpts): Promise<Down
     onProgress: onProgress ? (fraction: number) => onProgress({ fraction: fraction * mainProgressScale, fileName }) : undefined,
   });
 
-  const quantMatch = fileName.match(/[_-](Q\d+[_\w]*|f16|f32)/i);
-  const quantization = quantMatch ? quantMatch[1].toUpperCase() : 'Unknown';
-  const modelName = fileName.replace(/\.gguf$/i, '').replace(/\.litertlm$/i, '').replace(/[_-]Q\d+.*/i, '');
+  // From here on the main file is OURS on disk: any failure before the row is saved must remove it,
+  // or a failed import leaves an untracked multi-GB file that the next import refuses ("already
+  // exists") and the next scan adopts as a recovered model.
+  try {
+    return await registerImportedModel({
+      fileName, destPath, modelsDir, isLitert, liteRTVision, onProgress,
+      mmProjFileName, resolvedMmProjSource, mmProjSourceSize,
+    });
+  } catch (error) {
+    logger.warn(`[ImportLocalModel] import of ${fileName} failed after copy; removing the copied file: ${error instanceof Error ? error.message : String(error)}`);
+    // The projector path was checked free above, so a file there now is this import's copy.
+    const copied = [destPath, ...(mmProjFileName ? [`${modelsDir}/${mmProjFileName}`] : [])];
+    for (const path of copied) {
+      if (!(await RNFS.exists(path).catch(() => false))) continue;
+      await RNFS.unlink(path).catch((cleanupError: unknown) => {
+        logger.error(`[ImportLocalModel] could not remove ${path}: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`);
+      });
+    }
+    throw error;
+  }
+}
+
+interface RegisterImportOpts {
+  fileName: string;
+  destPath: string;
+  modelsDir: string;
+  isLitert: boolean;
+  liteRTVision?: boolean;
+  onProgress?: (progress: { fraction: number; fileName: string }) => void;
+  mmProjFileName?: string;
+  resolvedMmProjSource?: string;
+  mmProjSourceSize?: number | null;
+}
+
+async function registerImportedModel(opts: RegisterImportOpts): Promise<DownloadedModel> {
+  const { fileName, destPath, modelsDir, isLitert, liteRTVision, onProgress, mmProjFileName, resolvedMmProjSource, mmProjSourceSize } = opts;
+  // The shared label rule (utils/quantization): IQ4_XS / BF16 / UD-Q4_K_XL read as themselves.
+  const quantization = parseQuantization(fileName);
+  const modelName = stripQuantization(fileName);
   const fileSize = (await statFile(destPath))?.size ?? 0;
 
   const pseudoFile: ModelFile = { name: fileName, size: fileSize, quantization, downloadUrl: '' };

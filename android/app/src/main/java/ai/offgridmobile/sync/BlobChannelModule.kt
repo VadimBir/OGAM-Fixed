@@ -27,7 +27,16 @@ class BlobChannelModule(
     override fun getName(): String = NAME
 
     private val work = Executors.newCachedThreadPool()
-    private val server by lazy { BlobServer(::emitProgress, ::emitOutcome) }
+    private val serverLazy = lazy { BlobServer(::emitProgress, ::emitOutcome) }
+    private val server by serverLazy
+
+    /** React teardown (reload / destroy): close the listening port and stop the worker threads,
+     *  or every reload leaks an open LAN port and a thread pool. */
+    override fun invalidate() {
+        if (serverLazy.isInitialized()) server.stop()
+        work.shutdownNow()
+        super.invalidate()
+    }
 
     /** The address every native sync listener on this phone can accept connections on. */
     @ReactMethod

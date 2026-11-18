@@ -15,6 +15,7 @@ import {
 } from '../types';
 import { MODEL_RECOMMENDATIONS, RECOMMENDED_MODELS } from '../constants';
 import { HTP_ENABLED } from '../config/featureFlags';
+import { quantizationBitsPerWeight } from '../utils/quantization';
 /**
  * QNN variant tiers — mirrors local-dream's chipsetModelSuffixes map exactly.
  * Source: https://github.com/xororz/local-dream — Model.kt getChipsetSuffix()
@@ -249,11 +250,9 @@ class HardwareService {
     return (parametersBillions * bitsPerWeight) / 8;
   }
   private getQuantizationBits(quantization: string): number {
-    const bits: Record<string, number> = { Q2_K: 2.625, Q3_K_S: 3.4375, Q3_K_M: 3.4375, Q4_0: 4, Q4_K_S: 4.5, Q4_K_M: 4.5, Q5_K_S: 5.5, Q5_K_M: 5.5, Q6_K: 6.5, Q8_0: 8, F16: 16 };
-    for (const [key, value] of Object.entries(bits)) {
-      if (quantization.toUpperCase().includes(key)) return value;
-    }
-    return 4.5;
+    // The shared label rule + table (utils/quantization), so IQ4_XS / BF16 / Q4_K_XL size correctly
+    // instead of falling through a substring scan to the 4.5 default.
+    return quantizationBitsPerWeight(quantization, 4.5);
   }
   formatBytes(bytes: number): string {
     if (bytes === 0) return '0 B';

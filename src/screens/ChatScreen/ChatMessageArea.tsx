@@ -29,6 +29,7 @@ import { useAppStore } from '../../stores';
 import { getToolExtensions } from '../../services/tools/extensions';
 import { enableAssistantTools, useAssistantToolAvailability, useExtensionToolCount } from '../../services/tools/useExtensionToolCount';
 import { AVAILABLE_TOOLS } from '../../services/tools';
+import { availableToolIds } from '../../services/tools/availability';
 import { useOpenProTools } from '../../hooks/useOpenProTools';
 import { useIsProActive } from '../../hooks/useIsProActive';
 import { getSlot, SLOTS } from '../../bootstrap/slotRegistry';
@@ -191,7 +192,12 @@ export const ChatMessageArea: React.FC<ChatMessageAreaProps> = ({
   // The free Tools page lists only AVAILABLE_TOOLS, so its badge counts just those
   // (pro email/calendar ids are surfaced under Pro Tools instead, not double-counted).
   const freeToolIds = new Set(AVAILABLE_TOOLS.map(t => t.id));
-  const freeToolsCount = chat.enabledTools.filter(id =>
+  // Only tools actually sent to the model count: generate_image is withheld when no image engine is
+  // available (availableToolIds, the same filter useChatGenerationActions applies before generating).
+  // The image-model selection is subscribed so the badge re-renders when it changes.
+  useAppStore(state => state.activeImageModelId);
+  useAppStore(state => state.downloadedImageModels);
+  const freeToolsCount = availableToolIds(chat.enabledTools).filter(id =>
     freeToolIds.has(id),
   ).length;
   const totalToolCount = freeToolsCount + proToolsCount;

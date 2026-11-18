@@ -2277,6 +2277,24 @@ describe('LLMService', () => {
       expect(Array.isArray(result.toolCalls)).toBe(true);
     });
 
+    it('disableThinking forces enable_thinking off even when the global toggle is on', async () => {
+      mockedRNFS.exists.mockResolvedValue(true);
+      const ctx = createMockLlamaContext();
+      mockedInitLlama.mockResolvedValue(ctx as any);
+      await llmService.loadModel('/models/test.gguf');
+      const thinkingSpy = jest.spyOn(llmService, 'isThinkingEnabled').mockReturnValue(true);
+      try {
+        await llmService.generateResponseWithTools(
+          [{ id: '1', role: 'user', content: 'Hi', timestamp: 0 }],
+          { tools: [], disableThinking: true },
+        );
+        const params = (ctx as any).completion.mock.calls[0][0];
+        expect(params.enable_thinking).toBe(false);
+      } finally {
+        thinkingSpy.mockRestore();
+      }
+    });
+
     it('sets and clears activeCompletionPromise during generation', async () => {
       mockedRNFS.exists.mockResolvedValue(true);
       const ctx = createMockLlamaContext();

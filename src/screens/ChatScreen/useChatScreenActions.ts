@@ -11,6 +11,7 @@ import {
 import type { ActiveTextModelResult } from '../../hooks/useActiveTextModel';
 import { saveImageToGallery } from './useSaveImage';
 import { computePendingSettings } from './pendingSettings';
+import { availableToolIds } from '../../services/tools/availability';
 import { reloadTextModel } from './reloadTextModel';
 import {
   handleModelSelectFn,
@@ -155,8 +156,10 @@ export function useChatScreenActions({
     }
   };
 
+  // Count only tools a turn would actually send (generation filters with availableToolIds too), so
+  // the badge never counts generate_image while no image engine is available.
   const enabledTools = supportsToolCalling
-    ? settings.enabledTools || []
+    ? availableToolIds(settings.enabledTools || [])
     : [];
   const canReloadTextModel =
     Boolean(activeModelInfo.modelId) &&
@@ -204,8 +207,10 @@ export function useChatScreenActions({
     handleEditMessage: (
       message: ChatStoreState['conversations'][number]['messages'][number],
       newContent: string,
+      assistantEnabled = false,
     ) =>
       handleEditMessageFn(generationDeps, {
+        assistantEnabled,
         message,
         newContent,
         activeConversationId,
@@ -227,8 +232,11 @@ export function useChatScreenActions({
         setAlertState,
       }),
     handleSelectProject: (project: Project | null) => {
-      setPendingProjectId(project?.id);
+      // The pending character only seeds the NEXT conversation created from an empty chat. With an
+      // active conversation the choice belongs to that conversation alone; stashing it here too made a
+      // later "new chat" silently inherit it.
       if (!activeConversationId) {
+        setPendingProjectId(project?.id);
         setShowProjectSelector(false);
         return;
       }

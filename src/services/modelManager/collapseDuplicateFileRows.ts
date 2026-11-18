@@ -1,6 +1,7 @@
 import { DownloadedModel, ONNXImageModel } from '../../types';
 import logger from '../../utils/logger';
 import { basenameOf } from './reconcileStoredPaths';
+import { diskFileNameOf } from './localModelFile';
 
 /**
  * One row per stored artifact. Repairs a registry that already grew duplicates.
@@ -70,12 +71,29 @@ export function collapseDuplicateFileRows(models: DownloadedModel[]): {
   collapsed: number;
 } {
   const { rows, collapsed } = collapseRows(models, {
-    keyOf: model => model.fileName,
+    // The artifact is the file ON DISK. Two repos can publish the same catalog fileName; their
+    // rows are different downloads (different paths, see localModelFile.ts), not duplicates.
+    keyOf: model => diskFileNameOf(model) || undefined,
     idOf: model => model.id,
     downloadedAtOf: model => model.downloadedAt,
     unit: 'file',
   });
   return { models: rows, collapsed };
+}
+
+/**
+ * The directory a stored image model owns: the first segment under `image_models/`.
+ *
+ * `basenameOf(modelPath)` was only right when modelPath IS that directory (mnn/qnn). An sd.cpp
+ * import stores the checkpoint FILE (`image_models/sdcpp_x_<ts>/model.safetensors`) and a CoreML
+ * model its inner bundle, so the key became the file/bundle name: two imports of the same
+ * checkpoint name collapsed into one row (the other's directory orphaned), and the untracked scan
+ * did not recognise the sd.cpp directory and adopted it again as `recovered_`.
+ */
+export function imageModelDirName(model: Pick<ONNXImageModel, 'modelPath'>): string {
+  const path = model.modelPath ?? '';
+  const m = /\/image_models\/([^/]+)/.exec(path);
+  return m ? m[1] : basenameOf(path);
 }
 
 /**
@@ -87,7 +105,7 @@ export function collapseDuplicateImageRows(models: ONNXImageModel[]): {
   collapsed: number;
 } {
   const { rows, collapsed } = collapseRows(models, {
-    keyOf: model => basenameOf(model.modelPath) || undefined,
+    keyOf: model => imageModelDirName(model) || undefined,
     idOf: model => model.id,
     downloadedAtOf: model => model.downloadedAt,
     unit: 'directory',

@@ -4,6 +4,7 @@ import { ToolCall, ToolResult } from './types';
 import type { RagSearchResult } from '../rag';
 import logger from '../../utils/logger';
 import { handleAddCalendarEvent } from './calendarTool';
+import { handleGenerateImage } from './imageTool';
 
 function makeResult(call: ToolCall, start: number, opts: { content: string; error?: string }): ToolResult {
   return { toolCallId: call.id, name: call.name, content: opts.content, error: opts.error, durationMs: Date.now() - start };
@@ -379,35 +380,6 @@ async function handleReadUrl(rawUrl: string): Promise<string> {
     logger.error(`[Tools] read_url FAILED for "${url}": ${e?.message || e}`);
     throw e;
   } finally { clearTimeout(timeout); }
-}
-
-async function handleGenerateImage(prompt: string, call: ToolCall): Promise<string> {
-  const conversationId = call.context?.conversationId;
-  // Without a conversation the generated image has nowhere to render, so require it.
-  if (!conversationId) {
-    return 'Cannot generate an image outside of a conversation.';
-  }
-  const negativePrompt = requireString(call, 'negative_prompt') ?? undefined;
-  const rawSteps = call.arguments.steps;
-  const steps =
-    typeof rawSteps === 'number' && Number.isFinite(rawSteps)
-      ? Math.max(1, Math.min(50, Math.round(rawSteps)))
-      : typeof rawSteps === 'string' && rawSteps.trim() && Number.isFinite(Number(rawSteps))
-        ? Math.max(1, Math.min(50, Math.round(Number(rawSteps))))
-        : undefined;
-
-  const { imageGenerationService } = require('../imageGenerationService'); // NOSONAR
-  const result = await imageGenerationService.generateImage({
-    prompt,
-    conversationId,
-    ...(negativePrompt ? { negativePrompt } : {}),
-    ...(steps ? { steps } : {}),
-  });
-  if (!result) {
-    // generateImage returns null on "no image model selected" / already-in-flight / failure.
-    return 'Image generation could not start. Make sure an image model is selected in Models, then try again.';
-  }
-  return `Generated an image for: "${prompt}". It has been added to the chat.`;
 }
 
 async function handleSearchKnowledgeBase(query: string, projectId?: string): Promise<string> {

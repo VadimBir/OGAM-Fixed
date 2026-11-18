@@ -10,6 +10,7 @@ import { templateEmitsReasoning } from '../utils/messageContent';
 import { ensureNativeLogCapture, resetNativeLogCapture, recentNativeLog } from './llmNativeLog';
 
 import { HTP_ENABLED } from '../config/featureFlags';
+import { LIVE_RAM_MARGIN_MB } from './memoryBudget';
 
 const RESPONSE_RESERVE = 512;
 /** Prompt compaction target. Output length is the user's model-aware maxTokens setting. */
@@ -21,31 +22,33 @@ function getOptimalThreadCount(): number { return DEFAULT_THREADS; }
 function getOptimalBatchSize(): number { return DEFAULT_BATCH; }
 const REPACKABLE_QUANTS = ['q4_0', 'iq4_nl'];
 /**
- * Fraction of total device RAM under which a repackable-quant model may load with mmap
- * DISABLED (traded for repack/inference speed). Above it, disabling mmap loads the whole
- * model into non-reclaimable anonymous RAM, which OOM-kills the app on Android — so we
- * keep mmap on and let llama.cpp page weights in from disk.
+ * Fraction of LIVE usable RAM (live available minus the live safety margin) a repackable-quant
+ * model may occupy with mmap DISABLED. Was a fraction (0.25) of TOTAL RAM: on a 12GB phone that
+ * read any q4_0 up to 3GB fully into anonymous RAM even when only ~3GB was free, so the kernel
+ * could not drop and re-read its pages and the app was killed instead.
  */
-const MMAP_OFF_MAX_RAM_FRACTION = 0.25;
+const MMAP_OFF_MAX_LIVE_FRACTION = 0.5;
 
 /**
- * Whether to disable mmap for a repackable quant (q4_0 / iq4_nl) to gain repack speed.
- * Disabling mmap is only safe for SMALL models: without it, the weights become anonymous
- * RAM that the Android Low-Memory-Killer counts fully against the app, so a common
- * `…Q4_0.gguf` was reading fully into RAM and getting the process killed on load. We now
- * take the speed path only when the model is well within total RAM; when the size or RAM
- * is unknown, we default to KEEPING mmap on (the OOM-safe choice).
+ * Whether to disable mmap for a repackable quant (q4_0 / iq4_nl). The reason it exists: the
+ * repack speed path (mmap off + repack on, taken from pocketpal-ai, see
+ * docs/GPU-ACCELERATION-INVESTIGATION.md "Optimize mmap on Android"; not measured in this repo).
+ * Without mmap the weights are anonymous RAM the low-memory killer counts fully against the app,
+ * so mmap stays ON (file-backed, droppable) by default. The speed path is kept only when the
+ * model is at most half of live free RAM after the live safety margin; when the size or the live
+ * reading is unknown, mmap stays on.
  */
 export function shouldDisableMmap(
   modelPath: string,
-  opts?: { modelFileSizeBytes?: number; deviceTotalMemoryGB?: number },
+  opts?: { modelFileSizeBytes?: number; liveAvailableMB?: number },
 ): boolean {
   if (Platform.OS !== 'android') return false;
   if (!REPACKABLE_QUANTS.some(q => modelPath.toLowerCase().includes(q))) return false;
-  const { modelFileSizeBytes, deviceTotalMemoryGB } = opts ?? {};
-  if (!modelFileSizeBytes || !deviceTotalMemoryGB || deviceTotalMemoryGB <= 0) return false;
-  const modelGB = modelFileSizeBytes / (1024 ** 3);
-  return modelGB <= deviceTotalMemoryGB * MMAP_OFF_MAX_RAM_FRACTION;
+  const { modelFileSizeBytes, liveAvailableMB } = opts ?? {};
+  if (!modelFileSizeBytes || liveAvailableMB == null || !(liveAvailableMB > 0)) return false;
+  const modelMB = modelFileSizeBytes / (1024 * 1024);
+  const usableMB = liveAvailableMB - LIVE_RAM_MARGIN_MB;
+  return usableMB > 0 && modelMB <= usableMB * MMAP_OFF_MAX_LIVE_FRACTION;
 }
 export function hashString(str: string): string {
   let hash = 0;
@@ -105,33 +108,53 @@ export function effectiveCacheType(backend: string | undefined, requested: strin
   return backendForcesF16Cache(backend) ? 'f16' : (requested || 'q8_0');
 }
 
+/**
+ * flash_attn_type sent to llama.rn (its typings: `flash_attn_type?: 'auto' | 'on' | 'off'`,
+ * node_modules/llama.rn/src/index.ts:218; 'on' → LLAMA_FLASH_ATTN_TYPE_ENABLED, rn-llama.cpp:158-166).
+ *  - Android: always 'on' - the strongest value; the user's Flash-Attn-off setting is not honored
+ *    there (owner rule: flash attention shall be used, Android used to the max).
+ *  - Elsewhere: 'off' only for the explicit off setting with an f16 cache; otherwise 'auto'. A
+ *    quantized KV cache wins over an off setting: llama.cpp refuses a quantized V cache with flash
+ *    attention disabled ("quantized V cache requires flash_attn to be enabled"), failing init.
+ */
+export function resolveFlashAttnType(opts: { android: boolean; requestedOff: boolean; cacheType: string }): 'on' | 'auto' | 'off' {
+  if (opts.android) return 'on';
+  return opts.requestedOff && opts.cacheType === 'f16' ? 'off' : 'auto';
+}
+
 export function buildModelParams(
   modelPath: string,
-  settings: { nThreads?: number; nBatch?: number; contextLength?: number; flashAttn?: boolean; enableGpu?: boolean; gpuLayers?: number; cacheType?: string; inferenceBackend?: string; speculativeDecoding?: boolean; modelFileSizeBytes?: number; deviceTotalMemoryGB?: number },
+  settings: { nThreads?: number; nBatch?: number; contextLength?: number; flashAttn?: boolean; enableGpu?: boolean; gpuLayers?: number; cacheType?: string; inferenceBackend?: string; speculativeDecoding?: boolean; modelFileSizeBytes?: number; liveAvailableMB?: number; modelMaxContext?: number | null },
 ): ModelLoadParams {
   const nThreads = settings.nThreads || getOptimalThreadCount();
   const nBatch = settings.nBatch || getOptimalBatchSize();
-  const ctxLen = settings.contextLength || APP_CONFIG.maxContextLength;
+  // Clamp the global context to the model's trained context: a KV cache past n_ctx_train only
+  // costs RAM (the model cannot use it). Unknown trained context -> the requested value stands.
+  const requestedCtx = settings.contextLength || APP_CONFIG.maxContextLength;
+  const ctxLen = settings.modelMaxContext && settings.modelMaxContext > 0
+    ? Math.min(requestedCtx, settings.modelMaxContext)
+    : requestedCtx;
   // inferenceBackend takes precedence; fall back to legacy enableGpu flag
   const backend = settings.inferenceBackend;
   // Use flash_attn_type string API (replaces deprecated flash_attn boolean).
-  // OpenCL and HTP backends crash with flash attn on — disable for those.
-  // CPU (Android/iOS) and Metal both support it; use 'auto' to let llama.cpp decide.
+  // backendForcesF16Cache is false for every backend now (the old "OpenCL/HTP crash with flash
+  // attn on" coercion was removed; docs/GPU-ACCELERATION-INVESTIGATION.md calls that crash
+  // unconfirmed - llama.cpp #18075 falls back to CPU for the op). On Android flash attention is
+  // ALWAYS 'on' (resolveFlashAttnType). Elsewhere: 'auto' lets llama.cpp decide.
   const gpuBackendIncompatible = backendForcesF16Cache(backend);
   const flashAttnRequestedOff = settings.flashAttn === false || gpuBackendIncompatible;
+  const flashAttnForced = Platform.OS === 'android';
   const gpuEnabled = backend ? backend !== INFERENCE_BACKENDS.CPU : settings.enableGpu !== false;
   const nGpuLayers = gpuEnabled ? (settings.gpuLayers ?? DEFAULT_GPU_LAYERS) : 0;
-  const requestedCache = settings.cacheType || (flashAttnRequestedOff ? 'f16' : 'q8_0');
+  // An unset cache type defaults to q8_0 whenever flash attention will run (always on Android).
+  const requestedCache = settings.cacheType || (flashAttnRequestedOff && !flashAttnForced ? 'f16' : 'q8_0');
   // effectiveCacheType coerces OpenCL/HTP to f16 (single source shared with the UI).
   const cacheType = effectiveCacheType(backend, requestedCache);
-  // The quantized KV cache wins over a Flash-Attn-off setting: llama.cpp refuses a quantized V
-  // cache with flash attention disabled ("quantized V cache requires flash_attn to be enabled"),
-  // which failed BOTH the GPU and CPU init. 'auto' lets llama.cpp enable it for the quantized V.
-  const flash_attn_type = flashAttnRequestedOff && cacheType === 'f16' ? 'off' : 'auto';
+  const flash_attn_type = resolveFlashAttnType({ android: flashAttnForced, requestedOff: flashAttnRequestedOff, cacheType });
   return {
     baseParams: {
       model: modelPath, use_mlock: false, n_batch: nBatch, n_ubatch: nBatch, n_threads: nThreads,
-      use_mmap: !shouldDisableMmap(modelPath, { modelFileSizeBytes: settings.modelFileSizeBytes, deviceTotalMemoryGB: settings.deviceTotalMemoryGB }), vocab_only: false, flash_attn_type,
+      use_mmap: !shouldDisableMmap(modelPath, { modelFileSizeBytes: settings.modelFileSizeBytes, liveAvailableMB: settings.liveAvailableMB }), vocab_only: false, flash_attn_type,
       // Do NOT force kv_unified — let llama.cpp pick it per architecture. Forcing
       // `true` (a marginal single-seq perf tweak) hung gemma3n (gemma-4 E2B/E4B):
       // its interleaved sliding-window + heterogeneous KV layers froze building the

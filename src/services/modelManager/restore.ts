@@ -9,6 +9,7 @@ import {
 import logger from '../../utils/logger';
 import { mmProjLocalName } from './download';
 import { isMmProjFileName } from '../downloadHydration';
+import { localFileNameFromMetadataJson } from './localModelFile';
 
 export interface RestoreDownloadsOpts {
   modelsDir: string;
@@ -132,9 +133,12 @@ function buildMetadataFromActiveDownload(download: RestorableDownloadInfo, model
     derivedMmProjFileName = mmProjLocalName(download.fileName);
   }
 
+  const localFileName = localFileNameFromMetadataJson(download.metadataJson);
   return {
     modelId: download.modelId,
     fileName: download.fileName,
+    // A repo-qualified on-disk name chosen at download start (localModelFile.ts) lives only here.
+    ...(localFileName ? { localFileName } : {}),
     quantization: download.quantization || 'Unknown',
     author: download.modelId.split('/')[0] || 'Unknown',
     totalBytes: combinedTotal,
@@ -152,7 +156,7 @@ async function restoreDownloadEntry(opts: RestoreEntryOpts): Promise<void> {
     backgroundDownloadContext, backgroundDownloadMetadataCallback, onProgress,
   } = opts;
 
-  const localPath = `${modelsDir}/${metadata.fileName}`;
+  const localPath = `${modelsDir}/${metadata.localFileName ?? metadata.fileName}`;
   const mmProjLocalPath = metadata.mmProjLocalPath ?? null;
   const mainFileSize = metadata.mainFileSize ?? metadata.totalBytes;
   const mmProjFileSize = metadata.mmProjFileSize ?? 0;

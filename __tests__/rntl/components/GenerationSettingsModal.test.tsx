@@ -911,49 +911,37 @@ describe('GenerationSettingsModal', () => {
         expect(getByTestId('gpu-layers-stepper-value').props.children).toBe('1');
       });
 
-      it('does not clamp gpuLayers when turning flash attn On with undefined layers', () => {
+      it('Flash Attention is always on (disabled) on Android with undefined layers', () => {
         mockStoreValues.settings = { ...defaultSettings, flashAttn: false, gpuLayers: undefined as any };
         const { getByText, getByTestId } = render(<GenerationSettingsModal {...defaultProps} />);
         fireEvent.press(getByText('TEXT GENERATION'));
         fireEvent.press(getByTestId('modal-text-advanced-toggle'));
         mockUpdateSettings.mockClear();
         fireEvent.press(getByTestId('flash-attn-on-button'));
-        expect(mockUpdateSettings).toHaveBeenCalledWith(
-          expect.objectContaining({ flashAttn: true })
-        );
-        expect(mockUpdateSettings).not.toHaveBeenCalledWith(
-          expect.objectContaining({ gpuLayers: expect.any(Number) })
-        );
+        fireEvent.press(getByTestId('flash-attn-off-button'));
+        expect(mockUpdateSettings).not.toHaveBeenCalled();
       });
 
-      it('does not clamp gpuLayers when turning flash attn On with layers > 1', () => {
+      it('Flash Attention is always on (disabled) on Android with layers > 1', () => {
         mockStoreValues.settings = { ...defaultSettings, flashAttn: false, gpuLayers: 8 };
         const { getByText, getByTestId } = render(<GenerationSettingsModal {...defaultProps} />);
         fireEvent.press(getByText('TEXT GENERATION'));
         fireEvent.press(getByTestId('modal-text-advanced-toggle'));
         mockUpdateSettings.mockClear();
         fireEvent.press(getByTestId('flash-attn-on-button'));
-        expect(mockUpdateSettings).toHaveBeenCalledWith(
-          expect.objectContaining({ flashAttn: true })
-        );
-        expect(mockUpdateSettings).not.toHaveBeenCalledWith(
-          expect.objectContaining({ gpuLayers: expect.any(Number) })
-        );
+        fireEvent.press(getByTestId('flash-attn-off-button'));
+        expect(mockUpdateSettings).not.toHaveBeenCalled();
       });
 
-      it('does not clamp gpuLayers when turning flash attn On with layers = 1', () => {
+      it('Flash Attention is always on (disabled) on Android with layers = 1', () => {
         mockStoreValues.settings = { ...defaultSettings, flashAttn: false, gpuLayers: 1 };
         const { getByText, getByTestId } = render(<GenerationSettingsModal {...defaultProps} />);
         fireEvent.press(getByText('TEXT GENERATION'));
         fireEvent.press(getByTestId('modal-text-advanced-toggle'));
         mockUpdateSettings.mockClear();
         fireEvent.press(getByTestId('flash-attn-on-button'));
-        expect(mockUpdateSettings).toHaveBeenCalledWith(
-          expect.objectContaining({ flashAttn: true })
-        );
-        expect(mockUpdateSettings).not.toHaveBeenCalledWith(
-          expect.objectContaining({ gpuLayers: expect.any(Number) })
-        );
+        fireEvent.press(getByTestId('flash-attn-off-button'));
+        expect(mockUpdateSettings).not.toHaveBeenCalled();
       });
 
       it('calls updateSettings with inferenceBackend: cpu when CPU button pressed', () => {

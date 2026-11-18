@@ -22,6 +22,7 @@ import { importSdCheckpointOrLora } from './importSdCheckpoint';
 import { isSdCppCandidateFileName } from '../../services/sdCppModelDetection';
 import { isPickerStuck } from '../../utils/pickerErrorUtils';
 import { isLiteRTFileName } from '../../utils/modelHelpers';
+import logger from '../../utils/logger';
 
 type ZipImportDeps = {
   addDownloadedImageModel: (model: ONNXImageModel) => void;
@@ -31,48 +32,101 @@ type ZipImportDeps = {
   setAlertState: (s: AlertState) => void;
 };
 
+type ReadDirItems = Awaited<ReturnType<typeof RNFS.readDir>>;
+
+/** A CoreML bundle in the extracted tree (top level or one folder down). */
+async function containsMLModelC(dirContents: ReadDirItems): Promise<boolean> {
+  if (dirContents.some(f => f.name.endsWith('.mlmodelc'))) return true;
+  for (const sub of dirContents.filter(f => f.isDirectory())) {
+    let inner: ReadDirItems = [];
+    try {
+      inner = await RNFS.readDir(sub.path);
+    } catch (error) {
+      logger.warn(`[ImageZipImport] could not read ${sub.path}:`, error);
+    }
+    if (inner.some(f => f.name.endsWith('.mlmodelc'))) return true;
+  }
+  return false;
+}
+
+/**
+ * The image backend an extracted zip is for, or null when it is none this device can run.
+ * CoreML only on iOS and only for a real `.mlmodelc`: "any folder in the zip" used to mean CoreML,
+ * so an Android MNN/QNN zip that unpacks into a folder registered as an iOS-only model that could
+ * never load, and a zip of nothing recognisable registered with `backend: undefined`.
+ */
+async function detectZipBackend(
+  modelDir: string,
+  dirContents: ReadDirItems,
+): Promise<{ backend: 'mnn' | 'qnn' | 'coreml'; resolvedModelDir: string } | null> {
+  if (Platform.OS === 'ios' && (await containsMLModelC(dirContents))) {
+    return { backend: 'coreml', resolvedModelDir: await resolveCoreMLModelDir(modelDir) };
+  }
+  // A zip that wraps everything in one folder: look one level down for the model files.
+  const dirs = dirContents.filter(f => f.isDirectory());
+  const files = dirs.length === 1 && dirs.length === dirContents.length
+    ? await RNFS.readDir(dirs[0].path)
+    : dirContents;
+  if (files.some(f => f.name.endsWith('.mnn'))) return { backend: 'mnn', resolvedModelDir: modelDir };
+  if (files.some(f => f.name.endsWith('.bin') || f.name.includes('qnn'))) {
+    return { backend: 'qnn', resolvedModelDir: modelDir };
+  }
+  return null;
+}
+
+async function removeIfPresent(path: string): Promise<void> {
+  try {
+    if (await RNFS.exists(path)) await RNFS.unlink(path);
+  } catch (error) {
+    logger.warn(`[ImageZipImport] could not remove ${path}:`, error);
+  }
+}
+
 async function importImageModelZip(sourceUri: string, fileName: string, deps: ZipImportDeps): Promise<void> {
   const { addDownloadedImageModel, activeImageModelId, setActiveImageModelId, setImportProgress, setAlertState } = deps;
   const imageModelsDir = modelManager.getImageModelsDirectory();
   const modelId = `local_${fileName.replaceAll(/\.zip$/gi, '').replaceAll(/[^a-zA-Z0-9_-]/g, '_')}_${Date.now()}`;
   const modelDir = `${imageModelsDir}/${modelId}`;
   const zipPath = `${imageModelsDir}/${modelId}.zip`;
-  if (!(await RNFS.exists(imageModelsDir))) await RNFS.mkdir(imageModelsDir);
-  setImportProgress({ fraction: 0.1, fileName });
-  if (Platform.OS === 'ios') await RNFS.moveFile(sourceUri, zipPath);
-  else await RNFS.copyFile(sourceUri, zipPath);
-  setImportProgress({ fraction: 0.5, fileName });
-  if (!(await RNFS.exists(modelDir))) await RNFS.mkdir(modelDir);
-  setImportProgress({ fraction: 0.6, fileName });
-  await unzip(zipPath, modelDir);
-  setImportProgress({ fraction: 0.85, fileName });
-  const dirContents = await RNFS.readDir(modelDir);
-  const hasMLModelC = dirContents.some(f => f.name.endsWith('.mlmodelc'));
-  const hasNestedMLModelC = !hasMLModelC && dirContents.some(f => f.isDirectory());
-  let resolvedModelDir = modelDir;
-  let backend: 'mnn' | 'qnn' | 'coreml' | undefined;
-  if (hasMLModelC || hasNestedMLModelC) {
-    backend = 'coreml';
-    resolvedModelDir = await resolveCoreMLModelDir(modelDir);
-  } else {
-    const hasMNN = dirContents.some(f => f.name.endsWith('.mnn'));
-    const hasQNN = dirContents.some(f => f.name.endsWith('.bin') || f.name.includes('qnn'));
-    if (hasMNN) backend = 'mnn';
-    else if (hasQNN) backend = 'qnn';
+  try {
+    if (!(await RNFS.exists(imageModelsDir))) await RNFS.mkdir(imageModelsDir);
+    setImportProgress({ fraction: 0.1, fileName });
+    if (Platform.OS === 'ios') await RNFS.moveFile(sourceUri, zipPath);
+    else await RNFS.copyFile(sourceUri, zipPath);
+    setImportProgress({ fraction: 0.5, fileName });
+    if (!(await RNFS.exists(modelDir))) await RNFS.mkdir(modelDir);
+    setImportProgress({ fraction: 0.6, fileName });
+    await unzip(zipPath, modelDir);
+    setImportProgress({ fraction: 0.85, fileName });
+    const dirContents = await RNFS.readDir(modelDir);
+    const detected = await detectZipBackend(modelDir, dirContents);
+    if (!detected) {
+      throw new Error(Platform.OS === 'ios'
+        ? 'This zip holds no image model this device can run (expected a CoreML .mlmodelc, or MNN/QNN files).'
+        : 'This zip holds no image model this device can run (expected MNN .mnn or QNN files).');
+    }
+    const { backend, resolvedModelDir } = detected;
+    await removeIfPresent(zipPath);
+    const totalSize = await getDirectorySize(resolvedModelDir);
+    setImportProgress({ fraction: 0.95, fileName });
+    const modelName = fileName.replaceAll(/\.zip$/gi, '').replaceAll(/[_-]/g, ' ');
+    const imageModel: ONNXImageModel = {
+      id: modelId, name: modelName, description: 'Locally imported image model',
+      modelPath: resolvedModelDir, downloadedAt: new Date().toISOString(), size: totalSize, backend,
+    };
+    await modelManager.addDownloadedImageModel(imageModel);
+    addDownloadedImageModel(imageModel);
+    if (!activeImageModelId) setActiveImageModelId(imageModel.id);
+    setImportProgress({ fraction: 1, fileName });
+    setAlertState(showAlert('Success', `${modelName} imported successfully!`));
+  } catch (error) {
+    // Nothing half-imported may stay behind: a leftover dir is adopted by the next scan as a
+    // `recovered_` model, and a leftover zip is dead weight in image_models/.
+    logger.error(`[ImageZipImport] import of ${fileName} failed:`, error);
+    await removeIfPresent(zipPath);
+    await removeIfPresent(modelDir);
+    setAlertState(showAlert('Import Failed', getErrorMessage(error)));
   }
-  await RNFS.unlink(zipPath).catch(() => { });
-  const totalSize = await getDirectorySize(resolvedModelDir);
-  setImportProgress({ fraction: 0.95, fileName });
-  const modelName = fileName.replaceAll(/\.zip$/gi, '').replaceAll(/[_-]/g, ' ');
-  const imageModel: ONNXImageModel = {
-    id: modelId, name: modelName, description: 'Locally imported image model',
-    modelPath: resolvedModelDir, downloadedAt: new Date().toISOString(), size: totalSize, backend,
-  };
-  await modelManager.addDownloadedImageModel(imageModel);
-  addDownloadedImageModel(imageModel);
-  if (!activeImageModelId) setActiveImageModelId(imageModel.id);
-  setImportProgress({ fraction: 1, fileName });
-  setAlertState(showAlert('Success', `${modelName} imported successfully!`));
 }
 
 

@@ -18,8 +18,11 @@ export function estimateSdCppModelMemory(model: Pick<ONNXImageModel, 'size' | 's
     weightType: s.imageSdWeightType ?? 'auto',
     width,
     height: snapSdCppDimension(s.imageHeight, width),
-    flashAttn: s.imageSdFlashAttn ?? true,
+    // The diffusion model always runs flash attention (sdcpp_jni.cpp diffusion_flash_attn = true); the
+    // setting only covers the text encoder + VAE, so UNet attention scores are never materialised.
+    flashAttn: true,
     vaeTiling: s.imageSdVaeTiling ?? true,
+    threads: s.imageThreads,
   });
 }
 

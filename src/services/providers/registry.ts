@@ -52,9 +52,8 @@ class ProviderRegistry {
    * Get a provider by ID
    */
   getProvider(id: string): LLMProvider | undefined {
-    const provider = this.providers.get(id);
-    logger.log('[ProviderRegistry] getProvider:', id, 'found:', !!provider, 'providerIds:', this.getProviderIds());
-    return provider;
+    // No log here: getProvider runs on every send and every capability read.
+    return this.providers.get(id);
   }
 
   /**

@@ -15,6 +15,43 @@ export function snapSdCppDimension(px: number | null | undefined, fallback = 512
   return Math.max(SDCPP_MIN_SIZE, Math.round(clamped / SDCPP_SIZE_MULTIPLE) * SDCPP_SIZE_MULTIPLE);
 }
 
+/**
+ * What an engine will really render for a request, known BEFORE generating, so UI and callers
+ * never discover a silent substitution afterwards (QNN without a resolution patch -> 512x512,
+ * MNN -> square 128..512, OpenCL only at exactly 512x512).
+ */
+export interface EffectiveImageSize {
+  engine: 'localdream' | 'sdcpp';
+  requestedWidth: number;
+  requestedHeight: number;
+  width: number;
+  height: number;
+  /** true when width/height differ from what was requested. */
+  adjusted: boolean;
+  reason: string | null;
+  /** Whether OpenCL will really run; null when the engine cannot say (sd.cpp, no model, iOS). */
+  useOpenCL: boolean | null;
+}
+
+/** sd.cpp honours W and H independently on the 64 px grid (64..SDCPP_MAX_SIZE). */
+export function resolveSdCppEffectiveSize(params: { width?: number | null; height?: number | null }): EffectiveImageSize {
+  const requestedWidth = params.width || 512;
+  const requestedHeight = params.height || 512;
+  const width = snapSdCppDimension(params.width);
+  const height = snapSdCppDimension(params.height);
+  const adjusted = width !== requestedWidth || height !== requestedHeight;
+  return {
+    engine: 'sdcpp',
+    requestedWidth,
+    requestedHeight,
+    width,
+    height,
+    adjusted,
+    reason: adjusted ? `stable-diffusion.cpp uses a ${SDCPP_SIZE_MULTIPLE} px grid, ${SDCPP_MIN_SIZE}-${SDCPP_MAX_SIZE} px` : null,
+    useOpenCL: null,
+  };
+}
+
 export interface EngineImageSettings {
   imageWidth?: number | null;
   imageHeight?: number | null;

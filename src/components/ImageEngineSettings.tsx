@@ -138,8 +138,8 @@ const SdCppMemoryControls: React.FC<{ model: ONNXImageModel; styles: Styles }> =
       <View style={styles.group}>
         <Text style={styles.label}>Weight quantization</Text>
         <Text style={styles.desc}>
-          Converted in memory at load (file untouched; reloads the model). UNet attention/linear and
-          text-encoder weights convert; 3x3 convs and the VAE keep the file's precision.
+          Converted in memory at load (file untouched; reloads the model). Only linear weights take the
+          chosen type. All convolutions (UNet and VAE) are f16, biases and norms f32, embeddings keep the file type.
         </Text>
         <View style={styles.chips}>
           {SD_WEIGHT_TYPES.map(wt => {
@@ -161,7 +161,7 @@ const SdCppMemoryControls: React.FC<{ model: ONNXImageModel; styles: Styles }> =
         testID="sdcpp-flash-attn"
         styles={styles}
         label="Flash attention"
-        desc="Streams UNet attention instead of materialising the score matrix (reloads the model)."
+        desc="Applies to the text encoder and the VAE only. Diffusion (UNet) attention always uses flash attention (reloads the model)."
         value={settings.imageSdFlashAttn ?? true}
         onChange={v => updateSettings({ imageSdFlashAttn: v })}
       />

@@ -39,9 +39,11 @@ export function substituteCardPlaceholders(
   userName: string,
 ): string {
   if (!text) return text;
+  // Replacer FUNCTIONS, not replacement strings: a string replacement interprets `$&`, `$1`, `$$`, ...
+  // so a name such as "Cash$$" or "A$&B" would be rewritten instead of inserted verbatim.
   return text
-    .replace(/\{\{?\s*char\s*\}?\}/gi, charName)
-    .replace(/\{\{?\s*user\s*\}?\}/gi, userName);
+    .replace(/\{\{?\s*char\s*\}?\}/gi, () => charName)
+    .replace(/\{\{?\s*user\s*\}?\}/gi, () => userName);
 }
 
 /**

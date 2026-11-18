@@ -21,6 +21,28 @@ export const IMAGE_LORAS_DIR = `${RNFS.DocumentDirectoryPath}/image_loras`;
 
 const safeId = (name: string) => name.replaceAll(/[^a-zA-Z0-9_-]/g, '_');
 
+/** Room kept free beyond the file itself (the OS and the app need headroom to keep running). */
+const FREE_SPACE_HEADROOM_BYTES = 256 * 1024 * 1024;
+
+const formatGB = (bytes: number) => `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+
+/**
+ * Bytes still missing to copy a file of `size` (plus headroom), or null when it fits. An unknown
+ * size, or a device that cannot report free space, is not blocked - the copy itself still fails
+ * cleanly (copyFileWithProgress removes its partial file).
+ */
+async function missingFreeSpace(size: number | null): Promise<number | null> {
+  if (!size || size <= 0) return null;
+  try {
+    const { freeSpace } = await RNFS.getFSInfo();
+    const needed = size + FREE_SPACE_HEADROOM_BYTES;
+    return freeSpace >= needed ? null : needed - freeSpace;
+  } catch (error) {
+    logger.warn('[SDCPP-IMPORT] free space unavailable, copying without the check:', error);
+    return null;
+  }
+}
+
 async function classify(path: string, fileName: string): Promise<SafetensorsClassification> {
   // .ckpt is a pickled torch zip with no cheap key index; it is (practically) only used for SD.
   if (fileName.toLowerCase().endsWith('.ckpt')) {
@@ -66,6 +88,16 @@ export async function importSdCheckpointOrLora(
   const imageModelsDir = modelManager.getImageModelsDirectory();
   const modelDir = `${imageModelsDir}/${modelId}`;
   const dest = `${modelDir}/${fileName}`;
+  // A checkpoint is 2-7 GB. Copying it into a full disk fails late (after minutes) or fills the
+  // device so other apps / the OS start failing. Check before writing a byte.
+  const shortBy = await missingFreeSpace(file.size ?? null);
+  if (shortBy !== null) {
+    setAlertState(showAlert(
+      'Not Enough Storage',
+      `${fileName} needs about ${formatGB(shortBy)} more free space. Free up space and try again.`,
+    ));
+    return;
+  }
   if (!(await RNFS.exists(imageModelsDir))) await RNFS.mkdir(imageModelsDir);
   await RNFS.mkdir(modelDir);
   try {

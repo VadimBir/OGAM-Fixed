@@ -253,7 +253,14 @@ export const ChatScreen: React.FC = () => {
         setAssistantSelected(false);
         return chat.handleRetryMessage(message, selected);
       }}
-      onEdit={chat.handleEditMessage}
+      onEdit={(message, newContent) => {
+        // Editing a USER message regenerates the turn, so it consumes the Assistant selection exactly
+        // like retry; an assistant-message edit only rewrites text and leaves the selection alone.
+        if (message.role !== 'user') return chat.handleEditMessage(message, newContent);
+        const selected = assistantSelectedRef.current;
+        setAssistantSelected(false);
+        return chat.handleEditMessage(message, newContent, selected);
+      }}
       onTranscribeAgain={chat.handleTranscribeAgain}
       onGenerateImage={chat.handleGenerateImageFromMessage}
       onImagePress={chat.handleImagePress}

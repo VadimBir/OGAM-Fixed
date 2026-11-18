@@ -3,6 +3,7 @@ import { statFile } from '../../utils/fileStat';
 import logger from '../../utils/logger';
 import { DownloadedModel, ModelFile } from '../../types';
 import { commitModelsList } from './storage';
+import { withModelRegistryLock } from './registryLock';
 import { isMMProjFile } from './scan';
 import { canKeepMmProjLink, pickMmProjForModel } from '../mmproj';
 import { performMmProjRepairDownload } from './download';
@@ -106,10 +107,12 @@ export async function linkOrphanMmProj(
   }
 
   if (toSave.length > 0) {
-    const current = await ctx.getDownloadedModels();
-    await commitModelsList(
-      current.map(m => toSave.find(s => s.id === m.id) ?? m),
-    );
+    await withModelRegistryLock(async () => {
+      const current = await ctx.getDownloadedModels();
+      await commitModelsList(
+        current.map(m => toSave.find(s => s.id === m.id) ?? m),
+      );
+    });
   }
 }
 
@@ -199,13 +202,15 @@ export async function markVisionModel(
   ctx: VisionRepairContext,
   modelId: string,
 ): Promise<boolean> {
-  const models = await ctx.getDownloadedModels();
-  const target = models.find(m => m.id === modelId);
-  if (target?.engine !== 'llama' || target.isVisionModel) return false;
-  await commitModelsList(
-    models.map(m => (m.id === modelId ? { ...m, isVisionModel: true } : m)),
-  );
-  return true;
+  return withModelRegistryLock(async () => {
+    const models = await ctx.getDownloadedModels();
+    const target = models.find(m => m.id === modelId);
+    if (target?.engine !== 'llama' || target.isVisionModel) return false;
+    await commitModelsList(
+      models.map(m => (m.id === modelId ? { ...m, isVisionModel: true } : m)),
+    );
+    return true;
+  });
 }
 
 export async function saveModelWithMmproj(
@@ -216,38 +221,42 @@ export async function saveModelWithMmproj(
   const mmProjFileName = mmProjPath.split('/').pop() || mmProjPath;
   const mmProjFileSize = (await statFile(mmProjPath))?.size ?? 0;
 
-  const models = await ctx.getDownloadedModels();
-  await commitModelsList(
-    models.map(m =>
-      m.id === modelId
-        ? {
-            ...m,
-            mmProjPath,
-            mmProjFileName,
-            mmProjFileSize,
-            isVisionModel: true,
-          }
-        : m,
-    ),
-  );
+  await withModelRegistryLock(async () => {
+    const models = await ctx.getDownloadedModels();
+    await commitModelsList(
+      models.map(m =>
+        m.id === modelId
+          ? {
+              ...m,
+              mmProjPath,
+              mmProjFileName,
+              mmProjFileSize,
+              isVisionModel: true,
+            }
+          : m,
+      ),
+    );
+  });
 }
 
 export async function clearMmProjLink(
   ctx: VisionRepairContext,
   modelId: string,
 ): Promise<void> {
-  const models = await ctx.getDownloadedModels();
-  await commitModelsList(
-    models.map(m =>
-      m.id === modelId
-        ? {
-            ...m,
-            mmProjPath: undefined,
-            mmProjFileName: undefined,
-            mmProjFileSize: undefined,
-            isVisionModel: false,
-          }
-        : m,
-    ),
-  );
+  await withModelRegistryLock(async () => {
+    const models = await ctx.getDownloadedModels();
+    await commitModelsList(
+      models.map(m =>
+        m.id === modelId
+          ? {
+              ...m,
+              mmProjPath: undefined,
+              mmProjFileName: undefined,
+              mmProjFileSize: undefined,
+              isVisionModel: false,
+            }
+          : m,
+      ),
+    );
+  });
 }
