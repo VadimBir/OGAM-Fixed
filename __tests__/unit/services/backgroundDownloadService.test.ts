@@ -335,6 +335,27 @@ describe('BackgroundDownloadService', () => {
       expect(result[0].bytesDownloaded).toBe(1000);
       expect(result[0].reason).toBe('still downloading');
     });
+
+    it('never logs a Civitai API key carried as token= in a row url', async () => {
+      mockDownloadManagerModule.getActiveDownloads.mockResolvedValue([
+        { id: 'dl-2', fileName: 'a.safetensors', status: 'running', url: 'https://civitai.com/api/download/models/1?type=Model&token=secret-key-123' },
+      ]);
+      (console.log as jest.Mock).mockClear();
+      await service.getActiveDownloads();
+      const logged = (console.log as jest.Mock).mock.calls.map(c => c.join(' ')).join('\n');
+      expect(logged).toContain('getActiveDownloads');
+      expect(logged).toContain('token=***');
+      expect(logged).not.toContain('secret-key-123');
+    });
+  });
+
+  describe('redactUrlTokens', () => {
+    it('replaces every token= value and leaves other params', () => {
+      const { redactUrlTokens } = require('../../../src/services/backgroundDownloadService');
+      expect(redactUrlTokens('{"url":"https://civitai.com/x?token=abc&type=Model"} u?TOKEN=def'))
+        .toBe('{"url":"https://civitai.com/x?token=***&type=Model"} u?TOKEN=***');
+      expect(redactUrlTokens('https://huggingface.co/a/resolve/main/m.gguf')).toBe('https://huggingface.co/a/resolve/main/m.gguf');
+    });
   });
 
   // ========================================================================

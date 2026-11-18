@@ -18,6 +18,10 @@ const ERROR_MESSAGES: Record<string, string> = {
   http_429:             'Server is rate-limiting. Please try again later.',
   client_error:         'A client error occurred. Please retry.',
   unknown_error:        'Something went wrong while downloading.',
+  // Civitai gated downloads (WorkerDownload.kt civitaiAuthFailureReason); same text as DownloadUiState.kt.
+  civitai_auth_required: 'Civitai needs your API key. Add it in Models > Image > Civitai, then tap Retry download to phone.',
+  civitai_key_rejected:  'Civitai rejected your API key. Replace it in Models > Image > Civitai, then tap Retry download to phone.',
+  civitai_forbidden:     'Civitai does not permit your account to download this file.',
 };
 
 const MAX_USER_MESSAGE_LEN = 160;

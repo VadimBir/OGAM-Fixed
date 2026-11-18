@@ -559,7 +559,11 @@ export type BackgroundDownloadReasonCode =
   | 'http_416'
   | 'http_429'
   | 'client_error'
-  | 'unknown_error';
+  | 'unknown_error'
+  // Civitai gated downloads (WorkerDownload.kt civitaiAuthFailureReason).
+  | 'civitai_auth_required'
+  | 'civitai_key_rejected'
+  | 'civitai_forbidden';
 export interface BackgroundDownloadInfo {
   downloadId: string;
   fileName: string;

@@ -1,6 +1,11 @@
 /**
- * The optional Civitai API key, held in the Keychain / Android Keystore like remote-server keys
- * (remoteServerManagerUtils.ts). Never in AsyncStorage or the persisted Zustand store.
+ * The Civitai API key, held in the Keychain / Android Keystore like remote-server keys
+ * (remoteServerManagerUtils.ts). Never in AsyncStorage or the persisted Zustand store. Search works
+ * without it; most model downloads 401 without it (Civitai CLI guide), so downloads send it as
+ * `?token=` (civitaiBrowser.ts withCivitaiDownloadToken). That URL, key included, is kept in the
+ * app-private native download row (DownloadManagerModule.kt startDownload) so WorkManager can resume
+ * after app exit, and in AsyncStorage while a start waits for a slot (queuedDownloadPersistence.ts).
+ * Never log it.
  */
 import * as Keychain from 'react-native-keychain';
 import logger from '../utils/logger';

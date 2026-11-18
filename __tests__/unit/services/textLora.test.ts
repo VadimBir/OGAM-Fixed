@@ -108,4 +108,20 @@ describe('textSafetensorsRefusal', () => {
     ])) as any);
     await expect(textSafetensorsRefusal('file:///x/style.safetensors')).resolves.toBeNull();
   });
+
+  it.each([
+    ['SDXL / Pony checkpoint', [
+      'conditioner.embedders.1.model.token_embedding.weight',
+      'first_stage_model.decoder.conv_in.weight',
+      'model.diffusion_model.label_emb.0.0.weight',
+    ]],
+    ['AIO checkpoint whose text encoder is an LLM', [
+      'model.diffusion_model.layers.0.attention.qkv.weight',
+      'text_encoders.qwen3_4b.transformer.model.embed_tokens.weight',
+      'text_encoders.qwen3_4b.transformer.model.layers.0.mlp.up_proj.weight',
+    ]],
+  ])('never refuses an image checkpoint (%s) picked from content://', async (_label, keys) => {
+    mockedRNFS.read.mockImplementation(serveBytes(buildSafetensorsHeader(keys)) as any);
+    await expect(textSafetensorsRefusal('content://media/external/file/42')).resolves.toBeNull();
+  });
 });

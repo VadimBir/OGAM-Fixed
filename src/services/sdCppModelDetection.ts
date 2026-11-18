@@ -225,6 +225,18 @@ export function classifySafetensorsKeys(
   if (prefix(keys, 'encoder.down.') && prefix(keys, 'decoder.up.')) {
     return { kind: 'sd-vae', family: 'unknown', reason: 'standalone VAE (encoder./decoder. only)' };
   }
+  // A diffusion model saved WITHOUT the single-file `model.diffusion_model.` prefix (ComfyUI
+  // models/unet or diffusion_models, BFL flux1-*.safetensors): UNet/DiT only, no text encoder or VAE.
+  // sd.cpp loads such a file only as a separate --diffusion-model; this app loads one single file.
+  // `!loraKeys`: an unprefixed Flux LoRA (double_blocks.*.lora_down) is not a diffusion model.
+  const diffusionOnly = loraKeys ? null : diffusionOnlyName(keys);
+  if (diffusionOnly) {
+    return {
+      kind: 'sd-component',
+      family: 'unknown',
+      reason: `${diffusionOnly} diffusion model only (no text encoder or VAE inside) - needs a full single-file checkpoint`,
+    };
+  }
   if (prefix(keys, 'down_blocks.') || prefix(keys, 'text_model.')) {
     return {
       kind: 'sd-component',
@@ -233,6 +245,16 @@ export function classifySafetensorsKeys(
     };
   }
   return { kind: 'unknown', family: 'unknown', reason: 'no known SD or LLM tensor layout' };
+}
+
+/** Family of an unprefixed UNet / DiT file, or null when the keys are not one (same markers as unetFamily). */
+function diffusionOnlyName(keys: string[]): string | null {
+  if (prefix(keys, 'double_blocks.') || prefix(keys, 'single_transformer_blocks.')) return 'Flux';
+  if (prefix(keys, 'joint_blocks.')) return 'SD3';
+  if (prefix(keys, 'input_blocks.') && prefix(keys, 'output_blocks.')) {
+    return prefix(keys, 'label_emb.') ? 'SDXL UNet' : 'SD UNet';
+  }
+  return null;
 }
 
 function unetFamilyOfLoraBase(base: LoraBase): SdFamily {

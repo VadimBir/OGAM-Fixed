@@ -31,6 +31,14 @@ jest.mock('react-native-fs', () => ({
   copyFile: jest.fn().mockResolvedValue(undefined),
   readDir: jest.fn().mockResolvedValue([]),
   unlink: jest.fn().mockResolvedValue(undefined),
+  // Header reads of a picked file (safetensors sniff / text refusal); a test serves bytes when it needs them.
+  read: jest.fn(),
+}));
+
+// The sd.cpp file import (its copy + classify are covered by sdCppFileRegistration.test.ts).
+const mockImportSd = jest.fn();
+jest.mock('../../../../src/screens/ModelsScreen/importSdCheckpoint', () => ({
+  importSdCheckpointOrLora: (...args: any[]) => mockImportSd(...args),
 }));
 
 // Mock zip
@@ -801,6 +809,67 @@ describe('useModelsScreen', () => {
 
       // Should not load since models exist
       expect(mockLoadHFModels).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('handleImportLocalModel - the own .safetensors image model of the user', () => {
+    const RNFS = require('react-native-fs');
+    const { buildSafetensorsHeader, serveBytes } = require('../../../utils/ggufFixture');
+    const SDXL_CHECKPOINT = buildSafetensorsHeader([
+      'conditioner.embedders.1.model.token_embedding.weight',
+      'first_stage_model.decoder.conv_in.weight',
+      'model.diffusion_model.label_emb.0.0.weight',
+    ]);
+    const FLUX_AIO = buildSafetensorsHeader([
+      'model.diffusion_model.double_blocks.0.img_attn.qkv.weight',
+      'text_encoders.t5xxl.transformer.encoder.block.0.layer.0.SelfAttention.q.weight',
+    ]);
+
+    beforeEach(() => {
+      (Platform as any).OS = 'android';
+      mockImportSd.mockResolvedValue(undefined);
+    });
+
+    it('routes an SDXL checkpoint to the image import; the text-LoRA refusal does not intercept it', async () => {
+      RNFS.read.mockImplementation(serveBytes(SDXL_CHECKPOINT));
+      mockPick.mockResolvedValueOnce([{ uri: 'content://media/external/file/42', name: 'ponyDiffusionV6XL.safetensors', size: 6938040682 }]);
+      const { result } = renderHook(() => useModelsScreen());
+
+      await act(async () => { await result.current.handleImportLocalModel(); });
+
+      expect(mockImportSd).toHaveBeenCalledTimes(1);
+      expect(mockImportSd.mock.calls[0][0]).toEqual({
+        uri: 'content://media/external/file/42', name: 'ponyDiffusionV6XL.safetensors', size: 6938040682,
+      });
+      expect(result.current.alertState.title).not.toBe('Convert to GGUF first');
+      expect(result.current.alertState.title).not.toBe('Invalid File');
+    });
+
+    it.each([
+      ['flux1-dev-aio.sft', 'flux1-dev-aio.safetensors'],
+      ['checkpoint.bin', 'checkpoint.safetensors'],
+      ['msf:1000012345', 'msf:1000012345.safetensors'],
+    ])('imports %s by its safetensors header bytes as %s', async (picked, staged) => {
+      RNFS.read.mockImplementation(serveBytes(FLUX_AIO));
+      mockPick.mockResolvedValueOnce([{ uri: 'content://com.android.providers.downloads.documents/document/msf%3A1', name: picked, size: 1000 }]);
+      const { result } = renderHook(() => useModelsScreen());
+
+      await act(async () => { await result.current.handleImportLocalModel(); });
+
+      expect(mockImportSd).toHaveBeenCalledTimes(1);
+      expect(mockImportSd.mock.calls[0][0].name).toBe(staged);
+      expect(result.current.alertState.title).not.toBe('Invalid File');
+    });
+
+    it('a non-safetensors file with an unknown name stays "Invalid File"', async () => {
+      RNFS.read.mockImplementation(serveBytes(new Uint8Array(Buffer.from('%PDF-1.7 not a model', 'latin1'))));
+      mockPick.mockResolvedValueOnce([{ uri: 'content://docs/doc', name: 'doc.pdf', size: 100 }]);
+      const { result } = renderHook(() => useModelsScreen());
+
+      await act(async () => { await result.current.handleImportLocalModel(); });
+
+      expect(mockImportSd).not.toHaveBeenCalled();
+      expect(result.current.alertState.title).toBe('Invalid File');
     });
   });
 });

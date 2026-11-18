@@ -39,7 +39,9 @@ describe('Model choice on the phone', () => {
     });
   });
 
-  it('offers local file import as an upload action only on Models > Text', async () => {
+  // Models > Image has its own upload action: the user's own .safetensors / .ckpt checkpoint is an
+  // image model, and an upload button only on Models > Text was where nobody looked for it.
+  it('offers local file import as an upload action on Models > Text and Models > Image', async () => {
     installNativeBoundary({ fs: true, ram: { platform: 'android', totalBytes: 8 * GB, availBytes: 6 * GB } });
     const React = require('react');
     const { render, fireEvent, waitFor, within } = requireRTL();
@@ -55,7 +57,10 @@ describe('Model choice on the phone', () => {
 
     fireEvent.press(screen.getByText('Image'));
     expect(screen.queryByTestId('import-local-model')).toBeNull();
+    const imageUpload = await waitFor(() => screen.getByTestId('import-local-image-model'));
+    expect(imageUpload.props.accessibilityLabel).toBe('Import image model file');
     fireEvent.press(screen.getByText('Text'));
+    expect(screen.queryByTestId('import-local-image-model')).toBeNull();
     expect(screen.getByTestId('import-local-model')).toBeTruthy();
   });
 

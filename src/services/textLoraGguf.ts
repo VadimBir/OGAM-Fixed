@@ -10,6 +10,7 @@
  */
 import { Buffer } from 'buffer';
 import RNFS from 'react-native-fs';
+import logger from '../utils/logger';
 
 export type GgufScalar = string | number | boolean;
 
@@ -201,6 +202,30 @@ export async function readSafetensorsKeys(path: string): Promise<string[]> {
   if (headerLen <= 0) return [];
   const text = Buffer.from(await readFileBytes(path, Math.min(headerLen, SAFETENSORS_HEADER_CAP), 8)).toString('utf8');
   return safetensorsKeysFromHeaderText(text);
+}
+
+/** Same cap as the native reader (SdCppImageModule.kt MAX_HEADER_BYTES). */
+const SAFETENSORS_MAX_HEADER_LEN = 100 * 1024 * 1024;
+
+/**
+ * Whether the first 9 bytes are a safetensors file: u64 LE header length (sane, nonzero), then the
+ * JSON header, which the format requires to start with `{` (0x7B).
+ */
+export function isSafetensorsPrefix(bytes: Uint8Array): boolean {
+  if (bytes.length < 9) return false;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, 8);
+  const headerLen = view.getUint32(4, true) * 4294967296 + view.getUint32(0, true);
+  return headerLen >= 2 && headerLen <= SAFETENSORS_MAX_HEADER_LEN && bytes[8] === 0x7b;
+}
+
+/** Content sniff for a picked file whose name has no .safetensors extension (`.sft`, `.bin`, none). */
+export async function looksLikeSafetensors(path: string): Promise<boolean> {
+  try {
+    return isSafetensorsPrefix(await readFileBytes(path, 9, 0));
+  } catch (error) {
+    logger.warn('[SDCPP-IMPORT] could not read the picked file to sniff its format', error);
+    return false;
+  }
 }
 
 export function safetensorsKeysFromHeaderText(text: string): string[] {

@@ -30,6 +30,12 @@ object DownloadReason {
     const val HTTP_429 = "http_429"
     const val CLIENT_ERROR = "client_error"
     const val UNKNOWN_ERROR = "unknown_error"
+    /** Civitai gated file, no API key sent: 401 / 403 / its sign-in page (WorkerDownload.civitaiAuthFailureReason). */
+    const val CIVITAI_AUTH_REQUIRED = "civitai_auth_required"
+    /** Civitai answered 401 / its sign-in page although an API key was sent. */
+    const val CIVITAI_KEY_REJECTED = "civitai_key_rejected"
+    /** Civitai answered 403 to a request with an API key: the account may not download this file. */
+    const val CIVITAI_FORBIDDEN = "civitai_forbidden"
 
     private val retryableCodes = setOf(
         NETWORK_LOST,
@@ -83,6 +89,10 @@ object DownloadReason {
             HTTP_429 -> "Rate limited by the download server."
             CLIENT_ERROR -> "The download request was rejected by the server."
             UNKNOWN_ERROR -> "Something went wrong while downloading."
+            // Same text as src/utils/downloadErrors.ts ERROR_MESSAGES.
+            CIVITAI_AUTH_REQUIRED -> "Civitai needs your API key. Add it in Models > Image > Civitai, then tap Retry download to phone."
+            CIVITAI_KEY_REJECTED -> "Civitai rejected your API key. Replace it in Models > Image > Civitai, then tap Retry download to phone."
+            CIVITAI_FORBIDDEN -> "Civitai does not permit your account to download this file."
             else -> null
         }
     }

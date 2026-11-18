@@ -36,7 +36,7 @@ type Props = Pick<ModelsScreenViewModel,
   | 'handleDownloadImageModel' | 'handleCancelImageDownload' | 'loadHFModels'
   | 'clearImageFilters' | 'setUserChangedBackendFilter'
   | 'isRecommendedModel'
-> & Partial<Pick<ModelsScreenViewModel, 'setAlertState' | 'downloadedSearchMatches'>>;
+> & Partial<Pick<ModelsScreenViewModel, 'setAlertState' | 'downloadedSearchMatches' | 'handleImportLocalModel' | 'isImporting'>>;
 
 /** Where the image tab lists models from: the converted NPU/GPU catalog, or a Civitai search. */
 type ImageSource = 'catalog' | 'civitai';
@@ -270,6 +270,7 @@ export const ImageModelsTab: React.FC<Props> = ({
   handleDownloadImageModel, handleCancelImageDownload, loadHFModels,
   clearImageFilters, setUserChangedBackendFilter,
   isRecommendedModel, setAlertState, downloadedSearchMatches = 0,
+  handleImportLocalModel, isImporting = false,
 }) => {
   const { colors } = useTheme();
   const styles = useThemedStyles(createStyles);
@@ -333,6 +334,21 @@ export const ImageModelsTab: React.FC<Props> = ({
             <Icon name="sliders" size={14} color={(imageFiltersVisible || hasActiveImageFilters) ? colors.primary : colors.textMuted} />
             {hasActiveImageFilters && <View style={styles.filterDot} />}
           </TouchableOpacity>
+          {/* The user's own .safetensors / .ckpt checkpoint or LoRA (and image .zip). The same picker as
+              Models > Text routes the file by its header (importSdCheckpoint.ts). */}
+          {handleImportLocalModel && (
+            <TouchableOpacity
+              style={styles.filterToggle}
+              onPress={handleImportLocalModel}
+              disabled={isImporting}
+              hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
+              accessibilityRole="button"
+              accessibilityLabel="Import image model file"
+              testID="import-local-image-model"
+            >
+              <Icon name="upload" size={14} color={colors.textMuted} />
+            </TouchableOpacity>
+          )}
         </View>
       </View>
 

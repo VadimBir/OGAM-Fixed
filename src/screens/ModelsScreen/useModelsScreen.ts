@@ -21,6 +21,7 @@ import { importGgufFiles, getErrorMessage } from './importHelpers';
 import { importSdCheckpointOrLora } from './importSdCheckpoint';
 import { isSdCppCandidateFileName } from '../../services/sdCppModelDetection';
 import { textSafetensorsRefusal } from '../../services/textLora';
+import { looksLikeSafetensors } from '../../services/textLoraGguf';
 import { importPickedTextLora } from '../../services/textLoraActions';
 import { isPickerStuck } from '../../utils/pickerErrorUtils';
 import { isLiteRTFileName } from '../../utils/modelHelpers';
@@ -74,6 +75,25 @@ async function detectZipBackend(
     return { backend: 'qnn', resolvedModelDir: modelDir };
   }
   return null;
+}
+
+/** Extensions the import routes by name; anything else is sniffed by nameUnlabeledSafetensors. */
+const ROUTED_EXTENSIONS = /\.(gguf|zip|litertlm|safetensors|ckpt)$/i;
+
+/**
+ * A picked safetensors file whose name lacks `.safetensors` (Flux `.sft`, a browser-renamed
+ * `.bin`, a provider that reports no extension) failed the name check as "Invalid File". One
+ * picked file with any other name is sniffed (safetensors header bytes) and, when it is one, gets
+ * a `.safetensors` name so the image import copies it under a name sd.cpp and classify() read.
+ */
+async function nameUnlabeledSafetensors(files: Array<{ name: string; uri: string }>): Promise<void> {
+  if (files.length !== 1 || ROUTED_EXTENSIONS.test(files[0].name)) return;
+  const f = files[0];
+  if (await looksLikeSafetensors(f.uri.startsWith('content://') ? f.uri : decodeURIComponent(f.uri))) {
+    const renamed = `${f.name.replace(/\.(sft|bin)$/i, '')}.safetensors`;
+    logger.log(`[SDCPP-IMPORT] ${f.name}: safetensors header, importing as ${renamed}`);
+    f.name = renamed;
+  }
 }
 
 async function removeIfPresent(path: string): Promise<void> {
@@ -199,6 +219,7 @@ export function useModelsScreen() {
         ...f,
         name: (f.name?.trim() || decodeURIComponent(f.uri.split('/').pop() ?? '') || 'unknown').split('/').pop() || 'unknown',
       }));
+      await nameUnlabeledSafetensors(resolvedFiles);
 
       const validationError = validateImportFiles(resolvedFiles);
       if (validationError === 'litert_unsupported') {

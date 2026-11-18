@@ -171,7 +171,16 @@ class WorkerDownload(
         downloadId: String,
         targetFile: File,
     ): Result? {
+        // Before any file write: a Civitai 401/403 or its sign-in page must fail with a key-specific
+        // reason, never be streamed to disk as the "model" (a followed login redirect is a 200 HTML).
+        val civitaiReason = civitaiAuthFailureReason(
+            download.url,
+            code,
+            response.request.url.toString(),
+            response.header("Content-Type"),
+        )
         return when {
+            civitaiReason != null -> failDownload(downloadId, download, civitaiReason)
             existingBytes > 0L && code == 200 -> {
                 if (!targetFile.delete()) Log.w(TAG, "Failed to delete stale file for re-download: ${targetFile.path}")
                 null
@@ -390,6 +399,44 @@ class WorkerDownload(
             // answers a redirect to its signed CDN URL, which OkHttp follows (followRedirects).
             "civitai.com",
         )
+
+        private fun isCivitaiHost(url: String): Boolean {
+            val host = try { URI(url).host?.lowercase() } catch (_: Exception) { null } ?: return false
+            return host == "civitai.com" || host.endsWith(".civitai.com")
+        }
+
+        private fun hasCivitaiToken(url: String): Boolean {
+            val query = try { URI(url).rawQuery } catch (_: Exception) { null } ?: return false
+            return query.split('&').any { it.startsWith("token=") && it.length > "token=".length }
+        }
+
+        /**
+         * The Civitai-specific failure code for a download response, or null when the request was
+         * not a civitai.com download or the response is not an auth failure. The key travels as
+         * `?token=` on the civitai.com URL (civitaiBrowser.ts withCivitaiDownloadToken): Civitai's
+         * docs give `?token=` for download tools, and the followed redirect to the signed storage
+         * URL needs no key. Auth failure = 401, 403, or a 2xx that is Civitai's /login page or an
+         * HTML page (a model file is never text/html).
+         */
+        internal fun civitaiAuthFailureReason(
+            originalUrl: String,
+            code: Int,
+            finalUrl: String,
+            contentType: String?,
+        ): String? {
+            if (!isCivitaiHost(originalUrl)) return null
+            val hasToken = hasCivitaiToken(originalUrl)
+            val loginPage = isCivitaiHost(finalUrl) &&
+                (try { URI(finalUrl).path } catch (_: Exception) { null })?.startsWith("/login") == true
+            val html = contentType?.trim()?.lowercase()?.startsWith("text/html") == true
+            return when {
+                code == 401 || (code in 200..299 && (loginPage || html)) ->
+                    if (hasToken) DownloadReason.CIVITAI_KEY_REJECTED else DownloadReason.CIVITAI_AUTH_REQUIRED
+                code == 403 ->
+                    if (hasToken) DownloadReason.CIVITAI_FORBIDDEN else DownloadReason.CIVITAI_AUTH_REQUIRED
+                else -> null
+            }
+        }
 
         fun isHostAllowed(url: String): Boolean {
             val host = try { URI(url).host } catch (_: Exception) { return false }

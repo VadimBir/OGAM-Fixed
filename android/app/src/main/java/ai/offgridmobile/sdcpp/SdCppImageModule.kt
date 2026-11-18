@@ -118,6 +118,9 @@ class SdCppImageModule(reactContext: ReactApplicationContext) :
     }
 
     private val executor = Executors.newSingleThreadExecutor { r -> Thread(r, "sdcpp-worker") }
+    // Header probes are plain file reads with no native state: own thread, so an import's classify
+    // step never queues behind a multi-minute model load or a generation on sdcpp-worker.
+    private val headerExecutor = Executors.newSingleThreadExecutor { r -> Thread(r, "sdcpp-header") }
 
     @Volatile private var handle: Long = 0L
     @Volatile private var loadedModelPath: String? = null
@@ -162,7 +165,7 @@ class SdCppImageModule(reactContext: ReactApplicationContext) :
     /** Header-only probe used by JS to route a .safetensors file (SD checkpoint vs LLM vs LoRA). */
     @ReactMethod
     fun readSafetensorsHeader(path: String, promise: Promise) {
-        executor.execute {
+        headerExecutor.execute {
             try {
                 val json = readSafetensorsHeader(File(path))
                 val keys = Arguments.createArray()
@@ -409,6 +412,7 @@ class SdCppImageModule(reactContext: ReactApplicationContext) :
             }
         }
         executor.shutdown()
+        headerExecutor.shutdown()
         super.invalidate()
     }
 }

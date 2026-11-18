@@ -15,6 +15,7 @@ const completeListeners: Record<string, () => Promise<void> | void> = {};
 const errorListeners: Record<string, (e: any) => void> = {};
 const mockRegister = jest.fn();
 const mockMissingFreeSpace = jest.fn();
+const mockCancelDownload = jest.fn();
 let mockSdCppAvailable = true;
 
 jest.mock('../../../src/services', () => ({
@@ -26,6 +27,7 @@ jest.mock('../../../src/services', () => ({
     onComplete: (id: string, cb: any) => { completeListeners[id] = cb; return () => { delete completeListeners[id]; }; },
     onError: (id: string, cb: any) => { errorListeners[id] = cb; return () => { delete errorListeners[id]; }; },
     startProgressPolling: jest.fn(),
+    cancelDownload: (...a: any[]) => mockCancelDownload(...a),
   },
 }));
 
@@ -64,6 +66,7 @@ beforeEach(() => {
   mockMissingFreeSpace.mockResolvedValue(null);
   mockStartDownload.mockResolvedValue({ downloadId: 'native-1' });
   mockMove.mockResolvedValue('/moved');
+  mockCancelDownload.mockResolvedValue(undefined);
   mockRegister.mockResolvedValue({ kind: 'checkpoint', model: { id: 'civitai_101_11' } });
   (RNFS.exists as jest.Mock).mockResolvedValue(false);
   (RNFS.mkdir as jest.Mock).mockResolvedValue(undefined);
@@ -155,6 +158,32 @@ describe('startCivitaiPhoneDownload', () => {
     expect(RNFS.unlink).toHaveBeenCalledWith('/docs/image_models/civitai_101_11');
     expect(useDownloadStore.getState().downloads['image:civitai_101_11'].status).toBe('failed');
     expect(d.setAlertState).toHaveBeenCalledWith(expect.objectContaining({ title: 'Download Failed' }));
+  });
+
+  it.each([
+    ['civitai_auth_required', 'Civitai API key needed', /^Civitai needs your API key\. Add it in Models > Image > Civitai/],
+    ['civitai_key_rejected', 'Civitai API key needed', /^Civitai rejected your API key/],
+    ['civitai_forbidden', 'Download Failed', /^Civitai does not permit your account/],
+  ])('a native %s failure shows the key-specific message, not the generic one', async (code, title, text) => {
+    const d = deps();
+    await startCivitaiPhoneDownload(result, d, code === 'civitai_auth_required' ? null : 'k');
+    errorListeners['native-1']({ downloadId: 'native-1', reason: 'The download server rejected access to this file.', reasonCode: code });
+    const alert = d.setAlertState.mock.calls[0][0];
+    expect(alert.title).toBe(title);
+    expect(alert.message).toMatch(text);
+    expect(mockRegister).not.toHaveBeenCalled();
+    expect(mockMove).not.toHaveBeenCalled();
+  });
+
+  it('a retry after adding the key cancels the failed native row and starts a new one with the key', async () => {
+    await startCivitaiPhoneDownload(result, deps(), null);
+    expect(mockStartDownload.mock.calls[0][0].url).toBe('https://civitai.com/api/download/models/101');
+    useDownloadStore.getState().setStatus('native-1', 'failed', { message: 'x', code: 'civitai_auth_required' });
+    mockStartDownload.mockResolvedValue({ downloadId: 'native-2' });
+    await startCivitaiPhoneDownload(result, deps(), 'new-key');
+    expect(mockCancelDownload).toHaveBeenCalledWith('native-1');
+    expect(mockStartDownload.mock.calls[1][0].url).toBe('https://civitai.com/api/download/models/101?token=new-key');
+    expect(useDownloadStore.getState().downloads['image:civitai_101_11'].downloadId).toBe('native-2');
   });
 
   it('drops the placeholder quietly when cancelled while queued', async () => {

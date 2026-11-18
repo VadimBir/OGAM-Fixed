@@ -20,6 +20,9 @@ const { DownloadManagerModule } = NativeModules;
  */
 const MAX_CONCURRENT_DOWNLOADS = 3;
 
+/** Replace every `token=<value>` URL query value in a log string with `***`. */
+export const redactUrlTokens = (text: string): string => text.replaceAll(/([?&]token=)[^&"#\s\\]*/gi, '$1***');
+
 interface QueuedStart {
   params: DownloadParams;
   /** Stable per-model key, used to coalesce a double-tap on an already-queued model. */
@@ -363,7 +366,8 @@ class BackgroundDownloadService {
       return [];
     }
     const downloads = await DownloadManagerModule.getActiveDownloads();
-    logger.log(`[WIRE-DOWNLOAD] ${JSON.stringify({ ev: 'getActiveDownloads', downloads })}`); // [WIRE] raw active/queued/parallel download rows (relaunch reconcile)
+    // Row urls can carry a Civitai API key as `token=` (civitaiBrowser.ts withCivitaiDownloadToken): redacted.
+    logger.log(`[WIRE-DOWNLOAD] ${redactUrlTokens(JSON.stringify({ ev: 'getActiveDownloads', downloads }))}`); // [WIRE] raw active/queued/parallel download rows (relaunch reconcile)
     return downloads.map((d: any) => ({
       downloadId: d.downloadId ?? d.id,
       fileName: d.fileName,

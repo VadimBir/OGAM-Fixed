@@ -84,4 +84,22 @@ describe('downloadErrors', () => {
       expect(isRetryable('user_cancelled')).toBe(false);
     });
   });
+
+  describe('Civitai API key codes (WorkerDownload.kt civitaiAuthFailureReason)', () => {
+    it('maps each code to its key-specific text, matching DownloadUiState.kt', () => {
+      expect(getUserFacingDownloadMessage('The download server rejected access to this file.', 'civitai_auth_required'))
+        .toBe('Civitai needs your API key. Add it in Models > Image > Civitai, then tap Retry download to phone.');
+      expect(getUserFacingDownloadMessage(undefined, 'civitai_key_rejected'))
+        .toBe('Civitai rejected your API key. Replace it in Models > Image > Civitai, then tap Retry download to phone.');
+      expect(getUserFacingDownloadMessage(undefined, 'civitai_forbidden'))
+        .toBe('Civitai does not permit your account to download this file.');
+      expect(getDownloadStatusLabel('failed', 'civitai_auth_required')).toMatch(/^Civitai needs your API key/);
+    });
+
+    it('are not retryable in place (the retry must carry the current key)', () => {
+      for (const code of ['civitai_auth_required', 'civitai_key_rejected', 'civitai_forbidden']) {
+        expect(isRetryable(code)).toBe(false);
+      }
+    });
+  });
 });

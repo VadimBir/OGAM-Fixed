@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { View, Text, TextInput, TouchableOpacity, ScrollView, Image, Switch, StyleSheet } from 'react-native';
+import { View, Text, TextInput, TouchableOpacity, ScrollView, Image, Switch, StyleSheet, Linking } from 'react-native';
 import Icon from 'react-native-vector-icons/Feather';
 import { LoadingDots } from '../../components/LoadingDots';
 import { useTheme, useThemedStyles } from '../../theme';
@@ -144,46 +144,83 @@ const ResultCard: React.FC<{ result: CivitaiResult; index: number; vm: CivitaiSe
   );
 };
 
+/** Where a Civitai user creates an API key (Civitai's download guide: "your user account page"). */
+export const CIVITAI_ACCOUNT_URL = 'https://civitai.com/user/account';
+
+/** Shown while no key is saved: Civitai's own CLI guide says most model files 401 without a token. */
+export const CIVITAI_KEY_MISSING_HINT =
+  'Most Civitai downloads need you to be logged in: add your Civitai API key (Get key opens civitai.com account settings).';
+
 const ApiKeyRow: React.FC<{ vm: CivitaiSearchViewModel; local: LocalStyles }> = ({ vm, local }) => {
   const { colors } = useTheme();
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
+  const getKey = (
+    <TouchableOpacity
+      style={local.smallButton}
+      onPress={() => { Linking.openURL(CIVITAI_ACCOUNT_URL).catch(() => {}); }}
+      accessibilityRole="link"
+      testID="civitai-apikey-get"
+    >
+      <Text style={local.smallButtonText}>Get key</Text>
+    </TouchableOpacity>
+  );
   if (editing) {
     return (
-      <View style={local.row}>
-        <TextInput
-          style={local.input}
-          value={draft}
-          onChangeText={setDraft}
-          placeholder="Civitai API key"
-          placeholderTextColor={colors.textMuted}
-          secureTextEntry
-          autoCapitalize="none"
-          autoCorrect={false}
-          testID="civitai-apikey-input"
-        />
-        <TouchableOpacity
-          style={local.smallButton}
-          testID="civitai-apikey-save"
-          onPress={async () => { await vm.saveApiKey(draft); setDraft(''); setEditing(false); }}
-        >
-          <Text style={local.smallButtonText}>Save</Text>
-        </TouchableOpacity>
-      </View>
+      <>
+        <View style={local.row}>
+          <TextInput
+            style={local.input}
+            value={draft}
+            onChangeText={setDraft}
+            placeholder="Paste your Civitai API key"
+            placeholderTextColor={colors.textMuted}
+            secureTextEntry
+            autoCapitalize="none"
+            autoCorrect={false}
+            autoFocus
+            testID="civitai-apikey-input"
+          />
+          <TouchableOpacity
+            style={local.smallButton}
+            testID="civitai-apikey-save"
+            disabled={!draft.trim()}
+            onPress={async () => { await vm.saveApiKey(draft); setDraft(''); setEditing(false); }}
+          >
+            <Text style={local.smallButtonText}>Save</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={local.smallButton}
+            testID="civitai-apikey-cancel"
+            onPress={() => { setDraft(''); setEditing(false); }}
+          >
+            <Text style={local.smallButtonText}>Cancel</Text>
+          </TouchableOpacity>
+        </View>
+        <View style={local.row}>
+          <Text style={local.label}>On civitai.com: Account settings {'>'} API Keys, create a key, copy it, paste it above.</Text>
+          {getKey}
+        </View>
+      </>
     );
   }
   return (
-    <View style={local.row}>
-      <Text style={local.label}>Civitai API key (optional): {vm.hasApiKey ? 'saved in Keychain' : 'not set'}</Text>
-      <TouchableOpacity style={local.smallButton} onPress={() => setEditing(true)} testID="civitai-apikey-edit">
-        <Text style={local.smallButtonText}>{vm.hasApiKey ? 'Change' : 'Set'}</Text>
-      </TouchableOpacity>
-      {vm.hasApiKey && (
-        <TouchableOpacity style={local.smallButton} onPress={vm.clearApiKey} testID="civitai-apikey-remove">
-          <Text style={local.smallButtonText}>Remove</Text>
+    <>
+      <View style={local.row}>
+        <Text style={local.label} testID="civitai-apikey-state">
+          Civitai API key: {vm.hasApiKey ? 'saved (used for downloads)' : 'missing'}
+        </Text>
+        <TouchableOpacity style={local.smallButton} onPress={() => setEditing(true)} testID="civitai-apikey-edit">
+          <Text style={local.smallButtonText}>{vm.hasApiKey ? 'Change' : 'Add key'}</Text>
         </TouchableOpacity>
-      )}
-    </View>
+        {vm.hasApiKey ? (
+          <TouchableOpacity style={local.smallButton} onPress={vm.clearApiKey} testID="civitai-apikey-remove">
+            <Text style={local.smallButtonText}>Clear</Text>
+          </TouchableOpacity>
+        ) : getKey}
+      </View>
+      {!vm.hasApiKey && <Text style={local.note} testID="civitai-apikey-hint">{CIVITAI_KEY_MISSING_HINT}</Text>}
+    </>
   );
 };
 

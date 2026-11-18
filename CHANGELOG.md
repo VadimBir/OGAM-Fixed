@@ -3,6 +3,47 @@
 Branch `app-refactor-fixes`. Newest first. Each entry gives the commit it ships in.
 State words: DONE = finished and unit tested; WIP = an agent is still editing, so the code is not checked; UNKNOWN = not verified.
 
+## 2026-11-19: user bugs: image safetensors import and Civitai login (agents SI, CA)
+
+### Gates + APK (this commit)
+- **jest:** 582 of 586 suites pass, 6884 tests pass. The only failure is the orphaned `imageGenerator.test.ts` (33 tests).
+- **tsc:** no new errors outside `src/services/sync/*`.
+- **eslint:** 0 errors.
+- **gradle `testDebugUnitTest`:** passes.
+- **`app-release.apk`:** 194,720,588 bytes, SHA-256 `0f11322c25e99b59b953387aec3d9c7ea82e28f79bc7469695a9897d931a4834`. Served on the LAN as `OGAM-import-civitai-20261119.apk`. Not run on a device.
+
+### DONE: image safetensors import (agent SI)
+- **Models > Image had no import button.** The import was wired only into `TextModelsTab` (`index.tsx:186`), and a test enforced that. Fixed:
+  - an upload icon on the Image tab (`import-local-image-model`);
+  - the "only on Models > Text" test assertion is replaced (it contradicted CP-08 R3).
+- **The import progress card showed only on the Text tab.** It now shows on both tabs.
+- **Files were routed by name only.** `.sft`, a browser-renamed `.bin` or a name without an extension got "Invalid File". Now a single file with an unrecognised name is checked by its content (u64 length + `{`) and renamed `.safetensors`.
+- **Diffusion-only files got a confusing message.** A UNet or DiT file without CLIP or VAE (ComfyUI unet, flux1-*) said "no known layout". It is still refused, because a single full file is required, and now says so clearly.
+- **The header read waited behind load/generation work.** It now has its own executor, `sdcpp-header` (`SdCppImageModule.kt`).
+- **Checked, not blocking:**
+  - the text-LoRA refusal does not catch image checkpoints;
+  - the picker uses `*/*`;
+  - the RNFS copy streams content:// without loading the file into JS memory.
+- **Tests:** `sdCppCheckpointLayouts` (new), plus `textLora`, `useModelsScreen` and `catalogChoice` (extended). 365 of 365 related tests pass.
+- **UNKNOWN:** what the user saw on the device. The copy speed for a 7 GB file (1 KB buffer) has not been measured.
+
+### DONE: Civitai login for downloads (agent CA)
+- **The key already reached the request** as `?token=` (`civitaiBrowser.ts:113`). Civitai's docs accept `?token=`, and OkHttp drops `Authorization` on a cross-host redirect.
+- **The real breaks:**
+  - the key field said "(optional)", with no link;
+  - a 401 or 403 gave a generic "server rejected access" message;
+  - a login-HTML 200 response could pass the size check;
+  - a retry left the old native row behind;
+  - the URL with the key was logged in `__DEV__`.
+- **Fixed:**
+  - Civitai section: the key shows as saved or missing, with Add/Change, Clear, and "Get key" (opens civitai.com/user/account);
+  - native `civitaiAuthFailureReason` (`WorkerDownload.kt:176`, `:421`) runs before any file write, on 401, 403, `/login` or `text/html`, with the codes `civitai_auth_required`, `civitai_key_rejected` and `civitai_forbidden`;
+  - the alert is titled "Civitai API key needed";
+  - a retry cancels the old row first;
+  - `redactUrlTokens` hides the key in logs.
+- **Tests:** `CivitaiDownloadAuthTest.kt` (new, 12/12, loopback redirect test). Jest: 155 of 155 Civitai and download tests pass.
+- **UNKNOWN:** whether Civitai answers a request without a key with 401 or with a login redirect (both are handled). The URL with the key is still stored in the app-private Room row and in the AsyncStorage queue, which WorkManager needs to resume.
+
 ## 2026-11-18: release APK from b62e73fc
 - **`app-release.apk`:** 194,714,944 bytes, SHA-256 `055f97ec8a781f83ea51581c7b4669be0437d66c7b4e3e6f8c01310151500bf2`.
 - **Contains:**

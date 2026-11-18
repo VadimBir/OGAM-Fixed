@@ -1,6 +1,7 @@
 /**
  * "Download to phone" for a Civitai file: the shared native background downloader (WorkManager:
- * survives app exit, progress, cancel, exact-size check, SHA-256 when Civitai gives one), then the
+ * survives app exit, progress, cancel, exact-size check; the Civitai SHA-256 is checked only when the
+ * size does not match, WorkerDownload.kt streamToFile), then the
  * same register step as a .safetensors file import (sdCppFileRegistration.registerSdFileInPlace): a checkpoint becomes a
  * selectable stable-diffusion.cpp image model, a LoRA joins the image LoRA list.
  *
@@ -132,6 +133,11 @@ export async function startCivitaiPhoneDownload(
   const metadataJson = JSON.stringify(metadata);
   const placeholderId = `queued:${modelKey}`;
   if (existing) {
+    // A retry starts a new native row with the CURRENT key in its URL; the failed native row
+    // (old URL, maybe no key) is dropped, as useDownloads.retry does, so it never lingers.
+    if (existing.downloadId && existing.downloadId !== placeholderId) {
+      await backgroundDownloadService.cancelDownload(existing.downloadId).catch(() => {});
+    }
     useDownloadStore.getState().retryEntry(modelKey, placeholderId);
   } else {
     useDownloadStore.getState().add({
@@ -178,8 +184,13 @@ export async function startCivitaiPhoneDownload(
     });
     const unsubError = backgroundDownloadService.onError(info.downloadId, (ev) => {
       unsubComplete(); unsubError();
-      // useDownloads already set the row 'failed' (retry / remove stay available).
-      deps.setAlertState(showAlert('Download Failed', getUserFacingDownloadMessage(ev.reason)));
+      // useDownloads already set the row 'failed' (retry / remove stay available). The reason code
+      // carries the Civitai key cases (civitai_auth_required / _key_rejected / _forbidden).
+      const keyIssue = ev.reasonCode === 'civitai_auth_required' || ev.reasonCode === 'civitai_key_rejected';
+      deps.setAlertState(showAlert(
+        keyIssue ? 'Civitai API key needed' : 'Download Failed',
+        getUserFacingDownloadMessage(ev.reason, ev.reasonCode),
+      ));
     });
     backgroundDownloadService.startProgressPolling();
   } catch (error: any) {

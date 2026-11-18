@@ -5,7 +5,10 @@
  */
 import React from 'react';
 import { render, fireEvent, waitFor, act } from '@testing-library/react-native';
-import { CivitaiSection, SERVER_DOWNLOAD_UNAVAILABLE } from '../../../src/screens/ModelsScreen/CivitaiSection';
+import { Linking } from 'react-native';
+import {
+  CivitaiSection, SERVER_DOWNLOAD_UNAVAILABLE, CIVITAI_ACCOUNT_URL, CIVITAI_KEY_MISSING_HINT,
+} from '../../../src/screens/ModelsScreen/CivitaiSection';
 import { useAppStore } from '../../../src/stores';
 import { useDownloadStore } from '../../../src/stores/downloadStore';
 import type { CivitaiResult } from '../../../src/services/civitaiBrowser';
@@ -175,15 +178,52 @@ describe('CivitaiSection', () => {
     expect(mockSearch).toHaveBeenLastCalledWith(expect.objectContaining({ cursor: 'c2' }));
   });
 
-  it('saves the API key to the Keychain and uses it for the next search', async () => {
-    const { getByTestId, getByText } = render(<CivitaiSection setAlertState={jest.fn()} />);
-    await waitFor(() => expect(getByText(/not set/)).toBeTruthy());
+  it('saves the API key to the Keychain and uses it for the next search and download', async () => {
+    const { getByTestId, getByText, queryByTestId } = render(<CivitaiSection setAlertState={jest.fn()} />);
+    await waitFor(() => expect(getByText('Civitai API key: missing')).toBeTruthy());
+    expect(getByTestId('civitai-apikey-hint').props.children).toBe(CIVITAI_KEY_MISSING_HINT);
     fireEvent.press(getByTestId('civitai-apikey-edit'));
     fireEvent.changeText(getByTestId('civitai-apikey-input'), ' key-1 ');
     await act(async () => { fireEvent.press(getByTestId('civitai-apikey-save')); });
     expect(mockSetKey).toHaveBeenCalledWith(' key-1 ');
-    await waitFor(() => expect(getByText(/saved in Keychain/)).toBeTruthy());
+    await waitFor(() => expect(getByText('Civitai API key: saved (used for downloads)')).toBeTruthy());
+    expect(queryByTestId('civitai-apikey-hint')).toBeNull();
     fireEvent(getByTestId('civitai-search-input'), 'submitEditing');
     await waitFor(() => expect(mockSearch).toHaveBeenLastCalledWith(expect.objectContaining({ apiKey: 'key-1' })));
+    fireEvent.press(getByTestId('civitai-download-phone-0'));
+    expect(mockStart).toHaveBeenLastCalledWith(expect.objectContaining({ key: '1:101:11' }), expect.anything(), 'key-1');
+  });
+
+  it('Get key opens the Civitai account page, with no key and while pasting one', async () => {
+    const open = jest.spyOn(Linking, 'openURL').mockResolvedValue(true);
+    const { getByTestId } = render(<CivitaiSection setAlertState={jest.fn()} />);
+    await waitFor(() => expect(getByTestId('civitai-apikey-get')).toBeTruthy());
+    fireEvent.press(getByTestId('civitai-apikey-get'));
+    expect(open).toHaveBeenLastCalledWith(CIVITAI_ACCOUNT_URL);
+    expect(CIVITAI_ACCOUNT_URL).toBe('https://civitai.com/user/account');
+    fireEvent.press(getByTestId('civitai-apikey-edit'));
+    fireEvent.press(getByTestId('civitai-apikey-get'));
+    expect(open).toHaveBeenCalledTimes(2);
+    open.mockRestore();
+  });
+
+  it('Cancel leaves the key unchanged; an empty draft cannot be saved', async () => {
+    const { getByTestId, getByText } = render(<CivitaiSection setAlertState={jest.fn()} />);
+    await waitFor(() => expect(getByText('Civitai API key: missing')).toBeTruthy());
+    fireEvent.press(getByTestId('civitai-apikey-edit'));
+    expect(getByTestId('civitai-apikey-save').props.accessibilityState).toEqual(expect.objectContaining({ disabled: true }));
+    fireEvent.changeText(getByTestId('civitai-apikey-input'), 'abc');
+    fireEvent.press(getByTestId('civitai-apikey-cancel'));
+    expect(mockSetKey).not.toHaveBeenCalled();
+    expect(getByText('Civitai API key: missing')).toBeTruthy();
+  });
+
+  it('Clear removes a saved key and shows the missing state again', async () => {
+    mockGetKey.mockResolvedValue('stored-key');
+    const { getByTestId, getByText } = render(<CivitaiSection setAlertState={jest.fn()} />);
+    await waitFor(() => expect(getByText('Civitai API key: saved (used for downloads)')).toBeTruthy());
+    await act(async () => { fireEvent.press(getByTestId('civitai-apikey-remove')); });
+    expect(mockRemoveKey).toHaveBeenCalled();
+    await waitFor(() => expect(getByText('Civitai API key: missing')).toBeTruthy());
   });
 });

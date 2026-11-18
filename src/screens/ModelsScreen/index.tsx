@@ -115,7 +115,8 @@ export const ModelsScreen: React.FC<ModelsScreenProps> = ({ embedded = false }) 
         </HideWhenEmbedded>
 
         <HideWhenEmbedded embedded={embedded}><View>
-          {vm.activeTab === 'text' && vm.isImporting && vm.importProgress && (
+          {/* Image tab too: a 2-7 GB checkpoint copy takes minutes and starts from either tab. */}
+          {(vm.activeTab === 'text' || vm.activeTab === 'image') && vm.isImporting && vm.importProgress && (
             <View style={styles.importProgressCard}>
               <View style={styles.importProgressHeader}>
                 <Icon name="file" size={18} color={colors.primary} />
@@ -239,6 +240,8 @@ export const ModelsScreen: React.FC<ModelsScreenProps> = ({ embedded = false }) 
           isRecommendedModel={vm.isRecommendedModel}
           setAlertState={vm.setAlertState}
           downloadedSearchMatches={vm.downloadedSearchMatches}
+          handleImportLocalModel={embedded ? undefined : vm.handleImportLocalModel}
+          isImporting={vm.isImporting}
         />
       )}
 
