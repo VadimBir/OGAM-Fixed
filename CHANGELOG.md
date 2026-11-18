@@ -3,6 +3,15 @@
 Branch `app-refactor-fixes`. Newest first. Each entry gives the commit it ships in.
 State words: DONE = finished and unit tested; WIP = an agent is still editing, so the code is not checked; UNKNOWN = not verified.
 
+## 2026-11-18: release APK from b62e73fc
+- **`app-release.apk`:** 194,714,944 bytes, SHA-256 `055f97ec8a781f83ea51581c7b4669be0437d66c7b4e3e6f8c01310151500bf2`.
+- **Contains:**
+  - `lib/arm64-v8a/libsdcpp_jni.so`, 60,747,312 bytes (Vulkan);
+  - `assets/ggml-hexagon/libggml-htp-v81.so` (NPU);
+  - `librnllama_jni_v8_2_dotprod_i8mm_hexagon_opencl.so`.
+- **LAN:** served as `OGAM-lora-20261118.apk`. The APK file is not committed.
+- **UNKNOWN:** not installed or run on a device yet.
+
 ## 2026-11-18: text LoRA end to end (agent LT) + LoRA RAM in both estimates
 
 ### DONE: GGUF text LoRA, local + remote
