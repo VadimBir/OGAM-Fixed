@@ -8,7 +8,8 @@ import { useAppStore } from '../stores';
 import { ImageLora, ONNXImageModel } from '../types';
 import { SD_WEIGHT_TYPES, type SdWeightType } from '../services/sdCppMemory';
 import { estimateSdCppModelMemory } from '../services/imageModelMemory';
-import { SDCPP_SAMPLERS, SDCPP_SCHEDULERS } from '../services/sdCppGenerator';
+import { SDCPP_SAMPLERS, SDCPP_SCHEDULERS, sdCppGeneratorService } from '../services/sdCppGenerator';
+import { loraCompatibility, sdFamilyLabel, type LoraBase } from '../services/sdCppModelDetection';
 import {
   LOCALDREAM_SAMPLERS,
   SDCPP_MAX_SIZE,
@@ -30,6 +31,7 @@ const createStyles = (colors: ThemeColors) => ({
   loraName: { color: colors.text, fontSize: 13, flex: 1 },
   remove: { color: colors.error, fontSize: 12, marginRight: 10 },
   estimate: { color: colors.text, fontSize: 12, marginTop: 8, fontVariant: ['tabular-nums' as const] },
+  warning: { color: colors.error, fontSize: 12, marginTop: 2 },
 });
 type Styles = ReturnType<typeof createStyles>;
 
@@ -58,14 +60,47 @@ const ChipRow: React.FC<{
   </View>
 );
 
-const LoraList: React.FC<{ styles: Styles }> = ({ styles }) => {
+/** Base model of each LoRA file, read from its safetensors header (cached in sdCppGeneratorService). */
+function useLoraBases(paths: string[]): Record<string, LoraBase> {
+  const [bases, setBases] = React.useState<Record<string, LoraBase>>({});
+  const key = paths.join('\n');
+  React.useEffect(() => {
+    let alive = true;
+    (async () => {
+      const next: Record<string, LoraBase> = {};
+      for (const p of key ? key.split('\n') : []) {
+        next[p] = (await sdCppGeneratorService.fileFamily(p)).loraBase ?? 'unknown';
+      }
+      if (alive) setBases(next);
+    })().catch(() => {});
+    return () => { alive = false; };
+  }, [key]);
+  return bases;
+}
+
+/**
+ * How sd.cpp applies LoRAs for the chosen weight type (memory cost), per the pinned sources:
+ * AUTO merges into the weights unless they are quantized (diffusion_engine.cpp
+ * configure_weight_loading); the JNI resolves AUTO to at_runtime for a q8_0/q5_0/q4_0 load-time
+ * conversion (sdcpp_jni.cpp load_ctx). at_runtime keeps every LoRA tensor loaded (LoraModel in
+ * runtime_lora_models); immediately frees them after the merge (model_manager.cpp apply_loras_to_params).
+ */
+function loraMemoryNote(weightType: SdWeightType): string {
+  return weightType === 'auto'
+    ? 'Applied by merging into the checkpoint weights at the next generation; the LoRA file is not kept in RAM. Changing LoRAs re-reads the affected weights.'
+    : `With ${weightType} weights, LoRAs are applied at run time: each enabled LoRA stays in RAM (about its file size, not in the RAM estimate above) and every step does extra work.`;
+}
+
+const LoraList: React.FC<{ model: ONNXImageModel; styles: Styles }> = ({ model, styles }) => {
   const { colors } = useTheme();
   const { settings, updateSettings } = useAppStore();
   const loras = settings.imageLoras ?? [];
+  const bases = useLoraBases(loras.map(l => l.path));
   const patch = (id: string, change: Partial<ImageLora>) =>
     updateSettings({ imageLoras: loras.map(l => (l.id === id ? { ...l, ...change } : l)) });
   const remove = (lora: ImageLora) => {
     updateSettings({ imageLoras: loras.filter(l => l.id !== lora.id) });
+    sdCppGeneratorService.forgetFile(lora.path);
     RNFS.unlink(lora.path).catch(() => {});
   };
   return (
@@ -74,12 +109,17 @@ const LoraList: React.FC<{ styles: Styles }> = ({ styles }) => {
       <Text style={styles.desc}>
         {loras.length === 0
           ? 'Import an SD LoRA .safetensors from Models → Import; it is detected automatically.'
-          : 'Enabled LoRAs apply to every generation with this checkpoint.'}
+          : `Enabled LoRAs apply to every generation with this ${sdFamilyLabel(model.sdFamily)} checkpoint. ${loraMemoryNote(settings.imageSdWeightType ?? 'auto')}`}
       </Text>
-      {loras.map(lora => (
+      {loras.map(lora => {
+        const base = bases[lora.path];
+        const fit = base ? loraCompatibility(base, model.sdFamily) : 'unknown';
+        return (
         <View key={lora.id}>
           <View style={styles.loraRow}>
-            <Text style={styles.loraName} numberOfLines={1}>{lora.name}</Text>
+            <Text style={styles.loraName} numberOfLines={1}>
+              {base ? `${lora.name} · ${sdFamilyLabel(base)}` : lora.name}
+            </Text>
             <TouchableOpacity onPress={() => remove(lora)} testID={`lora-remove-${lora.id}`}>
               <Text style={styles.remove}>Remove</Text>
             </TouchableOpacity>
@@ -90,6 +130,11 @@ const LoraList: React.FC<{ styles: Styles }> = ({ styles }) => {
               thumbColor={colors.surface}
             />
           </View>
+          {fit === 'mismatch' && (
+            <Text style={styles.warning} testID={`lora-mismatch-${lora.id}`}>
+              {`Made for ${sdFamilyLabel(base)}, not this ${sdFamilyLabel(model.sdFamily)} checkpoint.${lora.enabled ? ' Generation is refused while it is enabled.' : ''}`}
+            </Text>
+          )}
           {lora.enabled && (
             <SliderSetting
               compact
@@ -101,7 +146,8 @@ const LoraList: React.FC<{ styles: Styles }> = ({ styles }) => {
             />
           )}
         </View>
-      ))}
+        );
+      })}
     </View>
   );
 };
@@ -183,7 +229,8 @@ const SdCppMemoryControls: React.FC<{ model: ONNXImageModel; styles: Styles }> =
 /**
  * Engine-aware image knobs. The active image model's format decides what is shown:
  * stable-diffusion.cpp checkpoints get sampler + scheduler + free W×H + LoRA; LocalDream
- * (QNN/MNN) models get the two samplers their core supports (DPM default, Euler A).
+ * (QNN/MNN) models get the two samplers their core supports (DPM default, Euler A) and a note that
+ * LoRAs need the sd.cpp engine.
  */
 export const ImageEngineSettings: React.FC<{ compact?: boolean }> = ({ compact }) => {
   const styles = useThemedStyles(createStyles);
@@ -193,19 +240,32 @@ export const ImageEngineSettings: React.FC<{ compact?: boolean }> = ({ compact }
   const sampler = settings.imageSampler ?? '';
 
   if (model.backend !== 'sdcpp') {
+    // The LocalDream (QNN/MNN) request has no LoRA field (LocalDreamModule.buildGenerationBody) and
+    // resolveEngineImageRequest sends none to it, so imported LoRAs never reach this engine.
+    const loraCount = (settings.imageLoras ?? []).length;
     return (
-      <View style={styles.group}>
-        <Text style={styles.label}>Sampler</Text>
-        <Text style={styles.desc}>The NPU/GPU engine supports DPM (default) and Euler A.</Text>
-        <ChipRow
-          testID="image-sampler"
-          styles={styles}
-          options={LOCALDREAM_SAMPLERS.filter(s => s !== 'dpm')}
-          value={(LOCALDREAM_SAMPLERS as readonly string[]).includes(sampler) && sampler !== 'dpm' ? sampler : ''}
-          defaultLabel="dpm (default)"
-          onChange={v => updateSettings({ imageSampler: v })}
-        />
-      </View>
+      <>
+        <View style={styles.group}>
+          <Text style={styles.label}>Sampler</Text>
+          <Text style={styles.desc}>The NPU/GPU engine supports DPM (default) and Euler A.</Text>
+          <ChipRow
+            testID="image-sampler"
+            styles={styles}
+            options={LOCALDREAM_SAMPLERS.filter(s => s !== 'dpm')}
+            value={(LOCALDREAM_SAMPLERS as readonly string[]).includes(sampler) && sampler !== 'dpm' ? sampler : ''}
+            defaultLabel="dpm (default)"
+            onChange={v => updateSettings({ imageSampler: v })}
+          />
+        </View>
+        <View style={styles.group}>
+          <Text style={styles.label}>LoRA</Text>
+          <Text style={styles.desc} testID="lora-engine-note">
+            {loraCount > 0
+              ? `LoRA needs the sd.cpp (GPU) engine. Your ${loraCount} LoRA${loraCount === 1 ? ' is' : 's are'} not applied with this model; select a .safetensors checkpoint to use ${loraCount === 1 ? 'it' : 'them'}.`
+              : 'LoRA needs the sd.cpp (GPU) engine (a .safetensors checkpoint).'}
+          </Text>
+        </View>
+      </>
     );
   }
 
@@ -257,7 +317,7 @@ export const ImageEngineSettings: React.FC<{ compact?: boolean }> = ({ compact }
         onChange={v => updateSettings({ imageHeight: v })}
       />
       <SdCppMemoryControls model={model} styles={styles} />
-      <LoraList styles={styles} />
+      <LoraList model={model} styles={styles} />
     </>
   );
 };

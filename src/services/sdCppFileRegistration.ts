@@ -8,7 +8,12 @@ import RNFS from 'react-native-fs';
 import { showAlert, type AlertState } from '../utils/alertState';
 import { modelManager } from './modelManager';
 import { sdCppGeneratorService } from './sdCppGenerator';
-import type { SafetensorsClassification } from './sdCppModelDetection';
+import {
+  loraCompatibility,
+  sdFamilyLabel,
+  type LoraBase,
+  type SafetensorsClassification,
+} from './sdCppModelDetection';
 import { useAppStore } from '../stores';
 import type { ImageLora, ONNXImageModel } from '../types';
 import logger from '../utils/logger';
@@ -47,6 +52,26 @@ export async function missingFreeSpace(size: number | null): Promise<number | nu
   }
 }
 
+function rejectionTitle(kind: SafetensorsClassification['kind']): string {
+  if (kind === 'video') return 'Video models are not supported';
+  if (kind === 'sd-lora-unsupported') return 'LoRA type not supported';
+  return 'Not a Stable Diffusion checkpoint';
+}
+
+function rejectionHint(kind: SafetensorsClassification['kind'], reason: string): string {
+  if (kind === 'video') return 'This app generates still images. Import a Stable Diffusion image checkpoint (SD 1.x, SD 2.x, SDXL) or an SD LoRA.';
+  if (kind === 'sd-lora-unsupported') {
+    return 'stable-diffusion.cpp applies LoRA / LoCon (lora_down/lora_up), diffusers/PEFT (lora_A/lora_B), LoHa and LoKr files. ' +
+      'This LoRA type (for example OFT or IA3) would load and change nothing, so it was not added.';
+  }
+  if (kind === 'llm' && /LoRA/.test(reason)) {
+    return 'This is a text-model (LLM) LoRA, not an image LoRA. Text-model LoRAs run on the GGUF engine as GGUF adapters ' +
+      '(convert it with llama.cpp convert_lora_to_gguf.py) and need the matching base text model.';
+  }
+  if (kind === 'llm') return 'This file holds text-model (LLM) weights. Text models run on the GGUF engine — import a .gguf build of it.';
+  return 'Import a full single-file Stable Diffusion checkpoint (UNet + text encoder + VAE), or an SD LoRA.';
+}
+
 async function classify(path: string, fileName: string): Promise<SafetensorsClassification> {
   // .ckpt is a pickled torch zip with no cheap key index; it is (practically) only used for SD.
   if (fileName.toLowerCase().endsWith('.ckpt')) {
@@ -55,22 +80,43 @@ async function classify(path: string, fileName: string): Promise<SafetensorsClas
   return sdCppGeneratorService.classifySafetensors(path);
 }
 
-async function registerLora(stagedPath: string, stagingDir: string, fileName: string): Promise<ImageLora> {
+async function registerLora(
+  stagedPath: string,
+  stagingDir: string,
+  fileName: string,
+  enabled: boolean,
+): Promise<ImageLora> {
   if (!(await RNFS.exists(IMAGE_LORAS_DIR))) await RNFS.mkdir(IMAGE_LORAS_DIR);
   const dest = `${IMAGE_LORAS_DIR}/${fileName}`;
   if (await RNFS.exists(dest)) throw new Error(`A LoRA named "${fileName}" already exists`);
   await RNFS.moveFile(stagedPath, dest);
   await RNFS.unlink(stagingDir).catch(() => {});
+  // A removed LoRA's path can be reused by a new file: never keep its cached base model.
+  sdCppGeneratorService.forgetFile(dest);
   const lora: ImageLora = {
     id: `lora_${safeSdFileId(fileName)}_${Date.now()}`,
     name: fileName.replace(/\.safetensors$/i, ''),
     path: dest,
     weight: 1,
-    enabled: true,
+    enabled,
   };
   const { settings, updateSettings } = useAppStore.getState();
   updateSettings({ imageLoras: [...(settings.imageLoras ?? []), lora] });
   return lora;
+}
+
+/** The "LoRA added" text: its base model and whether it fits the selected checkpoint. */
+function loraAddedMessage(lora: ImageLora, base: LoraBase, activeFamily: string | undefined): string {
+  const label = sdFamilyLabel(base);
+  const fit = loraCompatibility(base, activeFamily);
+  if (fit === 'mismatch') {
+    return `${lora.name} is a ${label} LoRA. The selected checkpoint is ${sdFamilyLabel(activeFamily)}, so the LoRA was added disabled. ` +
+      `Enable it in Image Generation settings with a ${label} checkpoint.`;
+  }
+  const head = `${lora.name} (${label}) is enabled for stable-diffusion.cpp checkpoints (weight 1.0). Adjust or disable it in Image Generation settings.`;
+  return base === 'unknown'
+    ? `${head} Its base model (SD 1.x / SDXL / ...) could not be read from the file: use it only with the checkpoint family it was trained for.`
+    : head;
 }
 
 export type SdFileOutcome =
@@ -104,16 +150,20 @@ export async function registerSdFileInPlace(
   logger.log(`[SDCPP-IMPORT] ${fileName}: ${result.kind}/${result.family} (${result.reason})`);
 
   if (result.kind === 'sd-lora') {
-    const lora = await registerLora(path, modelDir, fileName);
-    deps.setAlertState(showAlert('LoRA added', `${lora.name} is enabled for Stable Diffusion checkpoints (weight 1.0). Adjust or disable it in Image Generation settings.`));
+    const base = result.loraBase ?? 'unknown';
+    const state = useAppStore.getState();
+    const activeFamily = (state.downloadedImageModels ?? []).find(m => m.id === deps.activeImageModelId)?.sdFamily;
+    const lora = await registerLora(path, modelDir, fileName, loraCompatibility(base, activeFamily) !== 'mismatch');
+    const note = result.loraWarning ? `\n\n${result.loraWarning}` : '';
+    deps.setAlertState(showAlert('LoRA added', loraAddedMessage(lora, base, activeFamily) + note));
     return { kind: 'lora', lora };
   }
   if (result.kind !== 'sd-checkpoint') {
     await RNFS.unlink(modelDir).catch(() => {});
-    const hint = result.kind === 'llm'
-      ? 'This file holds text-model (LLM) weights. Text models run on the GGUF engine — import a .gguf build of it.'
-      : 'Import a full single-file Stable Diffusion checkpoint (UNet + text encoder + VAE), or an SD LoRA.';
-    deps.setAlertState(showAlert('Not a Stable Diffusion checkpoint', `${result.reason}.\n\n${hint}`));
+    deps.setAlertState(showAlert(
+      rejectionTitle(result.kind),
+      `${result.reason}.\n\n${rejectionHint(result.kind, result.reason)}`,
+    ));
     return { kind: 'rejected', reason: result.reason };
   }
   const size = (await RNFS.stat(path)).size;
@@ -131,6 +181,8 @@ export async function registerSdFileInPlace(
   await modelManager.addDownloadedImageModel(imageModel);
   deps.addDownloadedImageModel(imageModel);
   if (!deps.activeImageModelId) deps.setActiveImageModelId(imageModel.id);
-  deps.setAlertState(showAlert('Success', `${imageModel.name} ${verb}. It runs on the stable-diffusion.cpp engine (CPU).`));
+  // GPU-only build: libsdcpp_jni.so is built with SDCPP_GPU_ONLY (CMakeLists.txt) and loads on the
+  // Vulkan "gpu" backend, refusing with ERR_NO_GPU when no GPU exists (sdcpp_jni.cpp load_ctx).
+  deps.setAlertState(showAlert('Success', `${imageModel.name} ${verb}. It runs on the stable-diffusion.cpp engine (GPU).`));
   return { kind: 'checkpoint', model: imageModel };
 }

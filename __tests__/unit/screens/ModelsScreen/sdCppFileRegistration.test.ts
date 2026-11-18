@@ -9,6 +9,7 @@ const mockClassify = jest.fn();
 const mockRemove = jest.fn();
 const mockSetStatus = jest.fn();
 const mockUpdateSettings = jest.fn();
+let mockImageModels: Array<{ id: string; sdFamily?: string }> = [];
 
 jest.mock('../../../../src/services/civitaiDownload', () => ({
   finalizeSdCppFileDownload: (...a: any[]) => mockFinalize(...a),
@@ -28,7 +29,7 @@ jest.mock('../../../../src/services/modelManager', () => ({
 }));
 
 jest.mock('../../../../src/services/sdCppGenerator', () => ({
-  sdCppGeneratorService: { classifySafetensors: (...a: any[]) => mockClassify(...a), isAvailable: () => true },
+  sdCppGeneratorService: { classifySafetensors: (...a: any[]) => mockClassify(...a), isAvailable: () => true, forgetFile: jest.fn() },
 }));
 
 jest.mock('../../../../src/stores/downloadStore', () => ({
@@ -36,7 +37,7 @@ jest.mock('../../../../src/stores/downloadStore', () => ({
 }));
 
 jest.mock('../../../../src/stores', () => ({
-  useAppStore: { getState: () => ({ settings: { imageLoras: [] }, updateSettings: mockUpdateSettings }) },
+  useAppStore: { getState: () => ({ settings: { imageLoras: [] }, updateSettings: mockUpdateSettings, downloadedImageModels: mockImageModels }) },
 }));
 
 jest.mock('../../../../src/services/imageDownloadActions', () => ({
@@ -61,6 +62,7 @@ beforeEach(() => {
   (RNFS.moveFile as jest.Mock).mockResolvedValue(undefined);
   (RNFS.unlink as jest.Mock).mockResolvedValue(undefined);
   (RNFS.stat as jest.Mock).mockResolvedValue({ size: 2_000_000_000 });
+  mockImageModels = [];
 });
 
 const entry = {
@@ -132,5 +134,69 @@ describe('registerSdFileInPlace', () => {
     expect(out.kind).toBe('rejected');
     expect(RNFS.unlink).toHaveBeenCalledWith('/d/m');
     expect(d.setAlertState.mock.calls[0][0].title).toBe('Not a Stable Diffusion checkpoint');
+  });
+
+  it('refuses a video model with its own title and a still-image hint', async () => {
+    mockClassify.mockResolvedValue({ kind: 'video', family: 'unknown', reason: 'Wan video model' });
+    const d = deps();
+    const out = await registerSdFileInPlace(opts, d);
+    expect(out).toEqual({ kind: 'rejected', reason: 'Wan video model' });
+    expect(RNFS.unlink).toHaveBeenCalledWith('/d/m');
+    expect(mockAddDownloaded).not.toHaveBeenCalled();
+    expect(d.setAlertState.mock.calls[0][0].title).toBe('Video models are not supported');
+    expect(d.setAlertState.mock.calls[0][0].message).toMatch(/still images/);
+  });
+
+  it('an LLM LoRA gets the GGUF-adapter hint, not the GGUF-weights hint', async () => {
+    mockClassify.mockResolvedValue({ kind: 'llm', family: 'unknown', reason: 'LLM LoRA adapter (model.layers.* + lora)' });
+    const d = deps();
+    await registerSdFileInPlace(opts, d);
+    expect(d.setAlertState.mock.calls[0][0].message).toMatch(/text-model \(LLM\) LoRA/);
+    expect(d.setAlertState.mock.calls[0][0].message).toMatch(/convert_lora_to_gguf/);
+  });
+
+  it('a LoRA for another base than the selected checkpoint is added DISABLED and says why', async () => {
+    mockClassify.mockResolvedValue({ kind: 'sd-lora', family: 'sdxl', loraBase: 'sdxl', reason: 'kohya' });
+    mockImageModels = [{ id: 'sd15', sdFamily: 'sd1' }];
+    const d = { ...deps(), activeImageModelId: 'sd15' };
+    await registerSdFileInPlace(opts, d);
+    expect(mockUpdateSettings).toHaveBeenCalledWith({ imageLoras: [expect.objectContaining({ enabled: false })] });
+    expect(d.setAlertState.mock.calls[0][0].message).toMatch(/SDXL LoRA.*SD 1\.x.*added disabled/);
+  });
+
+  it('a matching LoRA is enabled and its base is named; an undetected base is flagged', async () => {
+    mockClassify.mockResolvedValue({ kind: 'sd-lora', family: 'sd1', loraBase: 'sd1', reason: 'kohya' });
+    mockImageModels = [{ id: 'sd15', sdFamily: 'sd1' }];
+    const d = { ...deps(), activeImageModelId: 'sd15' };
+    await registerSdFileInPlace(opts, d);
+    expect(mockUpdateSettings).toHaveBeenCalledWith({ imageLoras: [expect.objectContaining({ enabled: true })] });
+    expect(d.setAlertState.mock.calls[0][0].message).toMatch(/\(SD 1\.x\) is enabled/);
+
+    mockClassify.mockResolvedValue({ kind: 'sd-lora', family: 'unknown', loraBase: 'unknown', reason: 'kohya' });
+    const d2 = deps();
+    await registerSdFileInPlace(opts, d2);
+    expect(d2.setAlertState.mock.calls[0][0].message).toMatch(/could not be read from the file/);
+  });
+
+  it('an unsupported LoRA type is removed with its own title; a DoRA warning reaches the alert', async () => {
+    mockClassify.mockResolvedValue({ kind: 'sd-lora-unsupported', family: 'unknown', reason: 'no applicable tensors' });
+    const d = deps();
+    expect((await registerSdFileInPlace(opts, d)).kind).toBe('rejected');
+    expect(RNFS.unlink).toHaveBeenCalledWith('/d/m');
+    expect(mockUpdateSettings).not.toHaveBeenCalled();
+    expect(d.setAlertState.mock.calls[0][0].title).toBe('LoRA type not supported');
+
+    mockClassify.mockResolvedValue({ kind: 'sd-lora', family: 'sd1', loraBase: 'sd1', reason: 'k', loraWarning: 'DoRA LoRA: x' });
+    const d2 = deps();
+    await registerSdFileInPlace(opts, d2);
+    expect(d2.setAlertState.mock.calls[0][0].message).toMatch(/\n\nDoRA LoRA: x$/);
+  });
+
+  it('a checkpoint alert names the GPU engine (GPU-only libsdcpp_jni build)', async () => {
+    mockClassify.mockResolvedValue({ kind: 'sd-checkpoint', family: 'sd1', reason: 'x' });
+    const d = deps();
+    await registerSdFileInPlace(opts, d);
+    expect(d.setAlertState.mock.calls[0][0].message).toMatch(/\(GPU\)/);
+    expect(d.setAlertState.mock.calls[0][0].message).not.toMatch(/CPU/);
   });
 });

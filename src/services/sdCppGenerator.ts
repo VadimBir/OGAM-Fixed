@@ -11,10 +11,36 @@ import { snapSdCppDimension } from './imageEngineParams';
 import type { SdWeightType } from './sdCppMemory';
 import {
   classifySafetensorsKeys,
+  loraCompatibility,
+  sdFamilyLabel,
+  type LoraBase,
   type SafetensorsClassification,
+  type SafetensorsMetadata,
 } from './sdCppModelDetection';
 
 const { SdCppImageModule } = NativeModules;
+
+/** File name without directory and extension (the LoRA's display name). */
+const fileStem = (path: string) => (path.split('/').pop() ?? path).replace(/\.(safetensors|ckpt)$/i, '');
+
+/**
+ * Thrown (before any native call) when an enabled LoRA was trained for another base model than the
+ * loaded checkpoint. sd.cpp does not fail on it: it skips every non-matching tensor and renders
+ * without the LoRA (sdCppModelDetection.loraCompatibility), so the request is refused here instead
+ * of returning an image that silently ignored the LoRA.
+ */
+export class SdCppLoraMismatchError extends Error {
+  readonly code = 'ERR_SDCPP_LORA_MISMATCH';
+  constructor(readonly mismatched: Array<{ name: string; base: LoraBase }>, readonly modelFamily: string) {
+    const describe = (m: { name: string; base: LoraBase }) => `LoRA "${m.name}" is for ${sdFamilyLabel(m.base)}`;
+    const which = mismatched.map(describe).join('; ');
+    super(
+      `${which}, but the loaded checkpoint is ${sdFamilyLabel(modelFamily)}. ` +
+      'Disable it in Image Generation settings (LoRA) or switch to a matching checkpoint.',
+    );
+    this.name = 'SdCppLoraMismatchError';
+  }
+}
 
 /** Native reject code for a user cancel (SdCppImageModule.kt). */
 export const SDCPP_CANCELLED_CODE = 'CANCELLED';
@@ -137,10 +163,54 @@ class SdCppGeneratorService {
     if (!this.isAvailable()) {
       throw new Error('stable-diffusion.cpp engine is not available on this platform');
     }
-    const header: { keys: string[] } = await SdCppImageModule.readSafetensorsHeader(path);
-    const result = classifySafetensorsKeys(header.keys ?? []);
-    logger.log(`[SDCPP-DETECT] ${path.split('/').pop()} keys=${header.keys?.length ?? 0} -> ${result.kind}/${result.family} (${result.reason})`);
+    const header: { keys: string[]; metadata?: SafetensorsMetadata } = await SdCppImageModule.readSafetensorsHeader(path);
+    const result = classifySafetensorsKeys(header.keys ?? [], header.metadata);
+    const lora = result.loraBase ? ` lora=${result.loraBase}` : '';
+    logger.log(`[SDCPP-DETECT] ${path.split('/').pop()} keys=${header.keys?.length ?? 0} -> ${result.kind}/${result.family}${lora} (${result.reason})`);
     return result;
+  }
+
+  /** Header family of a file, cached per path ('unknown' for .ckpt or an unreadable header). */
+  private familyCache = new Map<string, { family: string; loraBase?: LoraBase }>();
+
+  /** Drop a cached header family (a file was removed, or a new file took its path). */
+  forgetFile(path: string): void {
+    this.familyCache.delete(path);
+  }
+
+  async fileFamily(path: string): Promise<{ family: string; loraBase?: LoraBase }> {
+    const cached = this.familyCache.get(path);
+    if (cached) return cached;
+    let value: { family: string; loraBase?: LoraBase } = { family: 'unknown' };
+    if (path.toLowerCase().endsWith('.safetensors')) {
+      try {
+        const c = await this.classifySafetensors(path);
+        value = { family: c.family, loraBase: c.loraBase };
+      } catch (e) {
+        // Not cached: a missing file is reported by native (ERR_LORA_NOT_FOUND) on generate.
+        logger.warn(`[SDCPP-DETECT] header unreadable: ${path}`, e);
+        return value;
+      }
+    }
+    this.familyCache.set(path, value);
+    return value;
+  }
+
+  /**
+   * Enabled LoRAs whose base model provably differs from the loaded checkpoint's. An undetected
+   * base (either side) is not refused: it is logged, since sd.cpp may still apply it.
+   */
+  async findLoraMismatches(loras: Array<{ path: string }>): Promise<{ modelFamily: string; mismatched: Array<{ name: string; base: LoraBase }> }> {
+    const modelPath = await this.getLoadedModelPath();
+    const modelFamily = modelPath ? (await this.fileFamily(modelPath)).family : 'unknown';
+    const mismatched: Array<{ name: string; base: LoraBase }> = [];
+    for (const l of loras) {
+      const base = (await this.fileFamily(l.path)).loraBase ?? 'unknown';
+      const verdict = loraCompatibility(base, modelFamily);
+      if (verdict === 'mismatch') mismatched.push({ name: fileStem(l.path), base });
+      else if (verdict === 'unknown') logger.log(`[SDCPP-LORA] ${fileStem(l.path)} base=${base} model=${modelFamily}: compatibility not provable, applying`);
+    }
+    return { modelFamily, mismatched };
   }
 
   /** True when the loaded context was created with a different weight type / flash attention. */
@@ -236,6 +306,11 @@ class SdCppGeneratorService {
       },
     );
     try {
+      const enabledLoras = params.loras ?? [];
+      if (enabledLoras.length > 0) {
+        const { modelFamily, mismatched } = await this.findLoraMismatches(enabledLoras);
+        if (mismatched.length > 0) throw new SdCppLoraMismatchError(mismatched, modelFamily);
+      }
       const native = this.buildNativeParams(params, trimmedPrompt);
       const result = await SdCppImageModule.generateImage(native);
       logger.log(`[WIRE-IMAGE] ${JSON.stringify(result)}`); // [WIRE] raw native generateImage result shape

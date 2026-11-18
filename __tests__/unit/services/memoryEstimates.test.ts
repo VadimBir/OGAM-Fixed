@@ -144,4 +144,13 @@ describe('estimateSdCppMemory (stable-diffusion.cpp)', () => {
     expect(q4t4.weightsMB).toBeGreaterThan(1540);
     expect(q4t4.weightsMB).toBeLessThan(1570);
   });
+  it('a family without a measured shape (flux/sd3/unknown) counts at least the whole file as weights', () => {
+    const flux = 23.8e9;
+    for (const family of ['flux', 'sd3', 'unknown', undefined]) {
+      const est = estimateSdCppMemory({ ...base, family, fileSizeBytes: flux, weightType: 'q4_0' });
+      expect(est.weightsMB).toBeGreaterThanOrEqual(Math.floor(flux / (1024 * 1024))); // weightsMB is rounded
+    }
+    // A measured family keeps its shape-based number (no floor).
+    expect(estimateSdCppMemory({ ...base, weightType: 'q4_0' }).weightsMB).toBeLessThan(2.13e9 / (1024 * 1024));
+  });
 });

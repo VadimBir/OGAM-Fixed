@@ -124,7 +124,11 @@ export function estimateSdCppMemory(input: SdCppMemoryInput): SdCppMemoryEstimat
   const vaePixels = input.vaeTiling ? Math.min(pixels, VAE_TILE_PX * VAE_TILE_PX) : pixels;
   const vaeComputeMB = VAE_DECODE_MB_AT_512 * (vaePixels / (512 * 512));
 
-  const weightsMB = weightsBytes / MB;
+  // Only sd1/sd2/sdxl have a measured shape. Any other family (flux, sd3, unknown) borrows the SD1
+  // shape, which with the 4 B/param clamp counts a 17-24 GB Flux file as ~3 GB and lets it OOM.
+  // Floor those at the file size: conservative (ignores a quant override), never under-counts.
+  const weightsFloor = FAMILIES[input.family ?? ''] ? 0 : input.fileSizeBytes;
+  const weightsMB = Math.max(weightsBytes, weightsFloor) / MB;
   const totalMB = Math.ceil(
     (weightsMB + loadBufferMB + Math.max(unetComputeMB, vaeComputeMB) + RUNTIME_OVERHEAD_MB) * SAFETY_FACTOR,
   );

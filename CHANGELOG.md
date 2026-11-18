@@ -3,6 +3,40 @@
 Branch `app-refactor-fixes`. Newest first. Each entry gives the commit it ships in.
 State words: DONE = finished and unit tested; WIP = an agent is still editing, so the code is not checked; UNKNOWN = not verified.
 
+## 2026-11-18: image LoRA + safetensors audit (agent LI) + RAM-gate fix
+
+### DONE: image LoRA path, import to sd.cpp c92d73c
+- **Traced end to end:**
+  - `imageEngineParams.ts` → `sdCppGenerator.buildNativeParams` → `SdCppImageModule.kt:288-300` → `sdcpp_jni.cpp:523-562` `gp.loras`.
+  - sd.cpp then applies them through `apply_loras` (`sd_lora_t`); the `<lora:>` prompt tag is CLI-only.
+  - JNI and Kotlin are unchanged, so the `.so` was not rebuilt.
+- **A LoRA for the wrong base model was silently ignored** (sd.cpp skips tensors that don't match). Fixed:
+  - `detectLoraBase` reads the tensor keys first and training metadata as a fallback;
+  - `loraCompatibility` returns ok, mismatch or unknown;
+  - `sdCppGenerator` throws `SdCppLoraMismatchError` before any native call when the mismatch is proven.
+- **Unsupported LoRA types (OFT, IA3, GLoRA) are now refused at import** as `sd-lora-unsupported`. DoRA is accepted with a warning, because `dora_scale` is ignored upstream.
+- **Video checkpoints are refused** (new kind `video`).
+- **Flux is now detected** from `single_transformer_blocks.`.
+- **The import alert said "(CPU)"; it now says "(GPU)".**
+- **UI:**
+  - each LoRA row shows its base, with a red line on a mismatch;
+  - a note explains the memory cost of merging vs runtime;
+  - a LoRA that doesn't match the current checkpoint is imported disabled;
+  - LocalDream models show "LoRA needs the sd.cpp (GPU) engine".
+- **Tests:** `sdCppLoraDetection`, `sdCppGenerator.lora`, `ImageEngineSettings.lora` (new), plus `sdCppFileRegistration` (extended).
+
+### DONE: RAM gate under-counted Flux/SD3/unknown checkpoints
+- `sdCppMemory.ts` used the SD1 shape with a 4 B/param clamp for those, so a 24 GB Flux file was estimated at about 3 GB.
+- Weights for any family without a measured shape are now counted as at least the file size (conservative; a quantization setting is ignored).
+- Test added in `memoryEstimates.test.ts`; 16 of 16 pass.
+
+### UNKNOWN / open
+- On-device Vulkan with a runtime LoRA (q4_0 weights force runtime mode, `sdcpp_jni.cpp:302`). Needs the phone.
+- LoRA RAM in runtime mode is not in the estimate. Needs a `sizeBytes` field on `ImageLora`, to be added after the text-LoRA merge.
+- local-dream (NPU) has no LoRA field in its request or launch arguments.
+- **Remote:** the app sends `loras:[{name, weight}]`, but sd-server's OpenAI route ignores it; only `sdapi` `lora:[{path, multiplier}]` works. The Desktop server's contract is UNKNOWN.
+- A `.ckpt` LoRA is still classified as a checkpoint.
+
 ## 2026-11-18: full gate run (all agents merged)
 - **jest:** 571 of 576 suites pass, 3 skipped. 6766 tests pass, 29 skipped.
   - Failing: the orphaned `imageGenerator.test.ts` (33 tests), waiting for the owner's OK to delete it.
