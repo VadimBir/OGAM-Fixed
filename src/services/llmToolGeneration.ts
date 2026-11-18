@@ -236,8 +236,7 @@ export async function generateWithToolsImpl(
             typeof formatted === 'string' ? formatted : formatted?.prompt ?? JSON.stringify(formatted);
           logger.log(
             `[WIRE-TEMPLATED-PROMPT] len=${promptText.length} ` +
-              `systemSurvived=${systemInstructionSurvived(promptText)}\n` +
-              promptText.slice(0, 4000),
+              `systemSurvived=${systemInstructionSurvived(promptText)}\n${promptText.slice(0, 4000)}`,
           );
         } else {
           logger.log('[WIRE-TEMPLATED-PROMPT] getFormattedChat unavailable on this context');

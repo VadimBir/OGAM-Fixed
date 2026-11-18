@@ -102,7 +102,7 @@ export async function estimateTextModelMemoryMB(model: DownloadedModel): Promise
     const params = buildModelParams(model.filePath, { ...settings, modelMaxContext: modelMaxContextFromMetadata(metadata) });
     // params.cacheType is the type actually sent (an unset setting resolves to q8_0, not f16).
     const estimate = estimateLlamaMemory(metadata, {
-      ctxLen: params.ctxLen, cacheType: params.cacheType, nBatch: params.nBatch,
+      ctxLen: params.ctxLen, cacheType: params.cacheType, cacheTypeV: params.cacheTypeV, nBatch: params.nBatch,
       weightsBytes: model.fileSize + (model.mmProjFileSize ?? 0),
     });
     if (!estimate) return Math.ceil(fallback / (1024 * 1024));

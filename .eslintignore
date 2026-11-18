@@ -2,3 +2,5 @@
 android/app/build/
 ios/build/
 coverage/
+# Vendored @offgrid/* packages: prebuilt dist/ (see docs/refactor-map/SHARED_RECONSTRUCTION_FIXES.md), not app source
+vendor/offgrid-shared/

@@ -87,3 +87,23 @@ and `metro.config.js` expect them:
 ```sh
 cp -r vendor/offgrid-shared ../shared && npm ci
 ```
+
+## Fix 4 — consumer-contract drift found by the jest suite (2026-11-18)
+
+Applied to `vendor/offgrid-shared/packages/*/dist` and copied to `../shared`:
+
+- `@offgrid/sync parseChatModelOutput`: reasoning on the separate channel (litert/remote) is
+  complete only once the answer has started, so the thinking header reads "Thinking..." mid-stream.
+- `@offgrid/sync chatStreamPhaseLabel`: progress is `{ current, total }` (`step` kept as alias) and the
+  label keeps its ellipsis (`Generating image... 3/8`); `loading_image_model` is a status phase
+  (`Loading image model...`); `chatStreamPreviewHasMessageBody` treats whitespace/punctuation-only
+  content (`' - '`) as no body.
+- `@offgrid/sync projectPersonalMeshActivationFailure`: `invalid_credential` ->
+  "License not accepted" / "That license key is invalid or revoked.".
+- `@offgrid/ui sampleProgressRate`: the sample is `{ currentBytes, sampledAtMs }`
+  (`src/utils/downloadStatus.ts rateSample`).
+- `@offgrid/speech nextVoiceSession`: `userStart` opens the mic as `listen/listening` (no-op while
+  already listening); `speechHeard` moves `listening -> recording`.
+
+The sync mesh engine / discovery / transport / checksum stay stubs, so the suites that drive them are
+ignored by `jest.config.js` (`syncSourceDependentTestPaths`) unless `../shared/packages/sync/src` exists.

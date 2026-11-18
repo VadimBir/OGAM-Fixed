@@ -125,6 +125,7 @@ const createEmptyChatStyles = (colors: ThemeColors) => ({
     alignItems: 'center' as const,
     justifyContent: 'center' as const,
   },
+  projectHintAvatar: { width: 24, height: 24, borderRadius: 6 },
   projectHintIconText: { ...TYPOGRAPHY.bodySmall, fontWeight: '600' as const, color: colors.primary },
   projectHintText: { ...TYPOGRAPHY.h3, color: colors.primary, fontWeight: '500' as const },
   privacyText: { ...TYPOGRAPHY.h3, color: colors.textMuted, textAlign: 'center' as const, maxWidth: 300 },

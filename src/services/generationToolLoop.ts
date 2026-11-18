@@ -1428,12 +1428,13 @@ function stripToolCallMarkup(text: string): string {
  * text-format engines get the one format the parser reads. Exported for tests.
  */
 export function toolCallRepairInstruction(nativeToolCalling: boolean): string {
-  return (
-    'Your last tool call was cut off or malformed, so it did not run. If a tool is still needed, send ' +
-    'that one call again, complete, with short argument values' +
-    (nativeToolCalling ? '' : `, as one line: ${TEXT_TOOL_CALL_FORMAT}`) +
-    '. Otherwise answer in plain text.'
-  );
+  const textFormat = nativeToolCalling ? '' : `, as one line: ${TEXT_TOOL_CALL_FORMAT}`;
+  return [
+    'Your last tool call was cut off or malformed, so it did not run. If a tool is still needed, send ',
+    'that one call again, complete, with short argument values',
+    textFormat,
+    '. Otherwise answer in plain text.',
+  ].join('');
 }
 
 const BROKEN_TOOL_CALL_NOTICE =

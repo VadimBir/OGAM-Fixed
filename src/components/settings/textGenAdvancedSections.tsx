@@ -45,7 +45,7 @@ const IOS_BACKENDS: BackendOption[] = [
 const ANDROID_BASE_BACKENDS: BackendOption[] = [
   { id: INFERENCE_BACKENDS.CPU, label: 'CPU', desc: 'Always available. Stable, predictable performance.' },
   // Display label 'GPU' (users don't know OpenCL); id stays OPENCL.
-  { id: INFERENCE_BACKENDS.OPENCL, label: 'GPU', desc: 'Offload layers to GPU via OpenCL. Fast decode on Adreno/Mali GPUs. Requires model reload.' },
+  { id: INFERENCE_BACKENDS.OPENCL, label: 'GPU', desc: 'Offload layers to GPU via OpenCL. Fast decode on Adreno GPUs (Snapdragon only). Requires model reload.' },
 ];
 
 const HTP_BACKEND: BackendOption = {
@@ -133,10 +133,11 @@ export { AdvancedSamplingSection } from './advancedSamplingSection';
 
 export const FlashAttentionToggle: React.FC = () => {
   const { updateSettings } = useAppStore();
-  const { isFlashAttnOn, isQuantizedCache, isAndroid, handleFlashAttnToggle } = useTextGenerationAdvanced();
+  // Runtime platform from the hook (not the module-level constant): read at render time.
+  const { isFlashAttnOn, isQuantizedCache, isAndroid: onAndroid, handleFlashAttnToggle } = useTextGenerationAdvanced();
   let description = 'Faster inference and lower memory. Required for a quantized V cache (q8_0/q4_0). Requires model reload.';
-  if (isAndroid) {
-    description = 'Always on (Android): text models always run with flash attention.';
+  if (onAndroid) {
+    description = 'Always on (Android): on for a quantized V cache; with an f16 V cache, on wherever the GPU/NPU runs it.';
   } else if (isQuantizedCache) {
     description = 'Locked on: the quantized V cache (q8_0/q4_0) requires it. Set the V cache to f16 to turn it off.';
   }
@@ -148,7 +149,7 @@ export const FlashAttentionToggle: React.FC = () => {
       current={isFlashAttnOn ? 'on' : 'off'}
       onSelect={(id) => (id === 'on' ? updateSettings({ flashAttn: true }) : handleFlashAttnToggle(false))}
       testIdFor={(id) => `flash-attn-${id}-button`}
-      isDisabled={(id) => isAndroid || (id === 'off' && isQuantizedCache)}
+      isDisabled={(id) => onAndroid || (id === 'off' && isQuantizedCache)}
     />
   );
 };

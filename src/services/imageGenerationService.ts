@@ -447,7 +447,7 @@ class ImageGenerationService {
         return null;
       }
       this.updateState(completedImageGenerationState(result));
-      activeModelService.noteImageGenerationCompleted(); // weights now resident (M4 gate sizing)
+      activeModelService.noteImageGenerationCompleted?.(); // weights now resident (M4 gate sizing)
       // Android: hand the multi-GB idle image working set back when live free RAM is low.
       modelResidencyManager.releaseIdleImageIfMemoryLow().catch(err => {
         logger.warn('[ImageGenerationService] Post-generation image release failed:', err);
@@ -680,7 +680,7 @@ class ImageGenerationService {
     // M4: the text model loaded BEFORE the image work (prompt enhancement above still used it). The
     // image load may evict it and suspendTextForImageGeneration may unload it; either way it is
     // reloaded once this request ends (restoreTextAfterImageGeneration honours the loading mode).
-    const textBefore = activeModelService.getLoadedModelIds().textModelId;
+    const textBefore = activeModelService.getLoadedModelIds?.()?.textModelId ?? null;
     try {
       const loaded = await this._ensureImageModelLoaded(
         activeImageModelId,
@@ -691,7 +691,7 @@ class ImageGenerationService {
       if (request.cancelled) return this._endCancelled(request);
       if (!loaded) return null;
       // M4: the LLM must not compete for RAM with the generation working set.
-      await activeModelService.suspendTextForImageGeneration().catch(err => {
+      await Promise.resolve(activeModelService.suspendTextForImageGeneration?.()).catch(err => {
         logger.warn('[ImageGenerationService] M4 text suspend failed:', err);
       });
       if (request.cancelled) return this._endCancelled(request);
@@ -713,7 +713,7 @@ class ImageGenerationService {
         engineOptions,
       }, request);
     } finally {
-      await activeModelService.restoreTextAfterImageGeneration(textBefore);
+      await activeModelService.restoreTextAfterImageGeneration?.(textBefore);
     }
   }
 

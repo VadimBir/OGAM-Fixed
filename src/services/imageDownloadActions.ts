@@ -15,6 +15,7 @@ import { ImageModelDescriptor, ImageDownloadDeps } from './imageModelDownloadTyp
 import { getQnnWarningMessage, showQnnWarningAlert } from './imageDownloadQnn';
 import { ensureImageExtractionComplete, validateImageModelDir } from '../utils/imageModelIntegrity';
 import logger from '../utils/logger';
+import { claimImageFinalization, releaseImageFinalization } from './imageFinalizationClaims';
 
 // ImageDownloadDeps now lives in ./types (so imageDownloadQnn can import it without cycling back
 // here). Re-exported for existing importers.
@@ -287,9 +288,13 @@ function wireZipListeners(
   const { downloadId, deps } = ctx;
   const unsubComplete = backgroundDownloadService.onComplete(downloadId, async () => {
     unsubComplete(); unsubError();
+    // The Models screen's "processing" resume effect would finalize the same download: claim it.
+    if (!claimImageFinalization(ctx.modelId)) return;
     try { await onCompleteWork(); } catch (e: any) {
       deps.setAlertState(showAlert('Download Failed', getUserFacingDownloadMessage(e?.message || 'Failed to process model')));
       useDownloadStore.getState().setStatus(downloadId, 'failed', { message: e?.message || 'Failed to process model' });
+    } finally {
+      releaseImageFinalization(ctx.modelId);
     }
   });
   const unsubError = backgroundDownloadService.onError(downloadId, (ev) => {
@@ -342,6 +347,7 @@ export async function downloadHuggingFaceModel(
     await downloadSequentialFiles({ modelInfo, runtime, syntheticId, modelDir, files });
     assertNotCancelled(modelInfo.id, runtime);
     await validateMultifileComplete(modelDir, files); // reject a silently-truncated part before registering
+    claimImageFinalization(modelInfo.id); // the resume effect must not finalize this one too
     useDownloadStore.getState().setProcessing(syntheticId);
     assertNotCancelled(modelInfo.id, runtime);
     await RNFS.writeFile(`${modelDir}/_ready`, '', 'utf8').catch(() => {});
@@ -354,6 +360,7 @@ export async function downloadHuggingFaceModel(
     setMultifileFailed(syntheticId, deps, error?.message);
     await cleanupImageModelDir(modelInfo.id);
   } finally {
+    releaseImageFinalization(modelInfo.id);
     clearMultifileRuntime(modelInfo.id);
   }
 }
@@ -396,6 +403,7 @@ export async function downloadCoreMLMultiFile(
     await downloadSequentialFiles({ modelInfo, runtime, syntheticId, modelDir, files });
     assertNotCancelled(modelInfo.id, runtime);
     await validateMultifileComplete(modelDir, files); // reject a silently-truncated part before registering
+    claimImageFinalization(modelInfo.id); // the resume effect must not finalize this one too
     useDownloadStore.getState().setProcessing(syntheticId);
     assertNotCancelled(modelInfo.id, runtime);
     await RNFS.writeFile(`${modelDir}/_ready`, '', 'utf8').catch(() => {});
@@ -410,6 +418,7 @@ export async function downloadCoreMLMultiFile(
       message: error?.message || 'CoreML download failed',
     });
   } finally {
+    releaseImageFinalization(modelInfo.id);
     clearMultifileRuntime(modelInfo.id);
   }
 }

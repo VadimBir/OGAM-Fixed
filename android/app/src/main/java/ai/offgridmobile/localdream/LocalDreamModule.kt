@@ -82,9 +82,11 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
         private const val EVENT_STATUS = "LocalDreamStatus"
 
         /** True when canonical [path] is [root] itself or lies under it. A bare startsWith would
-         *  accept a sibling such as "/data/files_evil" for root "/data/files". */
+         *  accept a sibling such as "/data/files_evil" for root "/data/files". Android paths always
+         *  use '/', so the separator is literal: File.separator made this host-dependent ('\' on a
+         *  Windows JVM running the unit tests). */
         internal fun isPathInside(path: String, root: String): Boolean =
-            path == root || path.startsWith(root.trimEnd(File.separatorChar) + File.separator)
+            path == root || path.startsWith(root.trimEnd('/') + '/')
 
         /** Which qnnlibs asset a start needs: the QNN runtime only for the NPU backend, the core
          *  executable only when nativeLibraryDir has none. */

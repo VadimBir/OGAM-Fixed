@@ -76,11 +76,7 @@ export const ImageTab: React.FC<ImageTabProps> = ({
     <>
       {hasLoaded && (
         <View>
-          <View style={styles.loadedHeader} testID={selectedNotLoaded ? 'image-model-selected-not-loaded' : undefined}>
-            <Icon name={selectedNotLoaded ? 'circle' : 'check-circle'} size={14}
-              color={selectedNotLoaded ? colors.textMuted : colors.success} />
-            <Text style={styles.loadedLabel}>{selectedNotLoaded ? 'Selected, not loaded' : 'Currently Loaded'}</Text>
-          </View>
+          <SelectionHeader notLoaded={selectedNotLoaded} />
           <ModelCard
             compact
             testID="currently-loaded-image-model"
@@ -211,6 +207,18 @@ export const ImageTab: React.FC<ImageTabProps> = ({
         </View>
       ))}
     </>
+  );
+};
+
+/** Header over the selected image model: resident ("Currently Loaded") or not ("Selected, not loaded"). */
+const SelectionHeader: React.FC<{ notLoaded: boolean }> = ({ notLoaded }) => {
+  const { colors } = useTheme();
+  const styles = useThemedStyles(createAllStyles);
+  return (
+    <View style={styles.loadedHeader} testID={notLoaded ? 'image-model-selected-not-loaded' : undefined}>
+      <Icon name={notLoaded ? 'circle' : 'check-circle'} size={14} color={notLoaded ? colors.textMuted : colors.success} />
+      <Text style={styles.loadedLabel}>{notLoaded ? 'Selected, not loaded' : 'Currently Loaded'}</Text>
+    </View>
   );
 };
 

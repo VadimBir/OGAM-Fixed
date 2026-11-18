@@ -10,6 +10,7 @@ import { templateEmitsReasoning } from '../utils/messageContent';
 import { ensureNativeLogCapture, resetNativeLogCapture, recentNativeLog } from './llmNativeLog';
 
 import { HTP_ENABLED } from '../config/featureFlags';
+import { flashAttnPlacement } from '../utils/acceleration';
 import { LIVE_RAM_MARGIN_MB } from './memoryBudget';
 import { customStopStrings, resolveSampling, type SamplingSettings } from './samplingParams';
 
@@ -46,7 +47,7 @@ export function shouldDisableMmap(
   if (Platform.OS !== 'android') return false;
   if (!REPACKABLE_QUANTS.some(q => modelPath.toLowerCase().includes(q))) return false;
   const { modelFileSizeBytes, liveAvailableMB } = opts ?? {};
-  if (!modelFileSizeBytes || liveAvailableMB == null || !(liveAvailableMB > 0)) return false;
+  if (!modelFileSizeBytes || liveAvailableMB == null || liveAvailableMB <= 0 || Number.isNaN(liveAvailableMB)) return false;
   const modelMB = modelFileSizeBytes / (1024 * 1024);
   const usableMB = liveAvailableMB - LIVE_RAM_MARGIN_MB;
   return usableMB > 0 && modelMB <= usableMB * MMAP_OFF_MAX_LIVE_FRACTION;
@@ -89,6 +90,8 @@ export interface ModelLoadParams {
   cacheTypeV: string;
   /** The n_ubatch sent (0 < nUbatch <= nBatch). */
   nUbatch: number;
+  /** Why flash attention will not run fully on the GPU/NPU for this KV pair (null = it does). */
+  flashAttnWarning: string | null;
 }
 
 /** mmap decision for a load: 'on' / 'off' are the user's; 'auto' (or unset) = shouldDisableMmap. */
@@ -125,7 +128,8 @@ export function backendForcesF16Cache(_backend: string | undefined): boolean {
   // on every backend — CPU, OpenCL, and HTP alike. The previous blanket coercion (OpenCL + HTP →
   // f16) was an app-imposed hardcode, not a hard engine limit: the ggml OpenCL backend supports
   // quantized KV, and the HTP path passes the requested type through to the engine, which selects
-  // its own fallback if a specific quant is unsupported. If a specific device/driver genuinely
+  // its own fallback if a specific quant is unsupported (HTP flash attention takes only f16/q8_0 KV;
+  // q4_0 KV runs attention on the CPU there: ggml-hexagon.cpp:4148-4153, see flashAttnWarningFor). If a specific device/driver genuinely
   // can't init with a quantized KV, that belongs behind a narrow per-device guard, never a blanket
   // f16 override of the user's explicit setting.
   return false;
@@ -139,14 +143,18 @@ export function effectiveCacheType(backend: string | undefined, requested: strin
 /**
  * flash_attn_type sent to llama.rn (its typings: `flash_attn_type?: 'auto' | 'on' | 'off'`,
  * node_modules/llama.rn/src/index.ts:218; 'on' → LLAMA_FLASH_ATTN_TYPE_ENABLED, rn-llama.cpp:158-166).
- *  - Android: always 'on' - the strongest value; the user's Flash-Attn-off setting is not honored
- *    there (owner rule: flash attention shall be used, Android used to the max).
+ *  - Android: 'on' for a quantized V cache, 'auto' for an f16 V cache; the user's Flash-Attn-off
+ *    setting is not honored there (owner rule: flash attention on the GPU). 'auto' lets llama.cpp
+ *    turn FA off only where the accelerator declines it, so attention never moves to the CPU unseen.
  *  - Elsewhere: 'off' only for the explicit off setting with an f16 cache; otherwise 'auto'. A
  *    quantized KV cache wins over an off setting: llama.cpp refuses a quantized V cache with flash
  *    attention disabled ("quantized V cache requires flash_attn to be enabled"), failing init.
  */
 export function resolveFlashAttnType(opts: { android: boolean; requestedOff: boolean; cacheType: string }): 'on' | 'auto' | 'off' {
-  if (opts.android) return 'on';
+  // Android + f16 V: 'auto', so llama.cpp's FA placement check keeps FA on where the GPU/NPU runs it
+  // and turns it off where FA would silently run on the CPU (that check runs only for 'auto':
+  // vendor src/llama-context.cpp:555-558). A quantized V needs FA on (:3732-3735), so stays 'on'.
+  if (opts.android) return opts.cacheType === 'f16' ? 'auto' : 'on';
   return opts.requestedOff && opts.cacheType === 'f16' ? 'off' : 'auto';
 }
 
@@ -169,7 +177,7 @@ export function buildModelParams(
   // backendForcesF16Cache is false for every backend now (the old "OpenCL/HTP crash with flash
   // attn on" coercion was removed; docs/GPU-ACCELERATION-INVESTIGATION.md calls that crash
   // unconfirmed - llama.cpp #18075 falls back to CPU for the op). On Android flash attention is
-  // ALWAYS 'on' (resolveFlashAttnType). Elsewhere: 'auto' lets llama.cpp decide.
+  // 'on' for a quantized V, 'auto' for f16 V (resolveFlashAttnType). Elsewhere: 'auto'.
   const gpuBackendIncompatible = backendForcesF16Cache(backend);
   const flashAttnRequestedOff = settings.flashAttn === false || gpuBackendIncompatible;
   const flashAttnForced = Platform.OS === 'android';
@@ -212,7 +220,19 @@ export function buildModelParams(
     cacheType,
     cacheTypeV,
     nUbatch,
+    flashAttnWarning: flashAttnWarningFor(backend, cacheType, cacheTypeV),
   };
+}
+
+/**
+ * Why flash attention will NOT run fully on the accelerator for this backend + KV pair, or null when
+ * it does / the backend is not OpenCL or HTP. Placement rules: utils/acceleration.ts flashAttnPlacement
+ * (proved against the pinned llama.cpp ggml-opencl.cpp:8930-9032, ggml-hexagon.cpp:4148-4153).
+ */
+export function flashAttnWarningFor(backend: string | undefined, k: string, v: string, adrenoModel?: number): string | null {
+  if (backend !== INFERENCE_BACKENDS.OPENCL && backend !== INFERENCE_BACKENDS.HTP) return null;
+  const p = flashAttnPlacement({ backend: backend === INFERENCE_BACKENDS.HTP ? 'htp' : 'opencl', cacheTypeK: k, cacheTypeV: v, adrenoModel });
+  return p.onAccelerator === true && !p.reason.includes('slow') ? null : p.reason;
 }
 export interface ContextInitResult {
   context: LlamaContext;

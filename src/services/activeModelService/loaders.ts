@@ -5,7 +5,7 @@
 
 import { Platform, ToastAndroid } from 'react-native';
 import { useAppStore } from '../../stores';
-import { DownloadedModel, LlamaDownloadedModel, ONNXImageModel, INFERENCE_BACKENDS, CacheType } from '../../types';
+import { DownloadedModel, LlamaDownloadedModel, ONNXImageModel, CacheType } from '../../types';
 import { llmService } from '../llm';
 import { effectiveCacheType } from '../llmHelpers';
 import { liteRTService } from '../litert';
@@ -198,6 +198,9 @@ async function doLoadLiteRTModel(ctx: TextLoadContext): Promise<void> {
       flashAttn: ctx.store.settings.flashAttn,
       speculativeDecoding: ctx.store.settings.speculativeDecoding,
       cacheType: ctx.store.settings.cacheType,
+      nUbatch: ctx.store.settings.nUbatch,
+      mmapMode: ctx.store.settings.mmapMode,
+      cacheTypeV: ctx.store.settings.cacheTypeV,
     });
 
     ctx.onLoaded(ctx.modelId);
@@ -267,6 +270,11 @@ export async function doLoadTextModel(ctx: TextLoadContext): Promise<void> {
       // Store the effective cache type via the single source of truth (only HTP is coerced to
       // f16 now; OpenCL honors the chosen quantized KV) so the banner never shows a false mismatch.
       cacheType: effectiveCacheType(settings.inferenceBackend, settings.cacheType) as CacheType,
+      // RAW settings, like the fields above: computePendingSettings (screens/ChatScreen/pendingSettings.ts)
+      // compares each against the live raw setting, so a change to any of them shows the reload banner.
+      nUbatch: settings.nUbatch,
+      mmapMode: settings.mmapMode,
+      cacheTypeV: settings.cacheTypeV,
     };
     ctx.store.setLoadedSettings(reloadSettings);
 

@@ -138,9 +138,10 @@ describe('buildModelParams load fields', () => {
     expect((buildModelParams('/m.gguf', { flashAttn: false, cacheType: 'f16', cacheTypeV: 'q8_0' }).baseParams as any).flash_attn_type).toBe('auto');
   });
 
-  it("Android keeps flash attention 'on' with a split cache", () => {
+  it("Android split cache: f16 V -> 'auto' (FA kept on where the accelerator runs it), quantized V -> 'on'", () => {
     (Platform as any).OS = 'android';
-    expect((buildModelParams('/m.gguf', { cacheType: 'q8_0', cacheTypeV: 'f16' }).baseParams as any).flash_attn_type).toBe('on');
+    expect((buildModelParams('/m.gguf', { cacheType: 'q8_0', cacheTypeV: 'f16' }).baseParams as any).flash_attn_type).toBe('auto');
+    expect((buildModelParams('/m.gguf', { cacheType: 'f16', cacheTypeV: 'q8_0' }).baseParams as any).flash_attn_type).toBe('on');
   });
 
   describe('mmap modes', () => {

@@ -25,8 +25,9 @@ export function useTextGenerationAdvanced() {
   const isQuantizedCache = vCacheOf(settings?.cacheType ?? 'q8_0', currentCacheTypeV) !== 'f16';
   // A quantized KV cache always runs with flash attention (llama.cpp requires it for a quantized
   // V cache; the loader enables it), so the toggle reads ON whatever the stored flag says.
-  // On Android llm helpers always send flash_attn_type 'on' (resolveFlashAttnType), so it reads ON
-  // whatever the stored flag says.
+  // On Android llm helpers send flash_attn_type 'on' (quantized V) or 'auto' (f16 V; llama.cpp then
+  // keeps FA on wherever the GPU/NPU runs it) (resolveFlashAttnType), so it reads ON whatever the
+  // stored flag says.
   const isFlashAttnOn =
     Platform.OS === 'android' || (settings?.flashAttn ?? true) || isQuantizedCache;
   const currentCacheType: CacheType = settings?.cacheType ?? 'q8_0';

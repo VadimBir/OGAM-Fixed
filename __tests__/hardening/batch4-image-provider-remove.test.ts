@@ -63,8 +63,28 @@ describe('imageProvider.remove — uninstall chain (case 37)', () => {
     expect(useAppStore.getState().downloadedImageModels.find((m: any) => m.id === 'sdxl')).toBeUndefined();
     // No in-flight row existed, so no native cancel needed.
     expect(mockCancel).not.toHaveBeenCalled();
-    // Always unload defensively so the ejected model can't stay resident.
+    // Neither active nor resident: the active image model (another one) must not be unloaded.
+    expect(mockUnload).not.toHaveBeenCalled();
+  });
+
+  it('unloads when the deleted model is resident even though it is not the active one', async () => {
+    useAppStore.setState({ downloadedImageModels: [downloadedModel('sdxl')], activeImageModelId: 'other' } as any);
+    (activeModelService as any).getLoadedModelIds = jest.fn(() => ({ textModelId: null, imageModelId: 'sdxl' }));
+
+    await imageProvider.remove('image:sdxl');
+
     expect(mockUnload).toHaveBeenCalled();
+    expect(useAppStore.getState().activeImageModelId).toBe('other');
+    delete (activeModelService as any).getLoadedModelIds;
+  });
+
+  it('deleting a non-active, non-resident model keeps the active selection', async () => {
+    useAppStore.setState({ downloadedImageModels: [downloadedModel('sdxl'), downloadedModel('other')], activeImageModelId: 'other' } as any);
+
+    await imageProvider.remove('image:sdxl');
+
+    expect(mockUnload).not.toHaveBeenCalled();
+    expect(useAppStore.getState().activeImageModelId).toBe('other');
   });
 
   it('uninstalling the ACTIVE model clears activeImageModelId (disables image gen — cases 29/38)', async () => {

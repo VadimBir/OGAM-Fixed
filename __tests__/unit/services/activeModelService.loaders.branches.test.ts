@@ -142,6 +142,28 @@ describe('doLoadTextModel — mmproj clear branch', () => {
     expect(loaded.cacheType).toBe(ctx.store.settings.cacheType);
   });
 
+  // computePendingSettings (screens/ChatScreen/pendingSettings.ts) compares nUbatch / mmapMode /
+  // cacheTypeV against the load snapshot, each only once the snapshot holds it. Falsify: drop them
+  // from setLoadedSettings and a change to any of them never shows the reload banner.
+  it('snapshots the RAW nUbatch / mmapMode / cacheTypeV settings', async () => {
+    mockedLlm.loadModel.mockResolvedValue(undefined);
+    (mockedLlm.getMultimodalSupport as jest.Mock).mockReturnValue(null);
+    mockedRNFS.exists.mockResolvedValue(false);
+    mockedRNFS.readDir.mockResolvedValue([]);
+    const ctx = makeTextCtx({ store: { settings: { ...makeStore().settings, nUbatch: 256, mmapMode: 'off', cacheTypeV: 'f16' } } });
+    mockedGetState.mockReturnValue(ctx.store);
+
+    await doLoadTextModel(ctx);
+
+    const loaded = (ctx.store.setLoadedSettings as jest.Mock).mock.calls[0][0];
+    expect(loaded).toMatchObject({ nUbatch: 256, mmapMode: 'off', cacheTypeV: 'f16' });
+    const { computePendingSettings } = require('../../../src/screens/ChatScreen/pendingSettings');
+    expect(computePendingSettings('llama', { ...ctx.store.settings }, loaded)).toBe(false);
+    expect(computePendingSettings('llama', { ...ctx.store.settings, nUbatch: 128 }, loaded)).toBe(true);
+    expect(computePendingSettings('llama', { ...ctx.store.settings, mmapMode: 'on' }, loaded)).toBe(true);
+    expect(computePendingSettings('llama', { ...ctx.store.settings, cacheTypeV: 'q8_0' }, loaded)).toBe(true);
+  });
+
   it('logs a warning but continues when unloading the previous llama model fails', async () => {
     mockedLlm.unloadModel.mockRejectedValue(new Error('unload boom'));
     mockedLlm.loadModel.mockResolvedValue(undefined);

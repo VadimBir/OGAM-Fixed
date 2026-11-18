@@ -5,6 +5,7 @@ import {
   ggufAcceleratorLabel,
   ggufCpuFallbackWarning,
   flashAttnPlacement,
+  adrenoModelFromOpenclLog,
   modelSupportsNpuGpu,
   isDownloadedModelAccelerable,
   findAccelerableModel,
@@ -109,6 +110,15 @@ describe('flashAttnPlacement (OpenCL ggml-opencl.cpp:8930-9032, HTP ggml-hexagon
     const q4 = flashAttnPlacement({ backend: 'htp', cacheTypeK: 'q4_0', cacheTypeV: 'q4_0' });
     expect(q4.onAccelerator).toBe(false);
     expect(q4.reason).toContain('CPU');
+  });
+});
+
+describe('adrenoModelFromOpenclLog (ggml-opencl.cpp:6263 device line)', () => {
+  it('reads the Adreno model from the device line only', () => {
+    expect(adrenoModelFromOpenclLog("info: ggml_opencl: device: 'QUALCOMM Adreno(TM) 740 (OpenCL 3.0 Adreno(TM) 740)'")).toBe(740);
+    expect(adrenoModelFromOpenclLog("ggml_opencl: device: 'QUALCOMM Adreno(TM) 830 (OpenCL 3.0)'")).toBe(830);
+    expect(adrenoModelFromOpenclLog("ggml_opencl: device: 'Mali-G715 (OpenCL 3.0)'")).toBeUndefined();
+    expect(adrenoModelFromOpenclLog('ggml_opencl: device FP16 support: true')).toBeUndefined();
   });
 });
 

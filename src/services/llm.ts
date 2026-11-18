@@ -51,6 +51,8 @@ class LLMService {
   /** GPU layers the user's settings asked for at load time (pre device-cap/backend resolution).
    *  >0 with activeGpuLayers 0 means the load silently downgraded to CPU — the fallback-notice verdict. */
   private requestedGpuLayers: number = 0;
+  /** use_mmap of the loaded context. false = weights read into anonymous RAM (non-reclaimable). */
+  private weightsMmapped: boolean = true;
   private sessionCacheDir: string = `${RNFS.CachesDirectoryPath}/llm-sessions`;
   /** Serializes loadModel / unloadModel / reloadWithSettings to prevent concurrent native context init. */
   private contextMutexPromise: Promise<void> = Promise.resolve();
@@ -97,6 +99,7 @@ class LLMService {
       logger.log(`[LLM] Context clamped ${settings.contextLength} -> ${modelMaxContext} (model trained context)`);
     }
     logger.log(`[LLM] Resolved params: threads=${params.nThreads}, batch=${params.nBatch}, ctx=${params.ctxLen}, gpuLayers=${params.nGpuLayers}, ubatch=${params.nUbatch}, mmap=${(params.baseParams as { use_mmap?: boolean }).use_mmap}`);
+    if (params.flashAttnWarning) logger.warn(`[LLM] Flash attention: ${params.flashAttnWarning}`);
     // Use the EFFECTIVE cache type, not the raw setting: an unset setting resolves in
     // buildModelParams (q8_0, or f16 with flash attention off off-Android), so keying off
     // settings.cacheType alone could pick the wrong KV estimate.
@@ -178,6 +181,7 @@ class LLMService {
       const { fileSize, memCheck, params } = await this.validateAndPrepareModel(modelPath, opts?.override);
       if (mmProjPath && !await RNFS.exists(mmProjPath)) { logger.warn('[LLM] MMProj file not found, disabling vision support'); mmProjPath = undefined; }
       const { baseParams, nThreads, nBatch, ctxLen, nGpuLayers } = params;
+      this.weightsMmapped = (baseParams as { use_mmap?: boolean }).use_mmap !== false;
       this.currentSettings = { nThreads, nBatch, contextLength: ctxLen };
       logger.log(`[LLM] Loading model: ctx=${ctxLen}, threads=${nThreads}, batch=${nBatch}, fileSize=${(fileSize / (1024 * 1024)).toFixed(0)}MB, availRAM=${memCheck.availableMB.toFixed(0)}MB`);
       try {
@@ -306,6 +310,8 @@ class LLMService {
     try { await mutex.ready; await this.doUnloadModel(); } finally { mutex.release(); }
   }
   isModelLoaded(): boolean { return this.context !== null; }
+  /** Whether the loaded model's weights are file-backed (mmap) pages; false = anonymous RAM. */
+  weightsAreMmapped(): boolean { return this.weightsMmapped; }
   getLoadedModelPath(): string | null { return this.currentModelPath; }
   async generateResponse(messages: Message[], options?: { onStream?: StreamCallback; onComplete?: CompleteCallback; disableThinking?: boolean }): Promise<string> {
     const { onStream, onComplete, ...opts } = options ?? {};

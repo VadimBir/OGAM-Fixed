@@ -21,6 +21,7 @@ import {
   getSessionPath,
   shouldDisableMmap,
   resolveFlashAttnType,
+  flashAttnWarningFor,
 } from '../../../src/services/llmHelpers';
 import { INFERENCE_BACKENDS } from '../../../src/types';
 import { Platform } from 'react-native';
@@ -136,12 +137,24 @@ describe('buildModelParams — OpenCL backend branch', () => {
   });
 });
 
-describe('flash attention on Android - always on', () => {
+describe('flash attention on Android - on (quantized V) or auto (f16 V), never off', () => {
   const origOS = Platform.OS;
   afterEach(() => { (Platform as any).OS = origOS; });
 
-  it('resolveFlashAttnType: android → on regardless of setting/cache; elsewhere off only for off+f16', () => {
-    expect(resolveFlashAttnType({ android: true, requestedOff: true, cacheType: 'f16' })).toBe('on');
+  it('flashAttnWarningFor: null off-accelerator or when FA runs on it; reason otherwise', () => {
+    expect(flashAttnWarningFor('cpu', 'q8_0', 'q8_0')).toBeNull();
+    expect(flashAttnWarningFor('opencl', 'q8_0', 'q8_0', 840)).toBeNull();
+    expect(flashAttnWarningFor('opencl', 'q8_0', 'q8_0', 740)).toMatch(/Adreno 740.*CPU/);
+    expect(flashAttnWarningFor('opencl', 'q8_0', 'q8_0')).toMatch(/unknown/);
+    expect(flashAttnWarningFor('opencl', 'f16', 'q8_0', 840)).toMatch(/slow/);
+    expect(flashAttnWarningFor('htp', 'q8_0', 'q8_0')).toBeNull();
+    expect(flashAttnWarningFor('htp', 'q4_0', 'q4_0')).toMatch(/CPU/);
+  });
+
+  it('resolveFlashAttnType: android → on for quantized V, auto for f16 V; elsewhere off only for off+f16', () => {
+    expect(resolveFlashAttnType({ android: true, requestedOff: true, cacheType: 'f16' })).toBe('auto');
+    expect(resolveFlashAttnType({ android: true, requestedOff: false, cacheType: 'f16' })).toBe('auto');
+    expect(resolveFlashAttnType({ android: true, requestedOff: true, cacheType: 'q4_0' })).toBe('on');
     expect(resolveFlashAttnType({ android: true, requestedOff: false, cacheType: 'q8_0' })).toBe('on');
     expect(resolveFlashAttnType({ android: false, requestedOff: true, cacheType: 'f16' })).toBe('off');
     expect(resolveFlashAttnType({ android: false, requestedOff: true, cacheType: 'q8_0' })).toBe('auto');
@@ -152,10 +165,10 @@ describe('flash attention on Android - always on', () => {
     INFERENCE_BACKENDS.CPU,
     INFERENCE_BACKENDS.OPENCL,
     INFERENCE_BACKENDS.HTP,
-  ])('android %s with the Flash-Attn setting OFF and an f16 cache still sends flash_attn_type "on"', (backend) => {
+  ])('android %s with the Flash-Attn setting OFF and an f16 cache sends flash_attn_type "auto" (never "off")', (backend) => {
     (Platform as any).OS = 'android';
     const base = buildModelParams('/model.gguf', { inferenceBackend: backend, flashAttn: false, cacheType: 'f16' }).baseParams as any;
-    expect(base.flash_attn_type).toBe('on');
+    expect(base.flash_attn_type).toBe('auto');
     expect(base.cache_type_k).toBe('f16'); // an explicit cache choice is honored
   });
 

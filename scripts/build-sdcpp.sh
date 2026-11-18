@@ -21,7 +21,9 @@ SDCPP_COMMIT="c92d73c408515c94beef32161bb5960764fde7a0"
 VKH_REPO="https://github.com/KhronosGroup/Vulkan-Headers"
 VKH_COMMIT="b26454f3ccd67e704117a39295fa13935fd3804c"
 SDCPP_VULKAN="${SDCPP_VULKAN:-ON}"
-API="${SDCPP_ANDROID_API:-26}"
+# android-28: ggml-vulkan links vkGetPhysicalDeviceFeatures2 (Vulkan 1.1) statically; the NDK libvulkan stub only exports it from API 28.
+# On older devices System.loadLibrary fails and SdCppNative.isLoaded is false (no crash).
+API="${SDCPP_ANDROID_API:-28}"
 SDCPP_SRC="${SDCPP_SRC:-${HOME}/.cache/offgrid/stable-diffusion.cpp}"
 VKH_SRC="${SDCPP_VULKAN_HEADERS_SRC:-${HOME}/.cache/offgrid/Vulkan-Headers}"
 SDK="${ANDROID_HOME:-/opt/android-sdk}"

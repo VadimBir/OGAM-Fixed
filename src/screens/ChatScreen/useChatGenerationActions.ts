@@ -910,7 +910,7 @@ function reportEmptyReply(
   reportModelFailure('text', 'The model produced no output', {
     title: 'No response',
     message:
-      'The model returned nothing. This can happen when it runs on an incompatible backend (a K-quant on NPU/GPU falls back to CPU and may emit nothing). Try again, or switch the backend/model.',
+      'The model returned nothing. This can happen when it runs on an incompatible backend (some quants, e.g. IQ4_XS, Q3_K or Q2_K, fall back to the CPU on the GPU/NPU and may emit nothing). Try again, or switch the backend/model.',
     onRetry,
   });
 }

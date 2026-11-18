@@ -9,7 +9,6 @@ import React, { useEffect, useState } from 'react';
 import { Text, TextInput, View } from 'react-native';
 import { SliderSetting } from './SliderSetting';
 import { useTheme, useThemedStyles } from '../theme';
-import { SPACING } from '../constants';
 import { useAppStore } from '../stores';
 import { createTextGenAdvancedStyles } from './settings/textGenAdvancedStyles';
 
@@ -44,15 +43,7 @@ export const ImageDefaultsSettings: React.FC<{ compact?: boolean }> = ({ compact
           onBlur={commit}
           placeholder="e.g. blurry, low quality, watermark"
           placeholderTextColor={colors.textMuted}
-          style={{
-            minHeight: 56,
-            borderWidth: 1,
-            borderColor: colors.border,
-            borderRadius: 8,
-            padding: SPACING.sm,
-            color: colors.text,
-            textAlignVertical: 'top',
-          }}
+          style={styles.multilineInputShort}
         />
       </View>
       <SliderSetting

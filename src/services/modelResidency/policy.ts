@@ -25,6 +25,8 @@ export interface Resident {
   /** Unique model id. */
   key: string;
   type: ResidentType;
+  /** The downloaded-model id behind the slot, when the owner registered one (text). */
+  modelId?: string;
   /** Approximate resident memory cost in MB. */
   sizeMB: number;
   /** Pinned residents are never evicted (e.g. the classifier). */

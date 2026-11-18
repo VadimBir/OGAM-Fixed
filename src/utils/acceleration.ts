@@ -106,6 +106,18 @@ export function isNpuAccelerableQuant(quant: string | undefined | null): boolean
 }
 
 /**
+ * Adreno model number from ggml-opencl's init log line `ggml_opencl: device: '<name> (<version>)'`
+ * (ggml-opencl.cpp:6263), e.g. 740; undefined for any other line or a non-Adreno device. llama.rn
+ * reports the OpenCL device only as "GPUOpenCL" (ggml-opencl.cpp:12582-12583), so this log line is the
+ * one place JS can learn the model that flashAttnPlacement needs.
+ */
+export function adrenoModelFromOpenclLog(line: string): number | undefined {
+  if (!/ggml_opencl: device: '/.test(line)) return undefined;
+  const m = /Adreno[^0-9']*(\d{3})/i.exec(line);
+  return m ? Number.parseInt(m[1], 10) : undefined;
+}
+
+/**
  * Where flash attention runs for a KV cache type pair, from the backends' supports_op:
  *  - OpenCL (ggml-opencl.cpp:8930-9032): K/V f16, q8_0 or q4_0 (same type), or a mixed pair of those
  *    (mixed = host-side F16->F32 conversion every call, :16461-16511, slow). Adreno 730/740/750 ("A7X",

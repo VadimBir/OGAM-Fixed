@@ -259,3 +259,43 @@ describe('remote outcome reports only what the server was sent', () => {
     spy.mockRestore();
   });
 });
+
+// M4: the LLM must not compete for RAM while an image generates locally. The service asks
+// activeModelService to suspend the text model after the image load and BEFORE the engine runs, and
+// to restore the text model that was loaded before the request on every exit path.
+describe('M4 wiring — text suspend before the engine, restore after', () => {
+  const order: string[] = [];
+  beforeEach(() => {
+    order.length = 0;
+    mockActive.getLoadedModelIds.mockReturnValue({ textModelId: 'gguf', imageModelId: 'img-1' });
+    mockActive.suspendTextForImageGeneration.mockImplementation(async () => { order.push('suspend'); return true; });
+    mockActive.restoreTextAfterImageGeneration.mockImplementation(async () => { order.push('restore'); });
+    mockDream.generateImage.mockImplementation(async () => { order.push('generate'); return OK_RESULT as any; });
+  });
+
+  it('success: suspend -> generate -> restore(text loaded before), and the weights are noted resident', async () => {
+    setupModel();
+    const outcome = await imageGenerationService.generateImageWithOutcome({ prompt: 'apple' });
+    expect(outcome.ok).toBe(true);
+    expect(order).toEqual(['suspend', 'generate', 'restore']);
+    expect(mockActive.restoreTextAfterImageGeneration).toHaveBeenCalledWith('gguf');
+    expect(mockActive.noteImageGenerationCompleted).toHaveBeenCalledTimes(1);
+  });
+
+  it('image load failure: no suspend, no generation, the text model is still restored', async () => {
+    setupModel();
+    mockDream.isModelLoaded.mockResolvedValue(false);
+    mockActive.loadImageModel.mockRejectedValueOnce(new Error('bad file header'));
+    await imageGenerationService.generateImageWithOutcome({ prompt: 'x' });
+    expect(order).toEqual(['restore']);
+    expect(mockActive.noteImageGenerationCompleted).not.toHaveBeenCalled();
+  });
+
+  it('engine failure: restore still runs; a failed suspend never blocks the generation', async () => {
+    setupModel();
+    mockActive.suspendTextForImageGeneration.mockRejectedValueOnce(new Error('unload refused'));
+    mockDream.generateImage.mockImplementationOnce(async () => { order.push('generate'); throw new Error('Pipeline failed: unet'); });
+    expect(await imageGenerationService.generateImageWithOutcome({ prompt: 'x' })).toMatchObject({ ok: false, reason: 'engine_error' });
+    expect(order).toEqual(['generate', 'restore']);
+  });
+});

@@ -66,4 +66,22 @@ export const createTextGenAdvancedStyles = (colors: ThemeColors) => ({
     marginTop: SPACING.xs,
     lineHeight: 18,
   },
+  multilineInput: {
+    minHeight: 64,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 8,
+    padding: SPACING.sm,
+    color: colors.text,
+    textAlignVertical: 'top' as const,
+  },
+  multilineInputShort: {
+    minHeight: 56,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 8,
+    padding: SPACING.sm,
+    color: colors.text,
+    textAlignVertical: 'top' as const,
+  },
 });

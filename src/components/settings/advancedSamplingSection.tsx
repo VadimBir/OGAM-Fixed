@@ -9,7 +9,6 @@ import React, { useEffect, useState } from 'react';
 import { Text, TextInput, View } from 'react-native';
 import { SliderSetting } from '../SliderSetting';
 import { useTheme, useThemedStyles } from '../../theme';
-import { SPACING } from '../../constants';
 import { useAppStore } from '../../stores';
 import { useTextGenerationSettings } from '../../hooks/useTextGenerationSettings';
 import { formatStopStringsText, parseStopStringsText, resolveSampling } from '../../services/samplingParams';
@@ -64,15 +63,7 @@ export const StopStringsInput: React.FC = () => {
         onBlur={() => updateSettings({ customStopStrings: parseStopStringsText(text) })}
         placeholder="e.g. ### User:"
         placeholderTextColor={colors.textMuted}
-        style={{
-          minHeight: 64,
-          borderWidth: 1,
-          borderColor: colors.border,
-          borderRadius: 8,
-          padding: SPACING.sm,
-          color: colors.text,
-          textAlignVertical: 'top',
-        }}
+        style={styles.multilineInput}
       />
     </View>
   );

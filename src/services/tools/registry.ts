@@ -375,13 +375,13 @@ export function buildToolSystemPromptHint(enabledToolIds: string[]): string {
       return `- ${t.name}: ${toolDefinitionDescription(t)}\n${params ? `  arguments:\n${params}\n` : ''}  example: ${toolCallExample(t)}`;
     })
     .join('\n');
-  return (
-    '\n\n# Tools\n' +
-    'You can call these tools. To call one, reply with only this line:\n' +
-    `${TEXT_TOOL_CALL_FORMAT}\n` +
-    'Write nothing else in that reply. The result comes back inside <tool_response>; then answer the user.\n' +
-    toolList
-  );
+  return [
+    '\n\n# Tools\n',
+    'You can call these tools. To call one, reply with only this line:\n',
+    `${TEXT_TOOL_CALL_FORMAT}\n`,
+    'Write nothing else in that reply. The result comes back inside <tool_response>; then answer the user.\n',
+    toolList,
+  ].join('');
 }
 
 /**

@@ -209,9 +209,12 @@ class ActiveModelService {
       onLoaded: id => {
         this.setLoadedText(id);
         useAppStore.getState().setTextModelEvicted(false); // loaded → clear any prior eviction
+        // A GGUF loaded with mmap OFF (shouldDisableMmap / mmapMode 'off') holds its weights in
+        // anonymous RAM: register it as dirty so the dirty ceiling counts it (it was always 'clean').
+        const residentDirty = textIsDirty || llmService.weightsAreMmapped?.() === false;
         modelResidencyManager.register(
           // isBusy: the Android trim release never drops the text model mid-generation.
-          { key: 'text', type: 'text', modelId, sizeMB: textSizeMB, dirtyMemory: textIsDirty, isBusy: isTextGenerationInFlight },
+          { key: 'text', type: 'text', modelId, sizeMB: textSizeMB, dirtyMemory: residentDirty, isBusy: isTextGenerationInFlight },
           () => this.doUnloadTextModelLocked(true), // eviction keeps the selection
         );
       },

@@ -171,7 +171,7 @@ export const EmptyChat: React.FC<{
           {activeProject?.avatarUri ? (
             <Image
               source={{ uri: activeProject.avatarUri }}
-              style={{ width: 24, height: 24, borderRadius: 6 }}
+              style={styles.projectHintAvatar}
               testID="project-hint-avatar"
             />
           ) : (

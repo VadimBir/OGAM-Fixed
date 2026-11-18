@@ -87,6 +87,18 @@ describe('estimateTextModelMemoryMB uses the clamped context', () => {
     expect(mb).toBe(1024);
   });
 
+  // V is sized with ITS type (buildModelParams resolves cacheTypeV), not the K type.
+  // Falsify: drop cacheTypeV from the estimate call and the split case reads undefined.
+  it('passes the resolved V cache type (split K/V and "same")', async () => {
+    (loadLlamaModelInfo as jest.Mock).mockResolvedValue({});
+    useAppStore.setState({ settings: { ...useAppStore.getState().settings, inferenceBackend: 'cpu', cacheType: 'q8_0', cacheTypeV: 'f16' } });
+    await estimateTextModelMemoryMB(createDownloadedModel({ engine: 'llama', filePath: '/m.gguf', fileSize: GB }));
+    expect(spy.mock.calls[0][1]).toMatchObject({ cacheType: 'q8_0', cacheTypeV: 'f16' });
+    useAppStore.setState({ settings: { ...useAppStore.getState().settings, cacheTypeV: 'same' } });
+    await estimateTextModelMemoryMB(createDownloadedModel({ engine: 'llama', filePath: '/m.gguf', fileSize: GB }));
+    expect(spy.mock.calls[1][1]).toMatchObject({ cacheType: 'q8_0', cacheTypeV: 'q8_0' });
+  });
+
   it('keeps the requested context when the header has no trained context', async () => {
     (loadLlamaModelInfo as jest.Mock).mockResolvedValueOnce({});
     await estimateTextModelMemoryMB(createDownloadedModel({ engine: 'llama', filePath: '/m.gguf', fileSize: GB }));

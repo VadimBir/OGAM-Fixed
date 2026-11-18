@@ -72,13 +72,13 @@ export function composeCharacterPersonaPrompt(
   // No caveats and no persona → keep the plain (substituted) instruction, unchanged in shape.
   if (!hasPersona && !hasCharCaveats) return charInstr;
 
+  const personaLine = hasPersona
+    ? ` You are speaking with ${user}; the USER PERSONA below describes who they are — consider ` +
+      `it and address them accordingly, but never adopt ${user}'s identity or break character.`
+    : '';
   const preamble =
     `You are ${char}. Follow your CHARACTER instruction below and always honor your CHARACTER ` +
-    `caveats.` +
-    (hasPersona
-      ? ` You are speaking with ${user}; the USER PERSONA below describes who they are — consider ` +
-        `it and address them accordingly, but never adopt ${user}'s identity or break character.`
-      : '');
+    `caveats.${personaLine}`;
 
   const parts: string[] = [preamble];
 

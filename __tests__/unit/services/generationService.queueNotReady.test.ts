@@ -26,7 +26,7 @@ jest.mock('../../../src/services/imageGenerationService', () => ({
   },
 }));
 
-function setImage(isGenerating: boolean, conversationId: string | null = null) {
+function _setImage(isGenerating: boolean, conversationId: string | null = null) {
   mockImageState.isGenerating = isGenerating;
   mockImageState.conversationId = conversationId;
   [...mockImageListeners].forEach(l => l({ ...mockImageState }));

@@ -17,6 +17,7 @@ import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import org.robolectric.shadows.ShadowBitmapFactory
 import org.robolectric.util.ReflectionHelpers
 import java.io.File
 
@@ -344,8 +345,8 @@ class LocalDreamModuleTest {
         val runtimeDir = makeRuntimeDir()
         val env = LocalDreamModule.buildEnvironment(runtimeDir)
 
-        val paths = requireNotNull(env["LD_LIBRARY_PATH"]).split(":")
-        assertEquals(runtimeDir.absolutePath, paths.first())
+        // Prefix check, not split(":"): on a Windows test host the absolute path itself holds a colon (C:\).
+        assertTrue(requireNotNull(env["LD_LIBRARY_PATH"]).startsWith(runtimeDir.absolutePath + ":"))
     }
 
     @Test
@@ -368,6 +369,8 @@ class LocalDreamModuleTest {
     @Test
     fun `raw decode throws when byte count is neither RGB nor RGBA`() {
         val base64 = Base64.encodeToString(ByteArray(6), Base64.DEFAULT) // 6 bytes; 2x2 needs 12 or 16
+        // Legacy-graphics Robolectric decodes ANY bytes to a fake bitmap; a device returns null for garbage.
+        ShadowBitmapFactory.setAllowInvalidImageData(false)
         try {
             LocalDreamModule.saveServerImageToPng(base64, 2, 2, tmp.newFile("out.png").absolutePath)
             fail("Expected IllegalArgumentException")
