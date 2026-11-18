@@ -1,0 +1,16 @@
+{
+  "name": "@offgrid/sync",
+  "version": "0.0.0-local.1",
+  "private": true,
+  "description": "LOCAL RECONSTRUCTION of the private off-grid-ai/shared package",
+  "main": "dist/index.js",
+  "react-native": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
+    "./rn": { "types": "./dist/adapters/rn-tcp.d.ts", "default": "./dist/adapters/rn-tcp.js" },
+    "./rn-discovery": { "types": "./dist/adapters/rn-discovery.d.ts", "default": "./dist/adapters/rn-discovery.js" },
+    "./portable": { "types": "./dist/portable/index.d.ts", "default": "./dist/portable/index.js" },
+    "./package.json": "./package.json"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "name": "@offgrid/speech",
+  "version": "0.0.0-local.1",
+  "private": true,
+  "description": "LOCAL RECONSTRUCTION of the private off-grid-ai/shared package",
+  "main": "dist/index.cjs",
+  "react-native": "dist/index.cjs",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.cjs" },
+    "./package.json": "./package.json"
+  }
+}

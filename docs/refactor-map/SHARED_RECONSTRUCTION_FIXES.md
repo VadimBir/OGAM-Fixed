@@ -75,3 +75,15 @@ consumer `src/services/imageParameterPolicy.ts`:
 Fixed in `../shared/packages/models/dist/index.js` (SD1.5 defaults: steps 20, cfg 7.5, size 512).
 Defense-in-depth: `LocalDreamModule.clampDimension()` snaps width/height to 64..1024 (mult of 8)
 and steps to 1..100, so no bad value can reach the server again.
+
+## Vendored copy (2026-11-18)
+
+The reconstructed `@offgrid/{models,rag,speech,sync,ui,automation}` packages are committed at
+`vendor/offgrid-shared/packages/*` (built `dist/` included). Models, rag, ui, speech logic are
+reconstructed from call sites and tests; sync mesh classes (SyncEngine, discovery, transfer) are
+no-op stubs, so device-to-device sync does not work. To build, place them where `package.json`
+and `metro.config.js` expect them:
+
+```sh
+cp -r vendor/offgrid-shared ../shared && npm ci
+```
