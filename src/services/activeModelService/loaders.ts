@@ -35,6 +35,39 @@ async function scanDirForMmProj(modelFilePath: string): Promise<RNFS.ReadDirResI
   return mmProjFiles.find(f => f.name === chosen);
 }
 
+/**
+ * Race a native model load against its timeout. A native load cannot be aborted: on timeout the
+ * caller fails and clears its ids, but the load keeps running, and when it later succeeds the model
+ * sits in RAM with no owner (not registered with residency, so the budget never counts it and no
+ * unload path sees it). On a late success `releaseOrphan` runs under the residency lock, so it is
+ * ordered against every newer load; it decides itself whether a newer load adopted the model.
+ */
+export async function raceNativeLoad<T>(
+  load: Promise<T>,
+  opts: { timeoutMs: number; message: string; label: string; releaseOrphan: () => Promise<void> },
+): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+  let timedOut = false;
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => {
+      timedOut = true;
+      reject(new Error(opts.message));
+    }, opts.timeoutMs);
+  });
+  try {
+    return await Promise.race([load, timeout]);
+  } catch (error) {
+    if (timedOut) {
+      load
+        .then(() => modelResidencyManager.runExclusive(`orphan:${opts.label}`, opts.releaseOrphan))
+        .catch(err => logger.log(`[ModelLoad] ${opts.label}: late load failed or orphan release failed:`, err));
+    }
+    throw error;
+  } finally {
+    if (timeoutId !== null) clearTimeout(timeoutId);
+  }
+}
+
 export async function resolveMmProjPath(
   model: LlamaDownloadedModel,
   modelId: string,
@@ -115,22 +148,20 @@ async function doLoadLiteRTModel(ctx: TextLoadContext): Promise<void> {
     const baseTimeoutMs = 90_000;
     const timeoutMs = Math.min(Math.ceil(baseTimeoutMs * contextScalar), 180_000);
 
-    let timeoutId: ReturnType<typeof setTimeout> | null = null;
-    const timeoutPromise = new Promise<never>((_, reject) => {
-      timeoutId = setTimeout(
-        () => reject(new Error(`LiteRT model load timed out after ${timeoutMs / 1000}s.`)),
+    await raceNativeLoad(
+      liteRTService.loadModel(ctx.model.filePath, preferredBackend, { supportsVision: liteRTModel.liteRTVision ?? false, supportsAudio: liteRTModel.liteRTAudio ?? false, maxNumTokens: maxTokens }),
+      {
         timeoutMs,
-      );
-    });
-
-    try {
-      await Promise.race([
-        liteRTService.loadModel(ctx.model.filePath, preferredBackend, { supportsVision: liteRTModel.liteRTVision ?? false, supportsAudio: liteRTModel.liteRTAudio ?? false, maxNumTokens: maxTokens }),
-        timeoutPromise,
-      ]);
-    } finally {
-      if (timeoutId !== null) clearTimeout(timeoutId);
-    }
+        message: `LiteRT model load timed out after ${timeoutMs / 1000}s.`,
+        label: `text:${ctx.modelId}`,
+        // LiteRT exposes no loaded path: a loaded engine with no registered text resident is the orphan.
+        releaseOrphan: async () => {
+          if (modelResidencyManager.isResident('text') || !liteRTService.isModelLoaded()) return;
+          logger.warn(`[ModelLoad] LiteRT ${ctx.modelId} finished loading after its timeout; releasing it`);
+          await liteRTService.unloadModel();
+        },
+      },
+    );
 
     const actualBackend = liteRTService.getActiveBackend();
     if (actualBackend !== preferredBackend) {
@@ -194,28 +225,24 @@ export async function doLoadTextModel(ctx: TextLoadContext): Promise<void> {
 
     const mmProjPath = await resolveMmProjPath(ctx.model, ctx.modelId);
 
-    let timeoutId: ReturnType<typeof setTimeout> | null = null;
-    const timeoutPromise = new Promise<never>((_, reject) => {
-      timeoutId = setTimeout(
-        () =>
-          reject(
-            new Error(
-              `Text model loading timed out after ${ctx.timeoutMs / 1000}s. ` +
-                'Try a smaller model or reduce context length in settings.',
-            ),
-          ),
-        ctx.timeoutMs,
-      );
-    });
-
-    try {
-      await Promise.race([
-        llmService.loadModel(ctx.model.filePath, mmProjPath, { override: ctx.override }),
-        timeoutPromise,
-      ]);
-    } finally {
-      if (timeoutId !== null) clearTimeout(timeoutId);
-    }
+    await raceNativeLoad(
+      llmService.loadModel(ctx.model.filePath, mmProjPath, { override: ctx.override }),
+      {
+        timeoutMs: ctx.timeoutMs,
+        message:
+          `Text model loading timed out after ${ctx.timeoutMs / 1000}s. ` +
+          'Try a smaller model or reduce context length in settings.',
+        label: `text:${ctx.modelId}`,
+        // Adopted = a newer load registered this model; a different model's load already released it
+        // (llmService.loadModel unloads a different path first), so only this path is checked.
+        releaseOrphan: async () => {
+          const adopted = modelResidencyManager.getResidents().some(r => r.key === 'text' && r.modelId === ctx.modelId);
+          if (adopted || llmService.getLoadedModelPath() !== ctx.model.filePath) return;
+          logger.warn(`[ModelLoad] ${ctx.modelId} finished loading after its timeout; releasing it`);
+          await llmService.unloadModel();
+        },
+      },
+    );
     const multimodalSupport = llmService.getMultimodalSupport();
 
     // If the model had a pre-existing stored mmproj link but the native layer rejected it
@@ -284,34 +311,32 @@ export async function doLoadImageModel(ctx: ImageLoadContext): Promise<void> {
       ctx.onError(); // resets loadedImageModelId/threads to null
     }
 
-    let imgTimeoutId: ReturnType<typeof setTimeout> | null = null;
-    const timeoutPromise = new Promise<never>((_, reject) => {
-      imgTimeoutId = setTimeout(
-        () => reject(new Error('Image model loading timed out')),
-        ctx.timeoutMs,
-      );
-    });
-
-    try {
-      await Promise.race([
-        onnxImageGeneratorService.loadModel(
-          ctx.model.modelPath,
-          ctx.imageThreads,
-          {
-            // Format-selected engine: a raw SD checkpoint runs on stable-diffusion.cpp,
-            // everything else stays on LocalDream exactly as before.
-            backend: ctx.model.backend === 'sdcpp' ? 'sdcpp' : 'auto',
-            cpuOnly: ctx.cpuOnly,
-            attentionVariant: ctx.model.attentionVariant,
-            preferGpu: ctx.preferGpu,
-            sdcpp: sdCppLoadConfigFromSettings(ctx.store.settings ?? {}),
-          },
-        ),
-        timeoutPromise,
-      ]);
-    } finally {
-      if (imgTimeoutId !== null) clearTimeout(imgTimeoutId);
-    }
+    await raceNativeLoad(
+      onnxImageGeneratorService.loadModel(
+        ctx.model.modelPath,
+        ctx.imageThreads,
+        {
+          // Format-selected engine: a raw SD checkpoint runs on stable-diffusion.cpp,
+          // everything else stays on LocalDream exactly as before.
+          backend: ctx.model.backend === 'sdcpp' ? 'sdcpp' : 'auto',
+          cpuOnly: ctx.cpuOnly,
+          attentionVariant: ctx.model.attentionVariant,
+          preferGpu: ctx.preferGpu,
+          sdcpp: sdCppLoadConfigFromSettings(ctx.store.settings ?? {}),
+        },
+      ),
+      {
+        timeoutMs: ctx.timeoutMs,
+        message: 'Image model loading timed out',
+        label: `image:${ctx.modelId}`,
+        releaseOrphan: async () => {
+          if (modelResidencyManager.isResident('image')) return;
+          if ((await onnxImageGeneratorService.getLoadedModelPath()) !== ctx.model.modelPath) return;
+          logger.warn(`[ModelLoad] image ${ctx.modelId} finished loading after its timeout; releasing it`);
+          await onnxImageGeneratorService.unloadModel();
+        },
+      },
+    );
 
     ctx.onLoaded(ctx.modelId, ctx.imageThreads);
     ctx.store.setActiveImageModelId(ctx.modelId);

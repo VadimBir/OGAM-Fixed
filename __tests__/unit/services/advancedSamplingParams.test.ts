@@ -286,6 +286,6 @@ describe('computePendingSettings: new load fields', () => {
     expect(computePendingSettings('llama', { cacheTypeV: 'f16' }, { cacheTypeV: 'same' })).toBe(true);
   });
   it('ignores a field the snapshot did not capture', () => {
-    expect(computePendingSettings('llama', { nUbatch: 128, mmapMode: 'off', cacheTypeV: 'f16' }, { nBatch: 512 })).toBe(false);
+    expect(computePendingSettings('llama', { nBatch: 512, nUbatch: 128, mmapMode: 'off', cacheTypeV: 'f16' }, { nBatch: 512 })).toBe(false);
   });
 });

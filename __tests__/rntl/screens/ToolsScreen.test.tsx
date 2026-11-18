@@ -43,6 +43,8 @@ jest.mock('../../../src/stores', () => ({
     },
     { getState: () => ({ settings: { enabledTools: mockEnabledTools }, updateSettings: mockUpdateSettings }) },
   ),
+  // ToolsScreen also reads tool overrides / custom skills from the skill store (ToolsScreen/index.tsx:47).
+  useSkillStore: jest.requireActual('../../../src/stores/skillStore').useSkillStore,
 }));
 
 jest.mock('react-native-vector-icons/Feather', () => {
@@ -83,7 +85,8 @@ describe('ToolsScreen', () => {
 
   it('renders the page header and every free tool row', () => {
     const { getByText, getByTestId } = render(<ToolsScreen />);
-    expect(getByText('Tools')).toBeTruthy();
+    // The page also edits skills (tool overrides + custom skills), hence the title.
+    expect(getByText('Tools & Skills')).toBeTruthy();
     for (const tool of AVAILABLE_TOOLS) {
       expect(getByTestId(`tool-picker-row-${tool.id}`)).toBeTruthy();
     }

@@ -3,7 +3,20 @@
 Branch `app-refactor-fixes`. Newest first. Each entry gives the commit it ships in.
 State words: DONE = finished and unit tested; WIP = an agent is still editing, so the code is not checked; UNKNOWN = not verified.
 
-## 2026-11-18: work-in-progress snapshot (all changes on disk)
+## 2026-11-18: work-in-progress snapshot 2 (13 files)
+
+All of this is WIP: the agents were still editing, and nothing was tested. Agents are matched to files by who owns each file; they have not reported these edits yet.
+- **Agent R (memory, unload the LLM during image generation):** `activeModelService/index.ts`, `activeModelService/loaders.ts`, `imageGenerationService.ts`.
+- **Agent A2 (GPU quant labels):** `ModelCardContent.tsx`, `TextModelsTab.tsx`, `useTextModels.ts`, and `acceleration.test.ts`.
+- **Agent A3 (sd.cpp Vulkan):** `scripts/build-sdcpp.sh`.
+- **Agents P and Q (tests):**
+  - `ModelSettingsScreen.test.tsx`;
+  - `ToolsScreen.test.tsx`;
+  - `ModelsScreen/utils.test.ts`;
+  - `advancedSamplingParams.test.ts`;
+  - `imageDefaults.test.ts`.
+
+## 2026-11-18: work-in-progress snapshot (250130eb, all changes on disk)
 
 This snapshot was taken while 5 agents were still running. Their edits so far are included unfinished. No full jest, tsc or gradle run has been done on the snapshot, and no APK was built from it.
 

@@ -368,7 +368,7 @@ export function useTextModels(setAlertState: (s: AlertState) => void) {
       })
       .map(m => mapCuratedModel(m, recommendedModelDetails));
     const sorted = applySort(models, filterState.sort, ramGB);
-    // Prioritize NPU/GPU-accelerable models (LiteRT or Q4_0/Q8_0) to the top of the
+    // Prioritize GPU-accelerable models (LiteRT, or a GGUF quant isAccelerableQuant accepts) to the top of the
     // recommended list, keeping the existing order stable within each group. Only for
     // the editorial 'recommended' sort — explicit sorts (size/downloads/…) are honored.
     if (filterState.sort !== 'recommended') return sorted;

@@ -988,11 +988,12 @@ describe('ModelSettingsScreen', () => {
       expect(getByText('KV Cache Type')).toBeTruthy();
     });
 
+    // By testID: the V Cache Type row (advancedLoadSections) shows the same f16 / q8_0 / q4_0 labels.
     it('renders all three cache type buttons', () => {
-      const { getByText } = renderWithSections('text');
-      expect(getByText('f16')).toBeTruthy();
-      expect(getByText('q8_0')).toBeTruthy();
-      expect(getByText('q4_0')).toBeTruthy();
+      const { getByTestId } = renderWithSections('text');
+      expect(getByTestId('cache-type-f16-button')).toBeTruthy();
+      expect(getByTestId('cache-type-q8_0-button')).toBeTruthy();
+      expect(getByTestId('cache-type-q4_0-button')).toBeTruthy();
     });
 
     it('defaults to q8_0', () => {
@@ -1001,15 +1002,31 @@ describe('ModelSettingsScreen', () => {
     });
 
     it('updates store when f16 is pressed', () => {
-      const { getByText } = renderWithSections('text');
-      fireEvent.press(getByText('f16'));
+      const { getByTestId } = renderWithSections('text');
+      fireEvent.press(getByTestId('cache-type-f16-button'));
       expect(useAppStore.getState().settings.cacheType).toBe('f16');
     });
 
     it('updates store when q4_0 is pressed', () => {
-      const { getByText } = renderWithSections('text');
-      fireEvent.press(getByText('q4_0'));
+      const { getByTestId } = renderWithSections('text');
+      fireEvent.press(getByTestId('cache-type-q4_0-button'));
       expect(useAppStore.getState().settings.cacheType).toBe('q4_0');
+    });
+
+    it('V cache: Same as K by default; f16 splits it from K', () => {
+      const { getByTestId } = renderWithSections('text');
+      // Unset (test store) reads as Same as K, like DEFAULT_SETTINGS 'same'.
+      expect(useAppStore.getState().settings.cacheTypeV ?? 'same').toBe('same');
+      fireEvent.press(getByTestId('cache-type-v-f16-button'));
+      expect(useAppStore.getState().settings.cacheTypeV).toBe('f16');
+      expect(useAppStore.getState().settings.cacheType).toBe('q8_0');
+    });
+
+    it('mmap mode and memory readout render in Advanced', () => {
+      const { getByTestId } = renderWithSections('text');
+      fireEvent.press(getByTestId('mmap-off-button'));
+      expect(useAppStore.getState().settings.mmapMode).toBe('off');
+      expect(getByTestId('memory-readout')).toBeTruthy();
     });
 
     it('shows correct description for f16', () => {

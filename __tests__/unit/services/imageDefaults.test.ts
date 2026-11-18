@@ -4,24 +4,27 @@
  */
 import { applyImageDefaults } from '../../../src/services/imageParameterPolicy';
 import { clipSkipOf, resolveEngineImageRequest } from '../../../src/services/imageEngineParams';
+import type { GenerateImageParams } from '../../../src/services/imageGenerationTypes';
+
+const req = (p: GenerateImageParams): GenerateImageParams => p;
 
 describe('applyImageDefaults', () => {
   it('fills an empty request from settings', () => {
-    expect(applyImageDefaults({ prompt: 'cat' }, { imageNegativePrompt: 'blurry', imageSeed: 42 }))
+    expect(applyImageDefaults(req({ prompt: 'cat' }), { imageNegativePrompt: 'blurry', imageSeed: 42 }))
       .toEqual({ prompt: 'cat', negativePrompt: 'blurry', seed: 42 });
   });
 
   it('a request value wins over the defaults', () => {
-    expect(applyImageDefaults({ prompt: 'cat', negativePrompt: 'dogs', seed: 7 }, { imageNegativePrompt: 'blurry', imageSeed: 42 }))
+    expect(applyImageDefaults(req({ prompt: 'cat', negativePrompt: 'dogs', seed: 7 }), { imageNegativePrompt: 'blurry', imageSeed: 42 }))
       .toEqual({ prompt: 'cat', negativePrompt: 'dogs', seed: 7 });
   });
 
   it('seed -1 leaves the seed out (each engine picks a random one)', () => {
-    expect(applyImageDefaults({ prompt: 'cat' }, { imageNegativePrompt: '', imageSeed: -1 })).toEqual({ prompt: 'cat' });
+    expect(applyImageDefaults(req({ prompt: 'cat' }), { imageNegativePrompt: '', imageSeed: -1 })).toEqual({ prompt: 'cat' });
   });
 
   it('a blank request negative prompt takes the default', () => {
-    expect(applyImageDefaults({ prompt: 'cat', negativePrompt: '  ' }, { imageNegativePrompt: 'lowres' }).negativePrompt).toBe('lowres');
+    expect(applyImageDefaults(req({ prompt: 'cat', negativePrompt: '  ' }), { imageNegativePrompt: 'lowres' }).negativePrompt).toBe('lowres');
   });
 });
 

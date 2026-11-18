@@ -17,7 +17,7 @@ import {
   selectedTextModelIdOf,
 } from './selectedTextModel';
 import { activeModelSnapshot } from './snapshot';
-import type { DownloadedModel } from '../../types';
+import type { DownloadedModel, ONNXImageModel } from '../../types';
 import type {
   ActiveModelInfo,
   ResourceUsage,
@@ -436,6 +436,65 @@ class ActiveModelService {
     }
     return results;
   }
+  /**
+   * MB the loaded image model still has to allocate when it generates. Before its first generation:
+   * its whole estimate (sd.cpp loads weights on first use). After one: for sd.cpp the estimate minus
+   * the weights (+ their load buffers) already in RAM; other backends keep the whole estimate (their
+   * weights/working-set split is not known here, so the gate errs toward freeing the text model).
+   */
+  private imageGenerationPendingMB(model: ONNXImageModel): number {
+    const fullMB = Math.round(estimateImageModelRamBytes(model) / (1024 * 1024));
+    if (!this.imageWeightsMaterialized || model.backend !== 'sdcpp') return fullMB;
+    const est = estimateSdCppModelMemory(model);
+    // totalMB = (weights + loadBuffer + max(compute) + overhead) * safety, so subtracting the
+    // resident part at the same 1.1 safety factor leaves the compute + overhead still to come.
+    return Math.max(0, Math.round(est.totalMB - (est.weightsMB + est.loadBufferMB) * 1.1));
+  }
+
+  /** A local image generation finished on the loaded model: its weights are now in RAM. */
+  noteImageGenerationCompleted(): void {
+    if (this.loadedImageModelId != null) this.imageWeightsMaterialized = true;
+  }
+
+  /**
+   * M4: a local image generation is about to run on the loaded image model. When the residency budget
+   * (fresh RAM) cannot hold the resident text model next to the image generation, unload the text
+   * model and KEEP its selection (same as eviction), so the LLM does not compete for RAM. Returns
+   * true when the text model was unloaded here.
+   */
+  async suspendTextForImageGeneration(): Promise<boolean> {
+    return modelResidencyManager.runExclusive('m4:suspend-text', async () => {
+      const imageId = this.loadedImageModelId;
+      if (!imageId || !this.loadedTextModelId) return false;
+      const model = useAppStore.getState().downloadedImageModels.find(m => m.id === imageId);
+      if (!model) return false;
+      const pendingMB = this.imageGenerationPendingMB(model);
+      if (await modelResidencyManager.canKeepOthersDuringGeneration('image', pendingMB)) return false;
+      logger.log(`[MODEL-SM] M4 → text ${this.loadedTextModelId} yields RAM to image generation (pendingMB=${pendingMB})`);
+      await this.doUnloadTextModelLocked(true);
+      return true;
+    });
+  }
+
+  /**
+   * M4: the image generation is over. Reload the text model that was loaded before it (`modelId`)
+   * when it is no longer loaded (the image load evicted it, or suspendTextForImageGeneration did).
+   * Respects the loading mode: 'conservative' is one model at a time, so the text model stays
+   * unloaded and reloads on the next message, as before. Skipped when the user changed or cleared
+   * the text selection meanwhile. A failed reload is logged, never thrown into the image result.
+   */
+  async restoreTextAfterImageGeneration(modelId: string | null): Promise<void> {
+    if (!modelId || this.loadedTextModelId != null) return;
+    if (modelResidencyManager.getLoadPolicy() === 'conservative') return;
+    if (useAppStore.getState().activeModelId !== modelId) return;
+    try {
+      logger.log(`[MODEL-SM] M4 → reloading text ${modelId} after image generation`);
+      await this.loadTextModel(modelId);
+    } catch (e) {
+      logger.warn('[MODEL-SM] M4 → text reload after image generation failed:', e);
+    }
+  }
+
   /**
    * Free ALL model memory: unload local text+image AND disconnect any remote model.
    * THE single owning side-effect for "Eject All" — every screen dispatches this

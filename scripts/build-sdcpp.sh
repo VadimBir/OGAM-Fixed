@@ -39,12 +39,13 @@ esac
 winpath() { if command -v cygpath >/dev/null; then cygpath -m "$1"; else printf '%s' "$1"; fi; }
 
 [ -f "$NDK/build/cmake/android.toolchain.cmake" ] || { echo "build-sdcpp: NDK not found at $NDK"; exit 1; }
-[ -z "${SDCPP_HOST_COMPILER_BIN:-}" ] || PATH="$SDCPP_HOST_COMPILER_BIN:$PATH"
 if ! command -v cmake >/dev/null || ! command -v ninja >/dev/null; then
   CMAKE_DIR="$(ls -d "$SDK"/cmake/3.* 2>/dev/null | sort -V | tail -1)"
   [ -n "$CMAKE_DIR" ] || { echo "build-sdcpp: cmake/ninja not on PATH and none under $SDK/cmake"; exit 1; }
   PATH="$CMAKE_DIR/bin:$PATH"
 fi
+# Appended, not prepended: host-compiler bundles (w64devkit) ship their own cmake/ninja that must not win.
+[ -z "${SDCPP_HOST_COMPILER_BIN:-}" ] || PATH="$PATH:$SDCPP_HOST_COMPILER_BIN"
 
 if [ ! -f "$SDCPP_SRC/include/stable-diffusion.h" ]; then
   echo "== clone sd.cpp @ $SDCPP_COMMIT =="

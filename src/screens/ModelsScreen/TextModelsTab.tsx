@@ -17,7 +17,7 @@ import { createStyles } from './styles';
 import { ModelsScreenViewModel } from './useModelsScreen';
 import { useDownloadStore, isActiveStatus, isQueuedStatus } from '../../stores/downloadStore';
 import { makeModelKey } from '../../utils/modelKey';
-import { modelSupportsNpuGpu, isAccelerableQuant } from '../../utils/acceleration';
+import { modelSupportsNpuGpu, isAccelerableQuant, ggufAcceleratorLabel, ggufCpuFallbackWarning } from '../../utils/acceleration';
 import { aggregateActiveDownloads } from '../../utils/downloadAggregate';
 import { TextFiltersSection } from './TextFiltersSection';
 import { FilterState, SortOption } from './types';
@@ -159,8 +159,10 @@ const ModelDetailView: React.FC<DetailProps> = ({
     const proceedDownload = () => {
       handleDownload(selectedModel, item);
     };
-    const onDownload = buildFileDownloadHandler({ s, fileName: item.name, sizeBytes: item.size, ramGB, proceedDownload, setAlertState });
+    const onDownload = buildFileDownloadHandler({ s, fileName: item.name, quantization: item.quantization, sizeBytes: item.size, ramGB, proceedDownload, setAlertState });
     const liteRTMeta = LITERT_FILE_META[item.name];
+    // 'GPU+NPU' / 'GPU' / 'CPU fallback' from the quant's weight types; nothing when the mix is unknown.
+    const accelLabel = liteRTMeta ? undefined : ggufAcceleratorLabel(item.quantization);
     const displayName = liteRTMeta?.displayName ?? item.name.replace('.gguf', '');
     const recommended = liteRTMeta ? { pillLabel: 'Recommended', highlightText: liteRTMeta.highlight } : undefined;
     const storeEntry = storeDownloads[s.downloadKey];
@@ -213,6 +215,7 @@ const ModelDetailView: React.FC<DetailProps> = ({
         compact
         recommended={recommended}
         supportsAcceleration={isAccelerableQuant(item.quantization) || !!liteRTMeta}
+        facts={accelLabel ? [accelLabel] : undefined}
         failedState={failedState}
       />;
   };
@@ -277,8 +280,9 @@ const ModelDetailView: React.FC<DetailProps> = ({
             .filter(f => f.size > 0 && !fileExceedsBudget(f.size, ramGB) && fileMatchesQuantFilter(f.name, filterState.quant))
             .sort((a, b) => {
               if (selectedModel.id === LITERT_PARENT_ID) return a.size - b.size; // curated: small-first
-              // Tier: Q4_K_M (CPU default, lowest size) → GPU/NPU Q4_0/Q8_0 → rest (CPU
-              // fallback). Accelerable tier small-first (Q4_0 before Q8_0); others size desc.
+              // Tier: Q4_K_M (the recommended default; runs fully on GPU and NPU) → other quants
+              // that run fully on the GPU (isAccelerableQuant), small-first → rest (CPU fallback or
+              // unknown mix), size desc.
               const tier = (f: ModelFile) => fileQuantLabel(f.name) === 'Q4_K_M' ? 0 : isAccelerableQuant(f.quantization) ? 1 : 2;
               if (tier(a) !== tier(b)) return tier(a) - tier(b);
               return tier(a) === 1 ? a.size - b.size : b.size - a.size;

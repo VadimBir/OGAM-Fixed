@@ -216,7 +216,7 @@ export const StandardModelCardContent: React.FC<StandardModelCardContentProps> =
           </View>
         )}
         {recommended && <MaterialIcon name="whatshot" size={14} color={colors.trending} accessibilityLabel="Recommended" />}
-        {/* GPU/NPU capability badge — a LiteRT or Q4_0/Q8_0 quant this device can accelerate. */}
+        {/* GPU/NPU capability badge — a LiteRT file or a GGUF quant that runs fully on the GPU (utils/acceleration isAccelerableQuant). */}
         {supportsAcceleration && (
           <View style={styles.accelBadge} testID="npu-gpu-badge">
             <Text style={styles.accelBadgeText}>NPU/GPU</Text>

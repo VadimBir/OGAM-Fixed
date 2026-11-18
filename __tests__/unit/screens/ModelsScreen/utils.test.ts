@@ -1,4 +1,4 @@
-import { formatNumber, formatBytes, getDirectorySize, getModelType, matchesSdVersionFilter, getImageModelCompatibility, hfModelToDescriptor, fileMatchesQuantFilter, fileQuantLabel } from '../../../../src/screens/ModelsScreen/utils';
+import { formatNumber, formatBytes, getDirectorySize, getModelType, matchesSdVersionFilter, getImageModelCompatibility, hfModelToDescriptor, fileMatchesQuantFilter, fileQuantLabel, GPU_QUANT_FILTER } from '../../../../src/screens/ModelsScreen/utils';
 import RNFS from 'react-native-fs';
 
 jest.mock('react-native-fs', () => ({
@@ -478,6 +478,19 @@ describe('ModelsScreen/utils', () => {
     it("passes everything for 'all' and nothing for an unparseable name", () => {
       expect(fileMatchesQuantFilter('anything.gguf', 'all')).toBe(true);
       expect(fileMatchesQuantFilter('anything.gguf', 'Q4_K_M')).toBe(false);
+    });
+
+    it("'gpu' keeps only quants whose weight types all run on the OpenCL GPU", () => {
+      expect(GPU_QUANT_FILTER).toBe('gpu');
+      expect(fileMatchesQuantFilter('m-Q4_K_M.gguf', GPU_QUANT_FILTER)).toBe(true);
+      expect(fileMatchesQuantFilter('m-q4_0.gguf', GPU_QUANT_FILTER)).toBe(true);
+      expect(fileMatchesQuantFilter('m-Q8_0.gguf', GPU_QUANT_FILTER)).toBe(true);
+      // Q4 is not Q4: IQ4_XS / Q3_K_M hold CPU-only weight types.
+      expect(fileMatchesQuantFilter('m-IQ4_XS.gguf', GPU_QUANT_FILTER)).toBe(false);
+      expect(fileMatchesQuantFilter('m-Q3_K_M.gguf', GPU_QUANT_FILTER)).toBe(false);
+      // An unsloth dynamic mix has no fixed tensor types: not GPU-proven, so excluded.
+      expect(fileMatchesQuantFilter('m-UD-Q4_K_XL.gguf', GPU_QUANT_FILTER)).toBe(false);
+      expect(fileMatchesQuantFilter('anything.gguf', GPU_QUANT_FILTER)).toBe(false);
     });
   });
 });

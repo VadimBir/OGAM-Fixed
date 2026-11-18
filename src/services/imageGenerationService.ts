@@ -447,6 +447,7 @@ class ImageGenerationService {
         return null;
       }
       this.updateState(completedImageGenerationState(result));
+      activeModelService.noteImageGenerationCompleted(); // weights now resident (M4 gate sizing)
       // Android: hand the multi-GB idle image working set back when live free RAM is low.
       modelResidencyManager.releaseIdleImageIfMemoryLow().catch(err => {
         logger.warn('[ImageGenerationService] Post-generation image release failed:', err);
@@ -676,31 +677,44 @@ class ImageGenerationService {
     });
 
     this._ensureEngineStatusSubscription();
-    const loaded = await this._ensureImageModelLoaded(
-      activeImageModelId,
-      activeImageModel,
-      { desiredThreads: settings.imageThreads ?? 4, override: opts?.override },
-      request,
-    );
-    if (request.cancelled) return this._endCancelled(request);
-    if (!loaded) return null;
+    // M4: the text model loaded BEFORE the image work (prompt enhancement above still used it). The
+    // image load may evict it and suspendTextForImageGeneration may unload it; either way it is
+    // reloaded once this request ends (restoreTextAfterImageGeneration honours the loading mode).
+    const textBefore = activeModelService.getLoadedModelIds().textModelId;
+    try {
+      const loaded = await this._ensureImageModelLoaded(
+        activeImageModelId,
+        activeImageModel,
+        { desiredThreads: settings.imageThreads ?? 4, override: opts?.override },
+        request,
+      );
+      if (request.cancelled) return this._endCancelled(request);
+      if (!loaded) return null;
+      // M4: the LLM must not compete for RAM with the generation working set.
+      await activeModelService.suspendTextForImageGeneration().catch(err => {
+        logger.warn('[ImageGenerationService] M4 text suspend failed:', err);
+      });
+      if (request.cancelled) return this._endCancelled(request);
 
-    const useOpenCL = settings.imageUseOpenCL ?? false;
-    // The loaded backend decides what it can render (NPU patch sizes, MNN square): plan after load.
-    const planned = await this._planEngineSize(imageWidth, imageHeight, useOpenCL);
-    if (request.cancelled) return this._endCancelled(request);
+      const useOpenCL = settings.imageUseOpenCL ?? false;
+      // The loaded backend decides what it can render (NPU patch sizes, MNN square): plan after load.
+      const planned = await this._planEngineSize(imageWidth, imageHeight, useOpenCL);
+      if (request.cancelled) return this._endCancelled(request);
 
-    return this._runGenerationAndSave({
-      params,
-      enhancedPrompt,
-      activeImageModel,
-      steps,
-      guidanceScale,
-      imageWidth: planned.width,
-      imageHeight: planned.height,
-      useOpenCL,
-      engineOptions,
-    }, request);
+      return await this._runGenerationAndSave({
+        params,
+        enhancedPrompt,
+        activeImageModel,
+        steps,
+        guidanceScale,
+        imageWidth: planned.width,
+        imageHeight: planned.height,
+        useOpenCL,
+        engineOptions,
+      }, request);
+    } finally {
+      await activeModelService.restoreTextAfterImageGeneration(textBefore);
+    }
   }
 
   async cancelGeneration(): Promise<void> {
