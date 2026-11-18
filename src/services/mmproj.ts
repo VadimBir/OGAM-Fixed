@@ -31,7 +31,10 @@ export function isMMProjFile(fileName: string): boolean {
  * only quant packaging (the `UD-` dynamic-quant prefix) and the `-text-model` role marker are normalized out.
  */
 function modelIdentityStem(fileName: string): string {
+  // Base name only: a repo file inside a folder (`MTP/mtp-gemma-4-E2B-it-F16.gguf`) lands flat on disk
+  // (mmProjLocalName drops the folder), so the folder must not count toward the identity either.
   return fileName
+    .substring(fileName.lastIndexOf('/') + 1)
     .toLowerCase()
     .replace(/\.gguf$/, '')
     .replace(/[-_.]?mmproj/g, '')

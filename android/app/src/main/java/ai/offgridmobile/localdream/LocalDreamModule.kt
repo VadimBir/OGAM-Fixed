@@ -20,7 +20,6 @@ import java.net.URL
 import java.time.Instant
 import java.util.UUID
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicBoolean
 import ai.offgridmobile.SafePromise
 import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Mutex
@@ -28,12 +27,30 @@ import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
 
 /**
+ * Generation cancel state by run id. Each generateImage call gets the next id; a cancel (or unload)
+ * cancels every id issued so far. A queued generation therefore stays cancelled when a newer
+ * generateImage arrives, and an idle cancel cannot poison a later run. Pure JVM.
+ */
+internal class GenerationCancelGate {
+    private var issued = 0L
+    private var cancelledThrough = 0L
+
+    @Synchronized fun issue(): Long = ++issued
+
+    @Synchronized fun cancelAll() {
+        cancelledThrough = issued
+    }
+
+    @Synchronized fun isCancelled(runId: Long): Boolean = runId <= cancelledThrough
+}
+
+/**
  * React Native native module that manages local-dream's inference server process.
  *
  * Architecture:
  * - Spawns libstable_diffusion_core.so as a subprocess
  * - The subprocess runs an HTTP server on 127.0.0.1:18081, or a free port when 18081 is taken
- * - TypeScript layer talks to the HTTP server directly for generation
+ * - This module POSTs /generate to that server and parses its SSE stream (TypeScript never talks HTTP)
  * - This module handles: process lifecycle, QNN lib extraction, image file management
  */
 class LocalDreamModule(reactContext: ReactApplicationContext) :
@@ -400,7 +417,10 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
     @Volatile private var monitorJob: Job? = null
     /** Server restart after a cancelled generation (see cancelGeneration). */
     @Volatile private var restartJob: Job? = null
-    private val generationCancelled = AtomicBoolean(false)
+    /** Which generations are cancelled, by run id (see GenerationCancelGate). */
+    private val cancelGate = GenerationCancelGate()
+    /** Run id of the generation holding serverMutex (set in generateImageLocked). */
+    @Volatile private var currentRunId = 0L
     /** Unique per generation: preview file names embed it so a cached Image never shows a prior run. */
     @Volatile private var generationId: String = ""
     @Volatile private var activeGenerationConnection: HttpURLConnection? = null
@@ -554,9 +574,6 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
     }
 
     private suspend fun loadModelLocked(params: ReadableMap, promise: Promise) {
-        // unloadModel leaves generationCancelled true (it aborts a running generation); a fresh load
-        // starts clean. Under serverMutex, so no generation is running here.
-        generationCancelled.set(false)
         try {
             val modelPath = params.getString("modelPath")
             if (modelPath.isNullOrBlank()) {
@@ -820,7 +837,8 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
     fun unloadModel(promise: Promise) {
         // Abort a running generation first, so it releases serverMutex instead of making unload wait
         // for the whole generation; a pending cancel-restart is cancelled (it stops its own process).
-        generationCancelled.set(true)
+        // Run ids: only generations issued so far are cancelled, so a later load + generate is clean.
+        cancelGate.cancelAll()
         restartJob?.cancel()
         activeGenerationConnection?.let { conn ->
             try { conn.disconnect() } catch (e: Exception) { Log.w(TAG, "disconnect on unload: ${e.message}") }
@@ -853,7 +871,7 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
 
     @ReactMethod
     fun cancelGeneration(promise: Promise) {
-        generationCancelled.set(true)
+        cancelGate.cancelAll()
         val conn = activeGenerationConnection
         activeGenerationConnection = null
         if (conn != null) {
@@ -1161,7 +1179,7 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
         BufferedReader(InputStreamReader(connection.inputStream)).use { reader ->
             var line: String?
             while (reader.readLine().also { line = it } != null) {
-                if (generationCancelled.get()) return SseParseResult.Cancelled
+                if (isRunCancelled()) return SseParseResult.Cancelled
 
                 val trimmed = line!!.trim()
                 if (trimmed.startsWith("event: ")) {
@@ -1183,7 +1201,7 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
             }
         }
 
-        if (generationCancelled.get()) return SseParseResult.Cancelled
+        if (isRunCancelled()) return SseParseResult.Cancelled
         return if (completeData != null) SseParseResult.Complete(completeData!!, body) else SseParseResult.NoResult
     }
 
@@ -1218,7 +1236,7 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
     }
 
     private fun handleGeneralException(e: Exception, promise: Promise) {
-        if (generationCancelled.get()) {
+        if (isRunCancelled()) {
             safeReject(promise, "CANCELLED", "Generation cancelled")
         } else {
             Log.e(TAG, "Generation error: ${e.javaClass.simpleName}", e)
@@ -1230,17 +1248,23 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
 
     @ReactMethod
     fun generateImage(params: ReadableMap, promise: Promise) {
-        // Reset on the bridge thread, in call order: a cancel issued after this call but before the
-        // generation gets serverMutex (e.g. behind a cancel-restart) is still honoured.
-        generationCancelled.set(false)
+        // Run id issued on the bridge thread, in call order: a cancel issued after this call but
+        // before the generation gets serverMutex (e.g. behind a cancel-restart) is still honoured,
+        // and this call can no longer clear a cancel aimed at an earlier, still-queued generation
+        // (the old shared flag was reset here, so that generation ran despite the cancel).
+        val runId = cancelGate.issue()
         coroutineScope.launch(Dispatchers.IO) {
-            serverMutex.withLock { generateImageLocked(params, promise) }
+            serverMutex.withLock { generateImageLocked(runId, params, promise) }
         }
     }
 
+    /** The generation holding serverMutex was cancelled (user cancel or unload). */
+    private fun isRunCancelled(): Boolean = cancelGate.isCancelled(currentRunId)
+
     /** Caller holds serverMutex, so load / unload / restart cannot swap the server mid-generation. */
-    private suspend fun generateImageLocked(params: ReadableMap, promise: Promise) {
-        if (generationCancelled.get()) {
+    private suspend fun generateImageLocked(runId: Long, params: ReadableMap, promise: Promise) {
+        currentRunId = runId
+        if (isRunCancelled()) {
             safeReject(promise, "CANCELLED", "Generation cancelled")
             return
         }
@@ -1264,7 +1288,7 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
             // (dimensions clamped, steps bounded) a genuine EOF is a real server fault, not a
             // bad-parameter crash we can paper over. Surface it with diagnostics and let the
             // JS popup show the server's own output - no silent restart/CPU-fallback juggling.
-            if (generationCancelled.get()) {
+            if (isRunCancelled()) {
                 safeReject(promise, "CANCELLED", "Generation cancelled")
                 return
             }
@@ -1296,7 +1320,7 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
             activeGenerationConnection = connection
             // Checked AFTER publishing the connection: a cancel either sees it (and disconnects) or
             // set the flag before this read, so the request is never sent after a cancel.
-            if (generationCancelled.get()) return SseParseResult.Cancelled
+            if (isRunCancelled()) return SseParseResult.Cancelled
             OutputStreamWriter(connection.outputStream).use { it.write(body.toString()); it.flush() }
 
             val responseCode = connection.responseCode

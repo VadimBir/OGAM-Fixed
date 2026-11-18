@@ -7,6 +7,7 @@ import { DownloadedModel, ModelFile, PersistedDownloadInfo } from '../../types';
 import { backgroundDownloadService } from '../backgroundDownloadService';
 import { buildDownloadedModel, persistDownloadedModel } from './storage';
 import { sizeToBytes } from '../../utils/fileSize';
+import { basenameOf } from './reconcileStoredPaths';
 
 export async function getOrphanedTextFiles(
   modelsDir: string,
@@ -118,7 +119,8 @@ function isMmProjStillRunning(
 async function processCompletedDownload(
   downloadId: string, metadata: PersistedDownloadInfo, modelsDir: string,
 ): Promise<DownloadedModel> {
-  const localPath = `${modelsDir}/${metadata.localFileName ?? metadata.fileName}`;
+  // Flat models dir: a catalog name inside a repo folder lands under its base name.
+  const localPath = `${modelsDir}/${metadata.localFileName ?? basenameOf(metadata.fileName)}`;
   await backgroundDownloadService.moveCompletedDownload(downloadId, localPath);
   const finalMmProjPath = await resolveMmProjPath(metadata);
 

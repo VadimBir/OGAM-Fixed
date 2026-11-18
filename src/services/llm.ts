@@ -69,7 +69,7 @@ class LLMService {
     const validation = await validateModelFile(modelPath);
     if (!validation.valid) throw new Error(`Cannot load model: ${validation.reason}`);
     const settings = useAppStore.getState().settings;
-    logger.log(`[LLM] User settings: threads=${settings.nThreads}, batch=${settings.nBatch}, ctx=${settings.contextLength}, gpu=${settings.enableGpu}, flashAttn=${settings.flashAttn}, cache=${settings.cacheType}`);
+    logger.log(`[LLM] User settings: threads=${settings.nThreads}, batch=${settings.nBatch}, ctx=${settings.contextLength}, gpu=${settings.enableGpu}, flashAttn=${settings.flashAttn}, cache=${settings.cacheType}, cacheV=${settings.cacheTypeV}, ubatch=${settings.nUbatch}, mmap=${settings.mmapMode}`);
     const recommendedThreads = await hardwareService.getRecommendedThreadCount();
     // nThreads === 0 is the "auto" sentinel — substitute the hardware-recommended count.
     // Any explicit user choice (1–12) is respected as-is.
@@ -96,10 +96,10 @@ class LLMService {
     if (modelMaxContext && (settings.contextLength || 0) > modelMaxContext) {
       logger.log(`[LLM] Context clamped ${settings.contextLength} -> ${modelMaxContext} (model trained context)`);
     }
-    logger.log(`[LLM] Resolved params: threads=${params.nThreads}, batch=${params.nBatch}, ctx=${params.ctxLen}, gpuLayers=${params.nGpuLayers}, mmap=${(params.baseParams as { use_mmap?: boolean }).use_mmap}`);
-    // Use the EFFECTIVE cache type, not the raw setting: OpenCL/HTP coerce the KV cache
-    // to f16 (see buildModelParams), so keying off settings.cacheType alone would let the
-    // guard use the cheaper quantized estimate and approve a context that then OOMs.
+    logger.log(`[LLM] Resolved params: threads=${params.nThreads}, batch=${params.nBatch}, ctx=${params.ctxLen}, gpuLayers=${params.nGpuLayers}, ubatch=${params.nUbatch}, mmap=${(params.baseParams as { use_mmap?: boolean }).use_mmap}`);
+    // Use the EFFECTIVE cache type, not the raw setting: an unset setting resolves in
+    // buildModelParams (q8_0, or f16 with flash attention off off-Android), so keying off
+    // settings.cacheType alone could pick the wrong KV estimate.
     const quantizedCache = !params.usesF16Cache;
     // Android: the gate reads LIVE available RAM (no reclaim credit) and keeps the live safety
     // margin free (memoryBudget owns both numbers). iOS: raw reading, no extra margin (unchanged).
@@ -130,9 +130,9 @@ class LLMService {
   private async readArchBytes(modelPath: string, params: ReturnType<typeof buildModelParams>, fileSize: number): Promise<{ kvBytes: number; computeBytes: number } | undefined> {
     try {
       const metadata = await loadLlamaModelInfo(modelPath) as Record<string, unknown>;
-      const est = estimateLlamaMemory(metadata, { ctxLen: params.ctxLen, cacheType: params.cacheType, nBatch: params.nBatch, weightsBytes: fileSize });
+      const est = estimateLlamaMemory(metadata, { ctxLen: params.ctxLen, cacheType: params.cacheType, cacheTypeV: params.cacheTypeV, nBatch: params.nBatch, weightsBytes: fileSize });
       if (!est) return undefined;
-      logger.log(`[LLM] KV estimate: ctx=${est.context} cache=${params.cacheType} kvMB=${Math.round(est.kvBytes / 1048576)} computeMB=${Math.round(est.computeBytes / 1048576)}`);
+      logger.log(`[LLM] KV estimate: ctx=${est.context} cacheK=${params.cacheType} cacheV=${params.cacheTypeV} kvMB=${Math.round(est.kvBytes / 1048576)} computeMB=${Math.round(est.computeBytes / 1048576)}`);
       return { kvBytes: est.kvBytes, computeBytes: est.computeBytes };
     } catch {
       return undefined;

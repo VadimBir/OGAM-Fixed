@@ -408,7 +408,11 @@ export function useChatModelStateSync(deps: ModelStateSyncDeps): void {
       remoteCaps: activeRemoteModel?.capabilities,
       model: activeModel,
     });
-    setSupportsToolCalling(caps.tools);
+    // A local llama model can always use tools: natively when its template has them, else via the
+    // text-hint path (resolveToolsAndPrompt in useChatGenerationActions mirrors this). Gating the
+    // picker on native support alone hid tools (generate_image) from template-less GGUFs.
+    const localLlama = !activeRemoteTextModelId && activeModel?.engine === 'llama';
+    setSupportsToolCalling(caps.tools || localLlama);
     setSupportsThinking(caps.thinking);
   }, [activeModelId, activeModel?.engine, isModelLoading, activeRemoteTextModelId, activeRemoteModel?.capabilities?.supportsToolCalling, activeRemoteModel?.capabilities?.supportsThinking, activeRemoteModel?.capabilities?.thinkingLevelsOnly]);
 }

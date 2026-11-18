@@ -142,7 +142,7 @@ describe('GenerationSettingsModal', () => {
       />,
     );
 
-    expect(getByText(/Project:/)).toBeTruthy();
+    expect(getByText(/Character:/)).toBeTruthy();
     expect(getByText('Gallery (3)')).toBeTruthy();
     expect(getByText('Delete Conversation')).toBeTruthy();
   });
@@ -323,7 +323,7 @@ describe('GenerationSettingsModal', () => {
       />,
     );
 
-    expect(getByText('Project: My Project')).toBeTruthy();
+    expect(getByText('Character: My Project')).toBeTruthy();
   });
 
   // ============================================================================
@@ -646,7 +646,7 @@ describe('GenerationSettingsModal', () => {
       />,
     );
 
-    fireEvent.press(getByText(/Project:/));
+    fireEvent.press(getByText(/Character:/));
 
     expect(onClose).toHaveBeenCalled();
     jest.advanceTimersByTime(350);
@@ -689,7 +689,7 @@ describe('GenerationSettingsModal', () => {
       />,
     );
 
-    expect(getByText('Project: Default')).toBeTruthy();
+    expect(getByText('Character: Default')).toBeTruthy();
   });
 
   // ============================================================================
@@ -742,7 +742,7 @@ describe('GenerationSettingsModal', () => {
       <GenerationSettingsModal {...defaultProps} />,
     );
 
-    expect(queryByText(/Project:/)).toBeNull();
+    expect(queryByText(/Character:/)).toBeNull();
     expect(queryByText(/Gallery/)).toBeNull();
     expect(queryByText('Delete Conversation')).toBeNull();
   });
@@ -816,7 +816,8 @@ describe('GenerationSettingsModal', () => {
     });
 
     it('calls updateSettings with flashAttn: false when Off is pressed', () => {
-      mockStoreValues.settings = { ...defaultSettings, flashAttn: true };
+      // cacheType f16: a quantized KV cache (store default q8_0) locks Flash Attention on.
+      mockStoreValues.settings = { ...defaultSettings, flashAttn: true, cacheType: 'f16' as const };
 
       const { getByText, getByTestId } = render(
         <GenerationSettingsModal {...defaultProps} />,
@@ -852,8 +853,9 @@ describe('GenerationSettingsModal', () => {
     });
 
     it('defaults flash attention On when flashAttn setting is undefined (iOS → platform default true)', () => {
+      // cacheType f16: a quantized KV cache (store default q8_0) locks Flash Attention on.
       // flashAttn: undefined → falls back to Platform.OS !== 'android' = true on iOS
-      mockStoreValues.settings = { ...defaultSettings, flashAttn: undefined as any };
+      mockStoreValues.settings = { ...defaultSettings, flashAttn: undefined as any, cacheType: 'f16' as const };
 
       const { getByText, getByTestId } = render(<GenerationSettingsModal {...defaultProps} />);
       fireEvent.press(getByText('TEXT GENERATION'));

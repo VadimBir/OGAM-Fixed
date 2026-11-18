@@ -5,17 +5,15 @@
  */
 const mockLoadModel = jest.fn(async (_params: Record<string, unknown>) => true);
 
-jest.mock('react-native', () => {
-  const actual = jest.requireActual('react-native');
-  return {
-    ...actual,
-    Platform: { ...actual.Platform, OS: 'android' },
-    NativeModules: {
-      ...actual.NativeModules,
-      SdCppImageModule: { loadModel: (p: Record<string, unknown>) => mockLoadModel(p), addListener: jest.fn(), removeListeners: jest.fn() },
-    },
-  };
-});
+// Minimal react-native: spreading requireActual('react-native') evaluates every lazy export and
+// throws on the DevMenu TurboModule under jest (same pattern as sdCppGenerator.cancel.test.ts).
+jest.mock('react-native', () => ({
+  Platform: { OS: 'android', select: (o: any) => o.android ?? o.default },
+  NativeEventEmitter: jest.fn().mockImplementation(() => ({ addListener: () => ({ remove: jest.fn() }) })),
+  NativeModules: {
+    SdCppImageModule: { loadModel: (p: Record<string, unknown>) => mockLoadModel(p), addListener: jest.fn(), removeListeners: jest.fn() },
+  },
+}));
 
 import { sdCppGeneratorService } from '../../../src/services/sdCppGenerator';
 

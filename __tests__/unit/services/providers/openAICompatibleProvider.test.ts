@@ -6,6 +6,7 @@
  */
 
 import { OpenAICompatibleProvider, createOpenAIProvider } from '../../../../src/services/providers/openAICompatibleProvider';
+import { ollamaSamplingOptions } from '../../../../src/services/providers/openAICompatibleStream';
 import * as httpClient from '../../../../src/services/httpClient';
 
 // Mock httpClient
@@ -428,6 +429,100 @@ describe('OpenAICompatibleProvider', () => {
         { onToken: jest.fn(), onComplete: jest.fn(), onError: jest.fn() },
       );
       expect(mock).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('generate — non-OpenAI fields by server kind, no output cap', () => {
+    const sampling = {
+      temperature: 0.7, topP: 0.9, topK: 40, repeatPenalty: 1.1, seed: 5, maxTokens: 1024,
+      stopSequences: ['</s>'],
+    };
+    const bodyFor = async (endpoint: string) => {
+      const p = new OpenAICompatibleProvider('s', { endpoint, modelId: 'qwen3' });
+      await p.loadModel('qwen3');
+      const mock = httpClient.createStreamingRequest as jest.Mock;
+      mock.mockClear();
+      mock.mockImplementation((_url, _req, onEvent) => {
+        onEvent({ data: '{"choices":[{"finish_reason":"stop"}]}' });
+        return Promise.resolve();
+      });
+      await p.generate(
+        [{ id: '1', role: 'user', content: 'Hi', timestamp: 0 }],
+        sampling,
+        { onToken: jest.fn(), onComplete: jest.fn(), onError: jest.fn() },
+      );
+      return mock.mock.calls[0][1].body as Record<string, unknown>;
+    };
+
+    it.each([
+      'http://192.168.1.50:8080',
+      'http://localhost:8080',
+      'http://100.101.102.103:8080',
+      'https://studio.tail1234.ts.net',
+    ])('sends llama.cpp fields to the user server %s', async endpoint => {
+      const body = await bodyFor(endpoint);
+      expect(body).toMatchObject({
+        temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1, seed: 5,
+        stop: ['</s>'], cache_prompt: true,
+      });
+    });
+
+    it('sends only standard OpenAI fields to a public server', async () => {
+      const body = await bodyFor('https://api.openai.com');
+      expect(body).toMatchObject({ temperature: 0.7, top_p: 0.9, seed: 5, stop: ['</s>'] });
+      expect(body).not.toHaveProperty('top_k');
+      expect(body).not.toHaveProperty('repeat_penalty');
+      expect(body).not.toHaveProperty('cache_prompt');
+    });
+
+    it('keeps top_k / repeat_penalty for OpenRouter without cache_prompt', async () => {
+      const body = await bodyFor('https://openrouter.ai/api');
+      expect(body).toMatchObject({ top_k: 40, repeat_penalty: 1.1 });
+      expect(body).not.toHaveProperty('cache_prompt');
+    });
+
+    it.each(['http://192.168.1.50:8080', 'https://api.openai.com', 'https://openrouter.ai/api'])(
+      'never sends max_tokens (settings.maxTokens) to %s', async endpoint => {
+        expect(await bodyFor(endpoint)).not.toHaveProperty('max_tokens');
+      },
+    );
+
+    it('never sends num_predict to Ollama', () => {
+      expect(ollamaSamplingOptions(sampling)).toEqual({
+        temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1, seed: 5, stop: ['</s>'],
+      });
+    });
+  });
+
+  describe('stopGeneration — Ollama native stream', () => {
+    it('aborts the in-flight Ollama request and completes empty', async () => {
+      const p = new OpenAICompatibleProvider('ollama', { endpoint: 'http://192.168.1.10:11434', modelId: 'qwen3' });
+      await p.loadModel('qwen3');
+      let requestSignal: AbortSignal | undefined;
+      (httpClient.createNDJSONStreamingRequest as jest.Mock).mockImplementation(
+        (_url: string, req: { signal: AbortSignal }) => {
+          requestSignal = req.signal;
+          return new Promise((_resolve, reject) => {
+            req.signal.addEventListener('abort', () => reject(new Error('aborted')));
+          });
+        },
+      );
+      const onComplete = jest.fn();
+      const onError = jest.fn();
+      const running = p.generate(
+        [{ id: '1', role: 'user', content: 'Hi', timestamp: 0 }],
+        {},
+        { onToken: jest.fn(), onComplete, onError },
+      );
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(requestSignal?.aborted).toBe(false);
+
+      await p.stopGeneration();
+      await running;
+
+      expect(requestSignal?.aborted).toBe(true);
+      expect(onComplete).toHaveBeenCalledWith({ content: '', meta: { gpu: false } });
+      expect(onError).not.toHaveBeenCalled();
     });
   });
 

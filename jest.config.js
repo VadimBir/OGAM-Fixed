@@ -9,6 +9,7 @@ const fs = require('node:fs');
 // genuinely absent (open-core CI without the PAT) do we ignore those suites and map
 // @offgrid/pro to the null stub, so the open-core suite still runs and stays green.
 const proExists = fs.existsSync(path.resolve(__dirname, 'pro/package.json'));
+const syncSrc = fs.existsSync(path.resolve(__dirname, '../shared/packages/sync/src/index.ts'));
 
 // Suites under THIS repo's __tests__ that import @offgrid/pro. Ignored ONLY when pro is
 // absent. (pro/'s OWN suite is always ignored here — it runs in the pro repo's CI.)
@@ -29,6 +30,80 @@ const proDependentTestPaths = [
   '__tests__/rntl/components/McpAddServerSheet.test.tsx',
   '__tests__/rntl/components/McpServersScreen.test.tsx',
   '__tests__/unit/tools/mcpPresets.test.ts',
+  // Each imports/requires ../../../pro/** (or @offgrid/pro/** without the stub fallback) at load
+  // or in a beforeEach, so it cannot run without the submodule.
+  '__tests__/unit/sync/ambientSharePersistence.test.ts',
+  '__tests__/unit/sync/ambientShareService.test.ts',
+  '__tests__/unit/sync/availableSyncIds.test.ts',
+  '__tests__/unit/sync/capacityReplacementState.test.ts',
+  '__tests__/unit/sync/entitlementHostBootstrap.test.ts',
+  '__tests__/unit/sync/explicitSharedFileSource.test.ts',
+  '__tests__/unit/sync/fileCompletionNotificationService.test.ts',
+  '__tests__/unit/sync/forgetDeviceRules.test.ts',
+  '__tests__/unit/sync/forgetUnregisteredDevice.test.ts',
+  '__tests__/unit/sync/keygenPersonalMeshRegistry.test.ts',
+  '__tests__/unit/sync/licenceRevalidationBudget.test.ts',
+  '__tests__/unit/sync/localSharedFileScan.test.ts',
+  '__tests__/unit/sync/meshResidencyPolicy.test.ts',
+  '__tests__/unit/sync/mobileSharedFileForwarding.test.ts',
+  '__tests__/unit/sync/modelPackageSink.test.ts',
+  '__tests__/unit/sync/opLogIdentityMigration.test.ts',
+  '__tests__/unit/sync/openSharedFile.test.ts',
+  '__tests__/unit/sync/pairingEntitlementCredentialAdapter.test.ts',
+  '__tests__/unit/sync/pairingEntitlementReplacementAdapter.test.ts',
+  '__tests__/unit/sync/pairingSecretStore.test.ts',
+  '__tests__/unit/sync/pairingTrustDocument.parser.test.ts',
+  '__tests__/unit/sync/pairingTrustDocument.test.ts',
+  '__tests__/unit/sync/personalMeshRegistryCache.test.ts',
+  '__tests__/unit/sync/receivePreferences.test.ts',
+  '__tests__/unit/sync/repairDevice.test.ts',
+  '__tests__/unit/sync/sharedFileMaterializer.test.ts',
+  '__tests__/unit/sync/sharedFileStore.test.ts',
+  '__tests__/unit/sync/sharedFileSyncService.test.ts',
+  '__tests__/unit/sync/sharedFileTransfer.test.ts',
+  '__tests__/unit/sync/transferHistoryStore.test.ts',
+  '__tests__/unit/licensing/proLicenseProvider.test.ts',
+  '__tests__/unit/services/deviceFingerprint.test.ts',
+  '__tests__/unit/services/keygenClient.test.ts',
+  '__tests__/integration/pro/companionTaskRouting.integration.test.ts',
+  '__tests__/integration/pro/pairedMacTools.rendered.test.tsx',
+  '__tests__/integration/pro/release107TaskControlAcknowledgement.rendered.redflow.test.tsx',
+  '__tests__/integration/pro/release107TaskSessionPlayback.rendered.test.tsx',
+  '__tests__/integration/pro/release107TaskStateIntegrity.test.ts',
+  '__tests__/integration/pro/taskCardStopEndsGeneration.rendered.test.tsx',
+  '__tests__/integration/licensing/keygenAutomaticReplacement.test.ts',
+  '__tests__/integration/licensing/proRuntimeExpiry.test.ts',
+  '__tests__/integration/onboarding/proBootFlow.test.ts',
+  '__tests__/integration/models/cachedVoiceModelAvailability.rendered.test.tsx',
+  '__tests__/integration/models/voiceModelChoice.rendered.test.tsx',
+  '__tests__/integration/sync/receivingRules.rendered.test.tsx',
+  '__tests__/integration/chat/greetingSkipsRemoteTools.rendered.test.tsx',
+  '__tests__/integration/chat/savedVoiceRetranscribe.rendered.test.tsx',
+  '__tests__/integration/chat/syncedToolTimeline.rendered.test.tsx',
+  '__tests__/integration/voiceDownloadManagerRouting.test.tsx',
+  '__tests__/hardening/batch5-kokoroDownloadError.test.ts',
+  '__tests__/hardening/batch5-playbackPausePreparing.test.ts',
+  '__tests__/hardening/batch5-speakMessageStateMachine.test.ts',
+  '__tests__/rntl/components/companionToolsSection.test.tsx',
+  // Voice mode: chatHarness.enterVoiceMode() requires '@offgrid/pro/audio/ttsStore' (chatHarness.ts:657).
+  '__tests__/integration/memory/ttsCoresidentInVoiceTurn.rendered.happy.test.tsx',
+  '__tests__/integration/memory/voiceNoteReclaimsStt.rendered.happy.test.tsx',
+  '__tests__/integration/memory/whisperBlockedFreeRetry.rendered.happy.test.tsx',
+  // Presses the "TEXT TO SPEECH" accordion, which renders only when pro registered the
+  // generationSettings.tts slot (GenerationSettingsModal/index.tsx:50,167).
+  '__tests__/integration/settings/chatSettingsModelChoices.rendered.test.tsx',
+];
+
+// Suites that drive the REAL @offgrid/sync mesh engine / discovery / transport / checksum. The
+// reconstructed shared tree (vendor/offgrid-shared, dist only) ships those as no-op stubs
+// (sync/dist/index.js "STUBS: mesh engine, transports, discovery, transfer, blobs, checksums";
+// docs/refactor-map/SHARED_RECONSTRUCTION_FIXES.md), so they run only against the real source.
+const syncSourceDependentTestPaths = [
+  '__tests__/unit/sync/fileChecksum.test.ts',
+  '__tests__/unit/sync/nativeBlobChannel.test.ts',
+  '__tests__/unit/sync/nativeProximity.test.ts',
+  '__tests__/integration/sync/rnDiscovery.test.ts',
+  '__tests__/integration/sync/rnTransportPairing.test.ts',
 ];
 
 module.exports = {
@@ -44,6 +119,7 @@ module.exports = {
     // when it's checked out, and are ignored only when pro is genuinely absent.
     '<rootDir>/pro/',
     ...(proExists ? [] : proDependentTestPaths),
+    ...(syncSrc ? [] : syncSourceDependentTestPaths),
   ],
   // Stale agent git-worktrees under .claude/worktrees/ each carry a full repo copy (incl. their own
   // pro/package.json named @offgrid/pro), which collide in Haste's module map and make require('@offgrid/pro')
@@ -64,10 +140,12 @@ module.exports = {
     // @offgrid/sync: test against SOURCE (jest transforms the TS) rather than the tsup dist,
     // which references @babel/runtime helpers not resolvable from the out-of-root package. Keep
     // these subpaths in step with metro.config.js's aliases and the package's exports map.
-    '^@offgrid/sync$': '<rootDir>/../shared/packages/sync/src/index.ts',
-    '^@offgrid/sync/rn$': '<rootDir>/../shared/packages/sync/src/adapters/rn-tcp.ts',
-    '^@offgrid/sync/rn-discovery$': '<rootDir>/../shared/packages/sync/src/adapters/rn-discovery.ts',
-    '^@offgrid/sync/portable$': '<rootDir>/../shared/packages/sync/src/portable/index.ts',
+    // Fallback: the reconstructed shared tree (vendor/offgrid-shared, copied to ../shared) ships
+    // only plain-JS dist/ with no src/, so map to dist when src/index.ts is absent.
+    '^@offgrid/sync$': syncSrc ? '<rootDir>/../shared/packages/sync/src/index.ts' : '<rootDir>/../shared/packages/sync/dist/index.js',
+    '^@offgrid/sync/rn$': syncSrc ? '<rootDir>/../shared/packages/sync/src/adapters/rn-tcp.ts' : '<rootDir>/../shared/packages/sync/dist/adapters/rn-tcp.js',
+    '^@offgrid/sync/rn-discovery$': syncSrc ? '<rootDir>/../shared/packages/sync/src/adapters/rn-discovery.ts' : '<rootDir>/../shared/packages/sync/dist/adapters/rn-discovery.js',
+    '^@offgrid/sync/portable$': syncSrc ? '<rootDir>/../shared/packages/sync/src/portable/index.ts' : '<rootDir>/../shared/packages/sync/dist/portable/index.js',
     // The sync source lives out-of-root; when jest transforms it, babel injects @babel/runtime
     // helper imports that would otherwise resolve from ../shared (where they aren't installed).
     // Pin them to mobile's own copy.

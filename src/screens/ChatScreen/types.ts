@@ -240,8 +240,25 @@ function groupAssistantTurnWork(
         });
       }
     }
+    // Images generated inside the turn (generate_image writes its own assistant record carrying the
+    // image, BEFORE the tool result and the model's closing text) belong to the visible answer. The
+    // owner is the closing text record, which has no attachment, and the loop above keeps only
+    // reasoning / tool calls from the other records, so without this the image vanished from the chat
+    // the moment the reply (or the evicted-path "Here is the image.") arrived.
+    const ownerAttachments = owner.attachments ?? [];
+    const seenAttachmentIds = new Set(ownerAttachments.map(attachment => attachment.id));
+    const carriedImages: NonNullable<Message['attachments']> = [];
+    for (const message of work) {
+      if (message === owner || message.role !== 'assistant') continue;
+      for (const attachment of message.attachments ?? []) {
+        if (attachment.type !== 'image' || seenAttachmentIds.has(attachment.id)) continue;
+        seenAttachmentIds.add(attachment.id);
+        carriedImages.push(attachment);
+      }
+    }
     const item: ChatMessageItem = {
       ...owner,
+      ...(carriedImages.length ? { attachments: [...carriedImages, ...ownerAttachments] } : {}),
       ...(supportingContext ? { supportingContext } : {}),
       content: response && (!groupLive || owner.isStreaming) ? owner.content : '',
       isStreaming: groupLive || owner.isStreaming,

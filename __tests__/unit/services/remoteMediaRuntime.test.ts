@@ -69,7 +69,7 @@ describe('remoteMediaRuntime', () => {
     );
   });
 
-  it('keeps private-LAN HTTP unauthenticated and rejects redirects', async () => {
+  it('sends the stored key to a private-LAN HTTP server and rejects redirects', async () => {
     const calls: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
     global.fetch = jest.fn(async (url, init) => {
       calls.push([url, init]);
@@ -78,7 +78,7 @@ describe('remoteMediaRuntime', () => {
 
     await expect(
       remoteMediaRuntime.generateImage(server, { prompt: 'A quiet desk' }),
-    ).resolves.toEqual({ base64: 'image-bytes', url: undefined });
+    ).resolves.toEqual({ base64: 'image-bytes', url: undefined, used: {} });
 
     expect(calls[0]?.[0]).toBe(
       'http://192.168.1.30:7878/v1/images/generations',
@@ -86,7 +86,10 @@ describe('remoteMediaRuntime', () => {
     expect(calls[0]?.[1]?.headers).toMatchObject({
       'Content-Type': 'application/json',
     });
-    expect(calls[0]?.[1]?.headers).not.toHaveProperty('Authorization');
+    // A keyed llama-server on the user's own PC answers 401 without its key.
+    expect(calls[0]?.[1]?.headers).toMatchObject({
+      Authorization: 'Bearer device-secret',
+    });
     expect(calls[0]?.[1]?.redirect).toBe('error');
     expect(JSON.parse(String(calls[0]?.[1]?.body))).toMatchObject({
       model: 'flux-schnell',
@@ -109,6 +112,99 @@ describe('remoteMediaRuntime', () => {
       Authorization: 'Bearer device-secret',
     });
     expect(calls[0]?.[1]?.redirect).toBe('error');
+  });
+
+  describe('image fields by server kind', () => {
+    const fullRequest = {
+      prompt: 'A quiet desk',
+      size: '768x1024',
+      width: 768,
+      height: 1024,
+      negativePrompt: 'blur',
+      steps: 28,
+      cfgScale: 6.5,
+      seed: 42,
+      sampler: 'euler_a',
+      scheduler: 'karras',
+      loras: [{ name: 'detail', weight: 0.8 }],
+      clipSkip: 2,
+    };
+    const capture = () => {
+      const bodies: Array<Record<string, unknown>> = [];
+      global.fetch = jest.fn(async (_url, init) => {
+        bodies.push(JSON.parse(String(init?.body)));
+        return jsonResponse({ data: [{ b64_json: 'image-bytes' }] });
+      }) as typeof fetch;
+      return bodies;
+    };
+    const fullBody = {
+      model: 'flux-schnell',
+      prompt: 'A quiet desk',
+      size: '768x1024',
+      width: 768,
+      height: 1024,
+      negative_prompt: 'blur',
+      steps: 28,
+      cfg_scale: 6.5,
+      seed: 42,
+      sampler: 'euler_a',
+      scheduler: 'karras',
+      loras: [{ name: 'detail', weight: 0.8 }],
+      clip_skip: 2,
+      response_format: 'b64_json',
+    };
+
+    it('sends every app-decided field to the user LAN server', async () => {
+      const bodies = capture();
+      const result = await remoteMediaRuntime.generateImage(server, fullRequest);
+      expect(bodies[0]).toEqual(fullBody);
+      expect(result.used).toEqual({
+        width: 768, height: 1024, steps: 28, cfgScale: 6.5, seed: 42,
+        sampler: 'euler_a', scheduler: 'karras', negativePrompt: 'blur',
+      });
+    });
+
+    it('sends every field to a Tailscale MagicDNS host', async () => {
+      const bodies = capture();
+      await remoteMediaRuntime.generateImage(
+        { ...server, endpoint: 'https://studio.tail1234.ts.net' }, fullRequest,
+      );
+      expect(bodies[0]).toEqual(fullBody);
+    });
+
+    it('sends every field to a Desktop on a public HTTPS name', async () => {
+      const bodies = capture();
+      await remoteMediaRuntime.generateImage(
+        { ...server, endpoint: 'https://desktop.example.test', modelManagement: 'offgrid-desktop-v1' },
+        fullRequest,
+        { override: true },
+      );
+      expect(bodies[0]).toEqual({ ...fullBody, async: true, allow_unsafe_memory_override: true });
+    });
+
+    it('sends only standard OpenAI fields to a public server and records only width/height', async () => {
+      const bodies = capture();
+      const result = await remoteMediaRuntime.generateImage(
+        { ...server, endpoint: 'https://api.openai.com' }, fullRequest, { override: true },
+      );
+      expect(bodies[0]).toEqual({
+        model: 'flux-schnell',
+        prompt: 'A quiet desk',
+        size: '768x1024',
+        response_format: 'b64_json',
+      });
+      expect(result.used).toEqual({ width: 768, height: 1024 });
+    });
+
+    it('records a seed a public server echoes back', async () => {
+      global.fetch = jest.fn(async () =>
+        jsonResponse({ data: [{ b64_json: 'image-bytes', seed: 7 }] }),
+      ) as typeof fetch;
+      const result = await remoteMediaRuntime.generateImage(
+        { ...server, endpoint: 'https://api.openai.com' }, fullRequest,
+      );
+      expect(result.used).toEqual({ width: 768, height: 1024, seed: 7 });
+    });
   });
 
   it('uses the transcription endpoint and reports an empty server response', async () => {

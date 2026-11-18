@@ -267,6 +267,26 @@ describe('imageDownloadActions', () => {
     expect(deps.setAlertState).toHaveBeenCalledWith(expect.objectContaining({ title: 'Download Failed' }));
   });
 
+  // H1-B2: fresh install (no image generated yet => triedImageGen false) must still select the model,
+  // else generate_image is never offered and the first image can never happen (circular gate).
+  it('registerAndNotify selects the first image model even before any image was generated', async () => {
+    const deps = makeDeps({ triedImageGen: false, activeImageModelId: null });
+    await registerAndNotify(deps, {
+      imageModel: { id: 'img-first', name: 'First', description: 'd', modelPath: '/p', downloadedAt: new Date().toISOString(), size: 1, style: 'creative', backend: 'mnn' },
+      modelName: 'First',
+    });
+    expect(deps.setActiveImageModelId).toHaveBeenCalledWith('img-first');
+  });
+
+  it('registerAndNotify keeps an existing image model selection', async () => {
+    const deps = makeDeps({ triedImageGen: false, activeImageModelId: 'already' });
+    await registerAndNotify(deps, {
+      imageModel: { id: 'img-2nd', name: 'Second', description: 'd', modelPath: '/p', downloadedAt: new Date().toISOString(), size: 1, style: 'creative', backend: 'mnn' },
+      modelName: 'Second',
+    });
+    expect(deps.setActiveImageModelId).not.toHaveBeenCalled();
+  });
+
   it('registerAndNotify removes the active entry after registration', async () => {
     const deps = makeDeps();
 

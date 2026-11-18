@@ -3,6 +3,7 @@ import { loadLlamaModelInfo } from 'llama.rn';
 import { DEFAULT_SETTINGS } from '../stores/appStore';
 import { selectIsLiteRT, useAppStore } from '../stores';
 import { modelMaxContextFromMetadata } from '../services/llmHelpers';
+import { resolveSampling } from '../services/samplingParams';
 import {
   MAX_MAX_TOOL_CALLS,
   MIN_MAX_TOOL_CALLS,
@@ -190,7 +191,54 @@ export function useTextGenerationSettings() {
     },
   } satisfies Record<string, NumericSettingModel>;
 
+  // Advanced sampling: one model per value, shared by both settings surfaces. Ranges cover the
+  // llama.cpp-meaningful span of each (common.h:225-252 comments: top_k <= 0 = vocab, min_p 0 = off,
+  // typical_p 1 = off, penalty_last_n 0 = off, xtc_threshold > 0.5 = off, ...). No -1 window: llama.rn's
+  // sampler turns -1 into 0 = off (vendor src/llama-sampler.cpp:3209, :3640), not "whole context".
+  const s = resolveSampling(settings);
+  const num = (
+    key: keyof typeof s, label: string, description: string,
+    min: number, max: number, step: number, decimals?: number,
+    formatValue?: (value: number) => string,
+  ): NumericSettingModel => ({
+    key, label, description, value: s[key], min, max, step, decimals, formatValue,
+    onChange: (value: number) => updateSettings({ [key]: value } as Partial<typeof settings>),
+  });
+  const offAt = (off: number, digits = 2) => (v: number) => (v === off ? 'Off' : v.toFixed(digits));
+  const sampling = {
+    topK: num('topK', 'Top K', 'Sample from the K most likely tokens. 0 = all tokens', 0, 200, 1, 0,
+      v => (v <= 0 ? 'Off (all)' : String(v))),
+    minP: num('minP', 'Min P', 'Drop tokens below this fraction of the top token\'s probability. 0 = off', 0, 1, 0.01, 2, offAt(0)),
+    typicalP: num('typicalP', 'Typical P', 'Locally typical sampling. 1 = off', 0, 1, 0.01, 2, offAt(1)),
+    penaltyLastN: num('penaltyLastN', 'Penalty Window', 'Recent tokens the repeat / presence / frequency penalties look at. 0 = off', 0, 4096, 1, 0,
+      v => (v === 0 ? 'Off' : String(v))),
+    presencePenalty: num('presencePenalty', 'Presence Penalty', 'Penalize any token already present. 0 = off', -2, 2, 0.05, 2, offAt(0)),
+    frequencyPenalty: num('frequencyPenalty', 'Frequency Penalty', 'Penalize tokens by how often they appeared. 0 = off', -2, 2, 0.05, 2, offAt(0)),
+    dryMultiplier: num('dryMultiplier', 'DRY Multiplier', 'DRY repetition penalty strength. 0 = off', 0, 5, 0.05, 2, offAt(0)),
+    dryBase: num('dryBase', 'DRY Base', 'Growth of the DRY penalty with repeat length', 1, 4, 0.05, 2),
+    dryAllowedLength: num('dryAllowedLength', 'DRY Allowed Length', 'Repeats up to this length are not penalized', 1, 20, 1, 0),
+    dryPenaltyLastN: num('dryPenaltyLastN', 'DRY Window', 'Recent tokens DRY scans. 0 = off', 0, 4096, 1, 0,
+      v => (v === 0 ? 'Off' : String(v))),
+    xtcProbability: num('xtcProbability', 'XTC Probability', 'Chance to remove the top tokens (Exclude Top Choices). 0 = off', 0, 1, 0.01, 2, offAt(0)),
+    xtcThreshold: num('xtcThreshold', 'XTC Threshold', 'Tokens above this probability can be removed. Above 0.5 = off', 0, 1, 0.01, 2),
+    mirostatTau: num('mirostatTau', 'Mirostat Tau', 'Target entropy (used when Mirostat is on)', 0, 10, 0.1, 1),
+    mirostatEta: num('mirostatEta', 'Mirostat Eta', 'Learning rate (used when Mirostat is on)', 0, 1, 0.01, 2),
+    seed: num('seed', 'Seed', 'Same seed + same settings = same reply. -1 = random. Tap the value to type one', -1, 2147483647, 1, 0,
+      v => (v < 0 ? 'Random' : String(v))),
+  } satisfies Record<string, NumericSettingModel>;
+
   const liteRT = {
+    topK: {
+      key: 'liteRTTopK',
+      label: 'Top K',
+      description: 'Sample from the K most likely tokens',
+      value: settings.liteRTTopK ?? 40, // litert.ts samplerConfig default
+      min: 1,
+      max: 200,
+      step: 1,
+      decimals: 0,
+      onChange: (value: number) => updateSettings({ liteRTTopK: value }),
+    },
     temperature: {
       key: 'liteRTTemperature',
       label: 'Temperature',
@@ -231,5 +279,5 @@ export function useTextGenerationSettings() {
     },
   } satisfies Record<string, NumericSettingModel>;
 
-  return { isLiteRT, llama, liteRT, toolCalls };
+  return { isLiteRT, llama, liteRT, toolCalls, sampling };
 }

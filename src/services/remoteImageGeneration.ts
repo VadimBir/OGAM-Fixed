@@ -4,6 +4,7 @@ import { useAppStore } from '../stores';
 import { generateId, generateRandomSeed } from '../utils/generateId';
 import type { GenerateImageParams, ImageGenerationState } from './imageGenerationTypes';
 import { resolveMobileImageParameters } from './imageParameterPolicy';
+import { clipSkipOf } from './imageEngineParams';
 import { remoteMediaRuntime, type RemoteImageUsed } from './remoteMediaRuntime';
 import { remoteServerManager } from './remoteServerManager';
 import { remoteAuthorizationHeaders, validateRemoteEndpoint } from './remoteTransportPolicy';
@@ -30,6 +31,13 @@ const positiveFinite = (value: number | null | undefined): number | undefined =>
 
 /** Resolve a server-returned image URL (absolute or relative) and refuse a public cleartext host. */
 function resolveImageUrl(server: RemoteServer, url: string): URL {
+  // A data: URL reaching here did not match the base64 PNG / JPEG / WebP form read above.
+  const dataUrl = /^\s*data:([^;,]*)/i.exec(url);
+  if (dataUrl) {
+    throw new Error(
+      `Remote server returned an image this app cannot read (${dataUrl[1] || 'unknown type'}). Expected base64 PNG, JPEG, or WebP.`,
+    );
+  }
   const resolved = new URL(url, server.endpoint);
   validateRemoteEndpoint(resolved.toString());
   return resolved;
@@ -102,6 +110,7 @@ export async function runRemoteImageGeneration(
         sampler,
         scheduler,
         loras,
+        clipSkip: clipSkipOf(settings),
       },
       {
         signal: controller.signal,
@@ -171,7 +180,9 @@ export async function runRemoteImageGeneration(
       return null;
     }
     deps.onUsed?.(used);
-    // Record what the server was sent (or echoed). The seed is always a real one: sent or echoed.
+    // Record what the server was sent (or echoed). On the user's own server the seed and steps are
+    // sent; a public standard server is sent neither, so the app values below are a fallback only
+    // (GeneratedImage.seed / steps are required numbers with no "unknown" value).
     const result: GeneratedImage = {
       id, prompt: params.prompt, negativePrompt: used.negativePrompt ?? params.negativePrompt, imagePath, fileName,
       width: used.width ?? width, height: used.height ?? height, steps: used.steps ?? steps,

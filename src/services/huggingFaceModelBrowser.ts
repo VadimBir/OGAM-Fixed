@@ -41,16 +41,18 @@ function insertSpaces(name: string): string {
   return name.replaceAll(/([a-z\d])([A-Z])/g, '$1 $2');
 }
 
-function parseFileName(fileName: string, backend: 'mnn' | 'qnn'): Omit<HFImageModel, 'downloadUrl' | 'size' | 'repo'> | null {
+type ParsedFile = Omit<HFImageModel, 'downloadUrl' | 'size' | 'repo'> & { qnnVersion?: string };
+
+function parseFileName(fileName: string, backend: 'mnn' | 'qnn'): ParsedFile | null {
   if (!fileName.endsWith('.zip')) return null;
 
   const baseName = fileName.replace('.zip', '');
 
   if (backend === 'qnn') {
     // NPU: e.g. "AnythingV5_qnn2.28_8gen2.zip"
-    const match = baseName.match(/^(.+?)_qnn[\d.]+_(.+)$/);
+    const match = baseName.match(/^(.+?)_qnn([\d.]+)_(.+)$/);
     if (!match) return null;
-    const [, name, variant] = match;
+    const [, name, qnnVersion, variant] = match;
     const displayVariant = variant === 'min' ? 'non-flagship' : variant;
     return {
       id: `${name.toLowerCase()}_npu_${variant}`,
@@ -59,6 +61,7 @@ function parseFileName(fileName: string, backend: 'mnn' | 'qnn'): Omit<HFImageMo
       backend: 'qnn',
       variant,
       fileName,
+      qnnVersion,
     };
   }
 
@@ -72,12 +75,47 @@ function parseFileName(fileName: string, backend: 'mnn' | 'qnn'): Omit<HFImageMo
   };
 }
 
+/** Upper bound on followed tree pages, so a server that always answers rel="next" cannot loop. */
+const MAX_TREE_PAGES = 20;
+
+/** The rel="next" URL of an HF `Link` header, only when it stays on huggingface.co. */
+function nextTreePage(response: Response): string | null {
+  const link = response.headers?.get?.('link');
+  if (!link) return null;
+  const match = /<([^>]+)>\s*;\s*rel="?next"?/i.exec(link);
+  if (!match) return null;
+  return match[1].startsWith('https://huggingface.co/') ? match[1] : null;
+}
+
+/**
+ * Every top-level entry of the repo. The HF tree API pages long listings through a `Link:
+ * rel="next"` header; reading only the first page silently dropped every model after it.
+ */
 async function fetchRepoFiles(repo: string): Promise<HFTreeEntry[]> {
-  const response = await fetch(`https://huggingface.co/api/models/${repo}/tree/main`);
-  if (!response.ok) {
-    throw new Error(`Failed to fetch ${repo}: HTTP ${response.status}`);
+  const entries: HFTreeEntry[] = [];
+  let url: string | null = `https://huggingface.co/api/models/${repo}/tree/main`;
+  for (let page = 0; url && page < MAX_TREE_PAGES; page++) {
+    const response: Response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`Failed to fetch ${repo}: HTTP ${response.status}`);
+    }
+    const body: unknown = await response.json();
+    if (!Array.isArray(body)) throw new Error(`Failed to fetch ${repo}: unexpected response`);
+    entries.push(...(body as HFTreeEntry[]));
+    url = nextTreePage(response);
   }
-  return response.json();
+  return entries;
+}
+
+/** Numeric compare of dotted versions ("2.31" > "2.28", "2.9" < "2.10"). */
+function compareVersions(a: string, b: string): number {
+  const pa = a.split('.').map(n => Number.parseInt(n, 10) || 0);
+  const pb = b.split('.').map(n => Number.parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] ?? 0) - (pb[i] ?? 0);
+    if (d !== 0) return d;
+  }
+  return 0;
 }
 
 export async function fetchAvailableModels(forceRefresh = false, opts?: { skipQnn?: boolean }): Promise<HFImageModel[]> {
@@ -118,17 +156,28 @@ export async function fetchAvailableModels(forceRefresh = false, opts?: { skipQn
     });
   }
 
+  // One card per model + chip variant. Two QNN SDK builds of the same model (e.g. _qnn2.28_ and
+  // _qnn2.31_) parse to the same id: both cards rendered with one React key and shared one
+  // download-store row. Keep the newest SDK build.
+  const qnnById = new Map<string, { model: HFImageModel; version: string }>();
   for (const entry of qnnFiles) {
     if (entry.type !== 'file') continue;
     const parsed = parseFileName(entry.path, 'qnn');
     if (!parsed) continue;
-    models.push({
-      ...parsed,
-      downloadUrl: `https://huggingface.co/${REPOS.qnn}/resolve/main/${entry.path}`,
-      size: entry.lfs?.size ?? entry.size,
-      repo: REPOS.qnn,
+    const { qnnVersion = '0', ...rest } = parsed;
+    const prior = qnnById.get(rest.id);
+    if (prior && compareVersions(prior.version, qnnVersion) >= 0) continue;
+    qnnById.set(rest.id, {
+      version: qnnVersion,
+      model: {
+        ...rest,
+        downloadUrl: `https://huggingface.co/${REPOS.qnn}/resolve/main/${entry.path}`,
+        size: entry.lfs?.size ?? entry.size,
+        repo: REPOS.qnn,
+      },
     });
   }
+  for (const { model } of qnnById.values()) models.push(model);
 
   // Sort: GPU first, then NPU; alphabetically within each group
   models.sort((a, b) => {

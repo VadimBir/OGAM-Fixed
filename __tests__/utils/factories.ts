@@ -484,6 +484,8 @@ export interface ProjectFactoryOptions {
   description?: string;
   systemPrompt?: string;
   icon?: string;
+  /** Project.avatarUri (character image). Omitted from the object when not given. */
+  avatarUri?: string;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -522,6 +524,7 @@ export const createProject = (
   systemPrompt:
     options.systemPrompt ?? 'You are a helpful assistant for this project.',
   icon: options.icon ?? '📁',
+  ...(options.avatarUri !== undefined ? { avatarUri: options.avatarUri } : {}),
   createdAt: options.createdAt ?? new Date().toISOString(),
   updatedAt: options.updatedAt ?? new Date().toISOString(),
 });

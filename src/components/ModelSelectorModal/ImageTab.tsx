@@ -21,6 +21,9 @@ export interface ImageTabProps {
   activeRemoteImageServerId: string | null;
   isAnyLoading: boolean;
   isLoadingImage: boolean;
+  /** Whether the selected LOCAL image model is resident in RAM. false = "Selected, not loaded"
+   *  (unloaded or evicted; it lazy-reloads on the next image request). Default true. */
+  isImageModelLoaded?: boolean;
   /** Id of the image model being loaded right now (the row just tapped) — drives the per-row spinner. */
   loadingModelId?: string | null;
   /** Server and model key for the remote row being selected. */
@@ -39,6 +42,7 @@ export const ImageTab: React.FC<ImageTabProps> = ({
   activeRemoteImageServerId,
   isAnyLoading,
   isLoadingImage,
+  isImageModelLoaded = true,
   loadingModelId = null,
   loadingRemoteModelKey = null,
   onSelectImageModel,
@@ -53,6 +57,9 @@ export const ImageTab: React.FC<ImageTabProps> = ({
   const activeModel = hasRemoteSelection
     ? undefined
     : downloadedImageModels.find(m => m.id === activeImageModelId);
+  // A local selection whose model is not in RAM (user Unload / eviction): keep it shown as selected,
+  // but say so and offer no Unload. A remote selection has no local residency.
+  const selectedNotLoaded = !hasRemoteSelection && !!activeImageModelId && !isImageModelLoaded;
 
   // Find active remote vision model info
   const activeRemoteModelInfo = useMemo(() => {
@@ -69,9 +76,10 @@ export const ImageTab: React.FC<ImageTabProps> = ({
     <>
       {hasLoaded && (
         <View>
-          <View style={styles.loadedHeader}>
-            <Icon name="check-circle" size={14} color={colors.success} />
-            <Text style={styles.loadedLabel}>Currently Loaded</Text>
+          <View style={styles.loadedHeader} testID={selectedNotLoaded ? 'image-model-selected-not-loaded' : undefined}>
+            <Icon name={selectedNotLoaded ? 'circle' : 'check-circle'} size={14}
+              color={selectedNotLoaded ? colors.textMuted : colors.success} />
+            <Text style={styles.loadedLabel}>{selectedNotLoaded ? 'Selected, not loaded' : 'Currently Loaded'}</Text>
           </View>
           <ModelCard
             compact
@@ -86,7 +94,7 @@ export const ImageTab: React.FC<ImageTabProps> = ({
             facts={activeModel ? [activeModel.style || 'Image',
               `${hardwareService.formatBytes(hardwareService.estimateImageModelRam(activeModel))} RAM`] : []}
             isActive
-            trailing={<TouchableOpacity style={styles.unloadButton} onPress={onUnloadImageModel} disabled={isAnyLoading}>
+            trailing={selectedNotLoaded ? undefined : <TouchableOpacity style={styles.unloadButton} onPress={onUnloadImageModel} disabled={isAnyLoading}>
               {isLoadingImage ? <LoadingDots color={colors.error} /> : <>
                 <Icon name="power" size={16} color={colors.error} />
                 <Text style={styles.unloadButtonText}>Unload</Text>
@@ -163,7 +171,8 @@ export const ImageTab: React.FC<ImageTabProps> = ({
                     ? <View style={styles.checkmark}><Icon name="check" size={16} color={colors.background} /></View>
                     : null}
                 onPress={() => onSelectImageModel(model)}
-                disabled={isAnyLoading || isCurrent}
+                // The selected-but-unloaded row stays tappable so the user can load it now.
+                disabled={isAnyLoading || (isCurrent && !selectedNotLoaded)}
               />
             );
           })}

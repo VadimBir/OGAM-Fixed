@@ -15,6 +15,72 @@ import java.util.UUID
 import java.util.concurrent.Executors
 
 /**
+ * Cancel bookkeeping for sd.cpp runs, keyed by a run id so a cancel reaches exactly the runs that
+ * existed when it was pressed: never a later run, and never lost because a later run was queued.
+ * (A single `generating` / `cancelRequested` pair was cleared by the first run's finally or reset
+ * by the next generateImage while another run was still queued, dropping the cancel.)
+ * Pure JVM, all methods under one monitor.
+ */
+internal class SdCppRunGate {
+    private var issued = 0L
+    /** Every run id <= this was cancelled by the user. */
+    private var cancelledThrough = 0L
+    private var outstanding = 0
+    /** Run currently inside nativeGenerate; 0 = none. */
+    private var nativeRun = 0L
+    private var nativeCancelSent = false
+    /** A nativeCancel landed while the previous run was already finishing: the native flag may
+     *  still be set and make the next nativeGenerate throw CANCELLED immediately. */
+    private var staleNativeCancelPossible = false
+
+    /** New run id, issued on the bridge thread in call order. */
+    @Synchronized fun issue(): Long {
+        outstanding++
+        return ++issued
+    }
+
+    @Synchronized fun isCancelled(runId: Long): Boolean = runId <= cancelledThrough
+
+    /** User cancel: every queued or running run. Idle = no-op. [sendNativeCancel] runs under the
+     *  lock only when a run is inside nativeGenerate; it returns whether the cancel was sent. */
+    @Synchronized fun cancelAll(sendNativeCancel: () -> Boolean) {
+        if (outstanding == 0) return
+        cancelledThrough = issued
+        if (nativeRun != 0L && sendNativeCancel()) nativeCancelSent = true
+    }
+
+    /** Before nativeGenerate. false = this run was cancelled before it started. */
+    @Synchronized fun enterNative(runId: Long): Boolean {
+        if (runId <= cancelledThrough) return false
+        nativeRun = runId
+        nativeCancelSent = false
+        return true
+    }
+
+    @Synchronized fun exitNative() {
+        nativeRun = 0L
+    }
+
+    /** nativeGenerate returned normally although a cancel was sent: the core did not consume it. */
+    @Synchronized fun nativeReturned() {
+        staleNativeCancelPossible = nativeCancelSent
+        nativeCancelSent = false
+    }
+
+    /** CANCELLED came out of a run: true (and consumed) only when it is the previous run's late
+     *  nativeCancel, never when this run's user cancelled, so one clean retry is allowed. */
+    @Synchronized fun consumeStaleCancel(runId: Long): Boolean {
+        if (!staleNativeCancelPossible || runId <= cancelledThrough) return false
+        staleNativeCancelPossible = false
+        return true
+    }
+
+    @Synchronized fun finish() {
+        if (outstanding > 0) outstanding--
+    }
+}
+
+/**
  * Second, isolated image engine: stable-diffusion.cpp (ggml) running raw Stable-Diffusion
  * checkpoints (.safetensors / .ckpt) directly — no conversion. Independent of LocalDreamModule
  * (QNN/MNN): own native lib, own event name, own context. Output PNGs go to the same
@@ -55,17 +121,7 @@ class SdCppImageModule(reactContext: ReactApplicationContext) :
 
     @Volatile private var handle: Long = 0L
     @Volatile private var loadedModelPath: String? = null
-    @Volatile private var generating = false
-    /** Set by cancelGeneration while a run is queued or running; consumed before nativeGenerate. */
-    @Volatile private var cancelRequested = false
-    // Guards generating / cancelRequested / inNative / nativeCancelSent so a cancel is applied to
-    // exactly one run: never to a finished run's successor.
-    private val cancelLock = Any()
-    private var inNative = false
-    private var nativeCancelSent = false
-    /** A nativeCancel landed while the previous run was already finishing: the native flag may
-     *  still be set and make the next nativeGenerate throw CANCELLED immediately. */
-    private var staleNativeCancelPossible = false
+    private val runGate = SdCppRunGate()
 
     override fun getName(): String = "SdCppImageModule"
 
@@ -181,7 +237,7 @@ class SdCppImageModule(reactContext: ReactApplicationContext) :
                 resolve(promise, true)
             } catch (e: Throwable) {
                 Log.e(TAG, "load failed", e)
-                reject(promise, "ERR_LOAD", e.message ?: "stable-diffusion.cpp load failed", e)
+                reject(promise, SdCppLoadError.codeFor(e.message), e.message ?: "stable-diffusion.cpp load failed", e)
             }
         }
     }
@@ -202,17 +258,14 @@ class SdCppImageModule(reactContext: ReactApplicationContext) :
 
     @ReactMethod
     fun cancelGeneration(promise: Promise) {
-        synchronized(cancelLock) {
-            // Idle cancel is a no-op (must not poison the next run). Queued run: the flag is
-            // consumed before nativeGenerate. Running run: also stop the native core.
-            if (generating) {
-                cancelRequested = true
-                val h = handle
-                if (inNative && h != 0L) {
-                    SdCppNative.nativeCancel(h)
-                    nativeCancelSent = true
-                }
-            }
+        // Idle cancel is a no-op (must not poison the next run). Queued runs: refused before
+        // nativeGenerate by run id. Running run: also stop the native core.
+        runGate.cancelAll {
+            val h = handle
+            if (h != 0L) {
+                SdCppNative.nativeCancel(h)
+                true
+            } else false
         }
         resolve(promise, true)
     }
@@ -245,10 +298,8 @@ class SdCppImageModule(reactContext: ReactApplicationContext) :
                 loraMults.add(if (l.hasKey("weight")) l.getDouble("weight").toFloat() else 1f)
             }
         }
-        synchronized(cancelLock) {
-            generating = true
-            cancelRequested = false
-        }
+        // Issued here, on the bridge thread, in call order: a cancel pressed after this call covers it.
+        val runId = runGate.issue()
         executor.execute {
             val names = arrayOfNulls<String>(2)
             val t0 = System.currentTimeMillis()
@@ -264,13 +315,8 @@ class SdCppImageModule(reactContext: ReactApplicationContext) :
                     }
                 }
                 val runNative = {
-                    synchronized(cancelLock) {
-                        if (cancelRequested) {
-                            cancelRequested = false
-                            throw IllegalStateException("CANCELLED: cancelled before generation started")
-                        }
-                        inNative = true
-                        nativeCancelSent = false
+                    if (!runGate.enterNative(runId)) {
+                        throw IllegalStateException("CANCELLED: cancelled before generation started")
                     }
                     try {
                         SdCppNative.nativeGenerate(
@@ -278,25 +324,21 @@ class SdCppImageModule(reactContext: ReactApplicationContext) :
                             clipSkip, vaeTiling, loraPaths.toTypedArray(), loraMults.toFloatArray(), names, listener,
                         )
                     } finally {
-                        synchronized(cancelLock) { inNative = false }
+                        runGate.exitNative()
                     }
                 }
                 val raw = try {
                     runNative()
                 } catch (e: RuntimeException) {
-                    // CANCELLED from the previous run's late nativeCancel, not from this run's user:
-                    // the native flag was consumed by this throw, so one retry runs clean.
-                    val stale = synchronized(cancelLock) { staleNativeCancelPossible && !cancelRequested }
-                    if (e.message?.startsWith("CANCELLED:") == true && stale) {
-                        synchronized(cancelLock) { staleNativeCancelPossible = false }
+                    // CANCELLED from the previous run's late nativeCancel, not from this run's user
+                    // (consumeStaleCancel is false once this run is cancelled, so a user cancel,
+                    // queued or running, is never retried): the native flag was consumed by this
+                    // throw, so one retry runs clean.
+                    if (e.message?.startsWith("CANCELLED:") == true && runGate.consumeStaleCancel(runId)) {
                         runNative()
                     } else throw e
                 }
-                synchronized(cancelLock) {
-                    // Returned normally although a cancel was sent: the native core did not consume it.
-                    staleNativeCancelPossible = nativeCancelSent
-                    nativeCancelSent = false
-                }
+                runGate.nativeReturned()
                 val out = raw ?: throw IllegalStateException("stable-diffusion.cpp returned no image")
                 val hdr = ByteBuffer.wrap(out, 0, 12).order(ByteOrder.LITTLE_ENDIAN)
                 val w = hdr.int
@@ -327,10 +369,7 @@ class SdCppImageModule(reactContext: ReactApplicationContext) :
                     reject(promise, "GENERATION_ERROR", e.message ?: "stable-diffusion.cpp generation failed", e)
                 }
             } finally {
-                synchronized(cancelLock) {
-                    generating = false
-                    cancelRequested = false
-                }
+                runGate.finish()
             }
         }
     }

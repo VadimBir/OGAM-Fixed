@@ -17,7 +17,12 @@ export const CACHE_TYPE_OPTIONS: CacheType[] = ['f16', 'q8_0', 'q4_0'];
 export function useTextGenerationAdvanced() {
   const { settings, updateSettings } = useAppStore();
 
-  const isQuantizedCache = (settings?.cacheType ?? 'q8_0') !== 'f16';
+  const currentCacheTypeV: CacheType | 'same' = settings?.cacheTypeV ?? 'same';
+  /** The V cache type the load sends ('same' follows the K type). */
+  const vCacheOf = (k: CacheType, v: CacheType | 'same'): CacheType => (v === 'same' ? k : v);
+  // Flash attention is tied to the V cache: llama.cpp refuses a quantized V cache without it
+  // (vendor src/llama-context.cpp:3732-3740); a quantized K cache alone does not need it.
+  const isQuantizedCache = vCacheOf(settings?.cacheType ?? 'q8_0', currentCacheTypeV) !== 'f16';
   // A quantized KV cache always runs with flash attention (llama.cpp requires it for a quantized
   // V cache; the loader enables it), so the toggle reads ON whatever the stored flag says.
   // On Android llm helpers always send flash_attn_type 'on' (resolveFlashAttnType), so it reads ON
@@ -57,7 +62,16 @@ export function useTextGenerationAdvanced() {
   const handleCacheTypeChange = (ct: CacheType) => {
     if (cacheDisabled) return;
     const updates: Partial<typeof settings> = { cacheType: ct };
-    if (ct !== 'f16' && !isFlashAttnOn) {
+    if (vCacheOf(ct, currentCacheTypeV) !== 'f16' && !isFlashAttnOn) {
+      updates.flashAttn = true;
+    }
+    updateSettings(updates);
+  };
+
+  const handleCacheTypeVChange = (v: CacheType | 'same') => {
+    if (cacheDisabled && v !== 'same' && v !== 'f16') return;
+    const updates: Partial<typeof settings> = { cacheTypeV: v };
+    if (vCacheOf(currentCacheType, v) !== 'f16' && !isFlashAttnOn) {
       updates.flashAttn = true;
     }
     updateSettings(updates);
@@ -70,6 +84,7 @@ export function useTextGenerationAdvanced() {
     isFlashAttnOn,
     isQuantizedCache,
     currentCacheType,
+    currentCacheTypeV,
     displayCacheType,
     gpuLayersEffective,
     isGpuEnabled,
@@ -82,5 +97,6 @@ export function useTextGenerationAdvanced() {
     // Handlers
     handleFlashAttnToggle,
     handleCacheTypeChange,
+    handleCacheTypeVChange,
   };
 }

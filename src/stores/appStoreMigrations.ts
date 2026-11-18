@@ -106,11 +106,44 @@ export function migratePersistedState<TState>(
   )
     merged.checklistDismissed = false;
   migrateReasoningBudgetScale(merged, persistedState);
+  migrateMaxTokensDefault(merged, persistedState);
   migrateEnabledTools(merged);
   migrateBoostedContext(merged, defaultSettings);
+  migrateAdvancedSettings(merged, defaultSettings);
   migrateGeneratedImageTimestamps(merged);
   migrateGeneratedImagePaths(merged, documentsPath);
   return merged as TState;
+}
+
+const isFiniteNumber = (v: unknown): boolean => typeof v === 'number' && Number.isFinite(v);
+const CACHE_TYPES = ['f16', 'q8_0', 'q4_0'];
+/** Settings added with the Advanced sampling / load / image-default fields, each with the shape
+ *  its readers expect. An install from before them has none: the defaults spread above fills
+ *  them; this also replaces a value of the wrong shape (a hand-edited or partially synced store)
+ *  with the default, so no reader meets NaN / a non-array. Idempotent. */
+const ADVANCED_SETTING_SHAPES: Record<string, (v: unknown) => boolean> = {
+  topK: isFiniteNumber, minP: isFiniteNumber, typicalP: isFiniteNumber,
+  penaltyLastN: isFiniteNumber, presencePenalty: isFiniteNumber, frequencyPenalty: isFiniteNumber,
+  dryMultiplier: isFiniteNumber, dryBase: isFiniteNumber, dryAllowedLength: isFiniteNumber,
+  dryPenaltyLastN: isFiniteNumber, xtcProbability: isFiniteNumber, xtcThreshold: isFiniteNumber,
+  mirostat: v => v === 0 || v === 1 || v === 2,
+  mirostatTau: isFiniteNumber, mirostatEta: isFiniteNumber,
+  seed: v => Number.isInteger(v),
+  customStopStrings: v => Array.isArray(v) && v.every(s => typeof s === 'string'),
+  liteRTTopK: isFiniteNumber,
+  nUbatch: v => Number.isInteger(v) && (v as number) >= 0,
+  mmapMode: v => v === 'auto' || v === 'on' || v === 'off',
+  cacheTypeV: v => v === 'same' || CACHE_TYPES.includes(v as string),
+  imageNegativePrompt: v => typeof v === 'string',
+  imageSeed: v => Number.isInteger(v),
+  imageClipSkip: v => Number.isInteger(v) && (v as number) >= 0,
+};
+export function migrateAdvancedSettings(merged: any, defaultSettings: PersistedSettings): void {
+  const s = merged.settings;
+  if (!s) return;
+  for (const [key, valid] of Object.entries(ADVANCED_SETTING_SHAPES)) {
+    if (!valid(s[key]) && key in defaultSettings) s[key] = defaultSettings[key];
+  }
 }
 
 /** Older builds stored reasoningBudget 0 for Auto; 0 now means "no thinking". Map once. */
@@ -122,6 +155,23 @@ function migrateReasoningBudgetScale(merged: any, persistedState: any): void {
     ...merged.settings,
     ...(legacyAuto ? { reasoningBudget: -1 } : {}),
     reasoningBudgetZeroIsOff: true,
+  };
+}
+
+/**
+ * Old default maxTokens 1024 -> 2048, once. maxTokens is n_predict (output length) on the local path:
+ * KV/RAM is sized by contextLength, so this changes no memory. Only an install still on the exact old
+ * default is raised; any other value is the user's choice and is kept. The flag makes it one-time.
+ */
+const OLD_DEFAULT_MAX_TOKENS = 1024;
+const NEW_DEFAULT_MAX_TOKENS = 2048;
+function migrateMaxTokensDefault(merged: any, persistedState: any): void {
+  const persisted = persistedState?.settings;
+  if (!persisted || persisted.maxTokensDefault2048) return;
+  merged.settings = {
+    ...merged.settings,
+    ...(persisted.maxTokens === OLD_DEFAULT_MAX_TOKENS ? { maxTokens: NEW_DEFAULT_MAX_TOKENS } : {}),
+    maxTokensDefault2048: true,
   };
 }
 

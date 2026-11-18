@@ -16,6 +16,7 @@ import {
   QueuedMessage,
 } from '../../services';
 import { generationSession } from '../../services/generationSession';
+import { QUEUE_PROCESSOR_NOT_READY } from '../../services/generationService';
 import type { RootStackParamList } from '../../navigation/types';
 import logger from '../../utils/logger';
 import {
@@ -111,10 +112,12 @@ export function useChatRuntimeSubscriptions(
   const handleQueuedSend = useCallback(
     async (item: QueuedMessage) => {
       if (!generationDepsRef.current || !startGenerationRef.current) {
-        logger.error(
-          `[GenerationService] queued message ${item.id} dropped: chat screen not ready`,
+        // Never drop the user's message: the service keeps it queued (visible) and retries on the
+        // next drain trigger.
+        logger.warn(
+          `[GenerationService] queued message ${item.id} kept: chat screen not ready`,
         );
-        return;
+        return QUEUE_PROCESSOR_NOT_READY;
       }
       await dispatchGenerationFn(
         generationDepsRef.current,
@@ -135,10 +138,9 @@ export function useChatRuntimeSubscriptions(
     generationService.setQueueProcessor(handleQueuedSend);
     // Messages queued while no ChatScreen was mounted (the processor is null between unmount and the
     // next mount) stay in the queue; release them now that a processor exists again. drainQueue is a
-    // no-op while a text turn runs; an image turn drains on its own completion, so wait for it.
-    if (!imageGenerationService.getState().isGenerating) {
-      generationService.drainQueue();
-    }
+    // no-op while a text turn runs and waits for an in-flight image generation to end (the service owns
+    // that gate, so every drain trigger honors it, not only this mount).
+    generationService.drainQueue();
     return () => generationService.setQueueProcessor(null);
   }, [handleQueuedSend]);
 

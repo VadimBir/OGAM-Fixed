@@ -306,7 +306,7 @@ describe('HardwareService', () => {
 
     it('uses correct quantization bits for calculation', async () => {
       await setupWithAvailableMemory(16, 4); // 12GB available
-      // 13B Q8_0 = 13 * 8 / 8 = 13GB, needs 13 * 1.5 = 19.5GB
+      // 13B Q8_0 = 13 * 8.5 / 8 = 13.8125GB, needs * 1.5 = 20.7GB
       expect(hardwareService.canRunModel(13, 'Q8_0')).toBe(false);
     });
 
@@ -341,8 +341,8 @@ describe('HardwareService', () => {
     });
 
     it('estimates 13B Q8_0 correctly', () => {
-      // 13 * 8 / 8 = 13
-      expect(hardwareService.estimateModelMemoryGB(13, 'Q8_0')).toBe(13);
+      // block_q8_0 = 34 B / 32 weights = 8.5 bpw: 13 * 8.5 / 8 = 13.8125
+      expect(hardwareService.estimateModelMemoryGB(13, 'Q8_0')).toBe(13.8125);
     });
 
     it('estimates 3B F16 correctly', () => {
@@ -386,15 +386,15 @@ describe('HardwareService', () => {
     });
 
     it('estimates Q6_K correctly', () => {
-      // 7 * 6.5 / 8 = 5.6875
+      // block_q6_K = 210 B / 256 weights = 6.5625 bpw: 7 * 6.5625 / 8 = 5.7421875
       expect(hardwareService.estimateModelMemoryGB(7, 'Q6_K')).toBeCloseTo(
-        5.6875,
+        5.7421875,
       );
     });
 
     it('estimates Q4_0 correctly', () => {
-      // 7 * 4 / 8 = 3.5
-      expect(hardwareService.estimateModelMemoryGB(7, 'Q4_0')).toBe(3.5);
+      // block_q4_0 = 18 B / 32 weights = 4.5 bpw: 7 * 4.5 / 8 = 3.9375
+      expect(hardwareService.estimateModelMemoryGB(7, 'Q4_0')).toBe(3.9375);
     });
   });
 

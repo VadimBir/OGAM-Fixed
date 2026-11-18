@@ -22,6 +22,7 @@ import {
 import { AnimatedPressable } from '../../components/AnimatedPressable';
 import { generationService } from '../../services';
 import { EmptyChat, ImageProgressIndicator } from './ChatScreenComponents';
+import { FloatingGeneratedImage } from './FloatingGeneratedImage';
 import { getPlaceholderText, useChatScreen } from './useChatScreen';
 import { createStyles } from './styles';
 import { useTheme } from '../../theme';
@@ -325,6 +326,13 @@ export const ChatMessageArea: React.FC<ChatMessageAreaProps> = ({
           </AnimatedPressable>
         </Animated.View>
       )}
+      {/* Latest generated image of this chat, floating over the list; the composer stays usable. */}
+      <FloatingGeneratedImage
+        imageGenState={chat.imageGenState}
+        conversationId={chat.activeConversationId}
+        bottom={inputHeight + 8}
+        onOpenFullscreen={chat.handleImagePress}
+      />
       {chat.isGeneratingImage && (
         <ImageProgressIndicator
           styles={styles}

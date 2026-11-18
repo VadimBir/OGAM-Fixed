@@ -2,6 +2,7 @@
 # Runs raw Stable-Diffusion checkpoints (.safetensors / .ckpt / .gguf) directly, no conversion.
 # Built out-of-gradle by scripts/build-sdcpp.sh (pinned sd.cpp commit) and committed as a
 # prebuilt jniLib, same as libstable_diffusion_core.so — gradle builds stay unchanged.
+# SDCPP_VULKAN=ON (default) builds the ggml Vulkan GPU backend (GPU-only app policy); OFF = CPU-only.
 cmake_minimum_required(VERSION 3.18)
 project(sdcpp_jni C CXX)
 
@@ -13,7 +14,30 @@ endif()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-# CPU backend only: portable across arm64 SoCs. No examples, no WebP/WebM I/O (PNG is written in Kotlin).
+option(SDCPP_VULKAN "Build the ggml Vulkan (GPU) backend" ON)
+set(SDCPP_VULKAN_HEADERS "" CACHE PATH "KhronosGroup/Vulkan-Headers checkout (needs include/vulkan/vulkan.hpp)")
+set(SDCPP_SPIRV_HEADERS_INCLUDE "" CACHE PATH "include dir holding spirv/unified1/spirv.hpp (NDK: sources/third_party/shaderc/third_party/spirv-tools/external/spirv-headers/include)")
+set(SDCPP_GLSLC "" CACHE FILEPATH "glslc executable (NDK: shader-tools/<host>/glslc)")
+set(SDCPP_LIBVULKAN "" CACHE FILEPATH "NDK libvulkan.so stub (sysroot/usr/lib/aarch64-linux-android/<api>/libvulkan.so)")
+
+if(SDCPP_VULKAN)
+  foreach(v SDCPP_VULKAN_HEADERS SDCPP_SPIRV_HEADERS_INCLUDE SDCPP_GLSLC SDCPP_LIBVULKAN)
+    if("${${v}}" STREQUAL "")
+      message(FATAL_ERROR "SDCPP_VULKAN=ON needs ${v} (scripts/build-sdcpp.sh sets it)")
+    endif()
+  endforeach()
+  # FindVulkan is bypassed (cross-compiling find roots hide host tools): preset its cache results.
+  set(Vulkan_INCLUDE_DIR "${SDCPP_VULKAN_HEADERS}/include" CACHE PATH "" FORCE)
+  set(Vulkan_LIBRARY "${SDCPP_LIBVULKAN}" CACHE FILEPATH "" FORCE)
+  set(Vulkan_GLSLC_EXECUTABLE "${SDCPP_GLSLC}" CACHE FILEPATH "" FORCE)
+  set(SPIRV-Headers_DIR "${CMAKE_CURRENT_LIST_DIR}/cmake" CACHE PATH "" FORCE)
+  include_directories(BEFORE "${SDCPP_VULKAN_HEADERS}/include")
+  include_directories(AFTER "${SDCPP_SPIRV_HEADERS_INCLUDE}")
+  set(SD_VULKAN ON CACHE BOOL "" FORCE)
+  set(GGML_VULKAN ON CACHE BOOL "" FORCE)
+endif()
+
+# No examples, no WebP/WebM I/O (PNG is written in Kotlin). CPU kernels stay built for ops the GPU rejects.
 set(SD_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(SD_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(SD_WEBP OFF CACHE BOOL "" FORCE)
@@ -30,5 +54,8 @@ add_library(sdcpp_jni SHARED sdcpp_jni.cpp)
 target_include_directories(sdcpp_jni PRIVATE "${SDCPP_SRC}/include")
 target_link_libraries(sdcpp_jni PRIVATE stable-diffusion android log)
 target_compile_options(sdcpp_jni PRIVATE -fvisibility=hidden)
+if(SDCPP_VULKAN)
+  target_compile_definitions(sdcpp_jni PRIVATE SDCPP_GPU_ONLY=1)
+endif()
 # 16 KB page alignment (Android 15+ devices) + drop unused code.
 target_link_options(sdcpp_jni PRIVATE "-Wl,-z,max-page-size=16384" "-Wl,--gc-sections" "-Wl,--exclude-libs,ALL")

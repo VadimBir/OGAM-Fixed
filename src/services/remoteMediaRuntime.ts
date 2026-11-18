@@ -1,6 +1,7 @@
 import { remoteServerManager } from './remoteServerManager';
 import type { RemoteMediaModelIds, RemoteServer } from '../types';
 import {
+  acceptsServerExtensions,
   REMOTE_FETCH_REDIRECT_POLICY,
   remoteApiUrl,
   remoteAuthorizationHeaders,
@@ -267,11 +268,20 @@ export const remoteMediaRuntime = {
       error?: { message?: string };
       progress?: { step: number; total: number };
     };
+    // The user's own server (LAN / Tailscale / Desktop) gets every app-decided field; a public
+    // /v1/images/generations host gets standard OpenAI fields only (it 400s on steps, seed, ...).
+    const extensions = acceptsServerExtensions(server.endpoint, server.modelManagement);
     const parameters = imageParameterBody(input);
-    // OpenRouter's chat route takes the prompt (and a seed) only; it records only what it sent.
+    // Each route records only what it sent. OpenRouter's chat route takes the prompt and a seed;
+    // a standard server takes `size`, so only width / height reach it.
     const used: RemoteImageUsed = openRouter
       ? (parameters.used.seed !== undefined ? { seed: parameters.used.seed } : {})
-      : parameters.used;
+      : extensions
+        ? parameters.used
+        : {
+            ...(parameters.used.width !== undefined && { width: parameters.used.width }),
+            ...(parameters.used.height !== undefined && { height: parameters.used.height }),
+          };
     const payload = await request({
       server,
       path: openRouter ? '/v1/chat/completions' : '/v1/images/generations',
@@ -289,12 +299,12 @@ export const remoteMediaRuntime = {
           : {
               model: requiredModel(server, 'image'),
               prompt: input.prompt,
-              // Kept for plain OpenAI-compatible servers; width/height carry the same values.
+              // Standard OpenAI field; on the user's server width/height carry the same values.
               size: sizeOf(input),
-              ...parameters.body,
+              ...(extensions ? parameters.body : {}),
               response_format: 'b64_json',
               ...(desktop ? { async: true } : {}),
-              ...(options.override ? { allow_unsafe_memory_override: true } : {}),
+              ...(extensions && options.override ? { allow_unsafe_memory_override: true } : {}),
             }),
       },
       signal: options.signal,

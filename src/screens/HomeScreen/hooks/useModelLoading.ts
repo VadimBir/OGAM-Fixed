@@ -66,7 +66,7 @@ export const useModelLoading = ({
     setLoadingState({ isLoading: true, type: 'image', modelName: null });
     await waitForOverlay();
     try {
-      await activeModelService.unloadImageModel();
+      await activeModelService.unloadImageModel(true); // free RAM, keep the selection (lazy reload)
     } catch (_error) {
       setAlertState(showAlert('Error', 'Failed to unload model'));
     } finally {

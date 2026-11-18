@@ -60,7 +60,8 @@ const maybe = mod ? describe : describe.skip;
 const VALID_QR = 'ABCD2345';
 
 maybe('PairingCodeSheet scan-to-pair', () => {
-  const { PairingCodeSheet } = mod!;
+  // describe.skip still runs this body to collect tests, so it must not dereference a null mod.
+  const PairingCodeSheet = mod?.PairingCodeSheet as SheetModule['PairingCodeSheet'];
 
   const baseProps = () => ({
     visible: true,

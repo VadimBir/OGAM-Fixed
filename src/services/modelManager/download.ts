@@ -413,6 +413,8 @@ async function startBgDownload(opts: StartBgDownloadOpts): Promise<BackgroundDow
 
   backgroundDownloadMetadataCallback?.(downloadInfo.downloadId as any, {
     modelId, fileName: file.name, quantization: file.quantization, author,
+    // Same on-disk name the native metadataJson carries, so a sync of this persisted row lands on it.
+    ...(localFileName ? { localFileName } : {}),
     totalBytes: combinedTotalBytes, mainFileSize: file.size,
     mmProjFileName: mmProjLocalPath ? mmProjLocalPath.split('/').pop() : file.mmProjFile?.name, mmProjFileSize: mmProjSize,
     mmProjLocalPath, mmProjDownloadId: mmProjDownloadId as any,

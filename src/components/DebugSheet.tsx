@@ -89,9 +89,9 @@ export const DebugSheet: React.FC<DebugSheetProps> = ({
           </View>
         </View>
 
-        {/* Active Project */}
+        {/* Active Character (project card) */}
         <View style={styles.debugSection}>
-          <Text style={styles.debugSectionTitle}>Active Project</Text>
+          <Text style={styles.debugSectionTitle}>Active Character</Text>
           <View style={styles.debugRow}>
             <Text style={styles.debugLabel}>Name:</Text>
             <Text style={styles.debugValue}>{activeProject?.name || 'Default'}</Text>

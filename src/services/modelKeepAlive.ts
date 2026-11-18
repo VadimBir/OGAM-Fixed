@@ -35,6 +35,7 @@ export function startModelKeepAliveSync(): () => void {
   // True while the models are being unloaded after a native stop request: apply() must not
   // restart the service the user just stopped (models still read "loaded" until unload ends).
   let stopping = false;
+  let disposed = false;
   const apply = () => {
     if (stopping) return;
     const enabled = useAppStore.getState().settings?.keepModelsAlive ?? true;
@@ -61,13 +62,17 @@ export function startModelKeepAliveSync(): () => void {
       stopping = true;
       activeModelService.unloadAllModels(true)
         .catch(e => logger.warn('[KEEPALIVE] unload after stop request failed', e))
-        .finally(() => { stopping = false; });
+        // Re-project once the unload settles: model notifications during the unload were ignored, so a
+        // failed (or partial) unload left the service off while a model stayed resident until some
+        // unrelated store change. A successful unload projects null (= already off): no restart.
+        .finally(() => { stopping = false; if (!disposed) apply(); });
     },
   );
   const unsubModels = activeModelService.subscribe(apply);
   const unsubStore = useAppStore.subscribe(apply);
   apply();
   activeUnsubscribe = () => {
+    disposed = true;
     stopSub.remove();
     unsubModels();
     unsubStore();

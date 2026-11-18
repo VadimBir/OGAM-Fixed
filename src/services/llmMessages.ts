@@ -80,20 +80,67 @@ function buildMediaParts(message: Message, supportsAudio: boolean): RNLlamaMessa
   return parts;
 }
 
-export function buildOAIMessages(messages: Message[], supportsAudio = false): RNLlamaOAICompatibleMessage[] {
-  return messages.filter(m => !m.isSystemInfo).map((message) => {
+/**
+ * A tool result as text, in the <tool_response> wrapper Qwen's chat template itself renders for a
+ * role:'tool' message (and the text-hint prompt names). The Qwen3 template also treats a user message
+ * that starts with <tool_response> and ends with </tool_response> as a tool turn, not a new user query.
+ */
+export function toolResponseText(toolName: string | undefined, content: string): string {
+  return `<tool_response>\n[${toolName || 'tool'}] ${content}\n</tool_response>`;
+}
+
+export interface OAIMessageOptions {
+  /** Send tool results as role:'tool' (tool_call_id + name) for the chat template to render natively.
+   *  Only for templates that render a tool role; default false = user-role <tool_response> text, which
+   *  every template accepts. */
+  toolRole?: boolean;
+}
+
+type OAIOutMessage = RNLlamaOAICompatibleMessage & { tool_call_id?: string; name?: string };
+
+export function buildOAIMessages(
+  messages: Message[],
+  supportsAudio = false,
+  opts: OAIMessageOptions = {},
+): RNLlamaOAICompatibleMessage[] {
+  const out: OAIOutMessage[] = [];
+  // Index in `out` of the user message holding the current run of tool results (user-role fallback).
+  let toolRunIdx = -1;
+  for (const message of messages.filter(m => !m.isSystemInfo)) {
     if (message.role === 'tool') {
-      const label = message.toolName || 'tool';
-      return { role: 'user' as const, content: `[Tool Result: ${label}]\n${message.content}\n[End Tool Result]` };
+      if (opts.toolRole) {
+        out.push({
+          role: 'tool',
+          content: message.content,
+          ...(message.toolCallId ? { tool_call_id: message.toolCallId } : {}),
+          ...(message.toolName ? { name: message.toolName } : {}),
+        });
+        continue;
+      }
+      const text = toolResponseText(message.toolName, message.content);
+      // Several results of one round go in ONE user message: two user turns in a row are rejected by
+      // strict-alternation templates (Gemma, Mistral).
+      if (toolRunIdx >= 0) out[toolRunIdx].content = `${out[toolRunIdx].content as string}\n${text}`;
+      else {
+        out.push({ role: 'user', content: text });
+        toolRunIdx = out.length - 1;
+      }
+      continue;
     }
-    if (message.role === 'assistant' && message.toolCalls?.length) {
-      const toolCallText = message.toolCalls.map(formatToolCallAsText).join('\n');
-      return { role: 'assistant' as const, content: message.content ? `${message.content}\n${toolCallText}` : toolCallText };
-    }
-    const hasImage =
-      message.role === 'user' && modelImageAttachments(message.attachments).length > 0;
-    const hasAudio = supportsAudio && message.role === 'user' && modelAudioAttachments(message.attachments).length > 0;
-    if (!hasImage && !hasAudio) return { role: message.role, content: message.content };
-    return { role: message.role, content: buildMediaParts(message, supportsAudio) };
-  });
+    toolRunIdx = -1;
+    out.push(convertMessage(message, supportsAudio));
+  }
+  return out;
+}
+
+function convertMessage(message: Message, supportsAudio: boolean): RNLlamaOAICompatibleMessage {
+  if (message.role === 'assistant' && message.toolCalls?.length) {
+    const toolCallText = message.toolCalls.map(formatToolCallAsText).join('\n');
+    return { role: 'assistant' as const, content: message.content ? `${message.content}\n${toolCallText}` : toolCallText };
+  }
+  const hasImage =
+    message.role === 'user' && modelImageAttachments(message.attachments).length > 0;
+  const hasAudio = supportsAudio && message.role === 'user' && modelAudioAttachments(message.attachments).length > 0;
+  if (!hasImage && !hasAudio) return { role: message.role, content: message.content };
+  return { role: message.role, content: buildMediaParts(message, supportsAudio) };
 }

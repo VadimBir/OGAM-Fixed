@@ -1,5 +1,5 @@
-import React from 'react';
-import { View, Text, TextInput, TouchableOpacity, ScrollView } from 'react-native';
+import React, { useState } from 'react';
+import { View, Text, TextInput, TouchableOpacity, ScrollView, Platform } from 'react-native';
 import { LoadingDots } from '../../components/LoadingDots';
 import Icon from 'react-native-vector-icons/Feather';
 import MaterialIcon from 'react-native-vector-icons/MaterialIcons';
@@ -18,6 +18,7 @@ import { formatBytes, getImageModelCompatibility, hfModelToDescriptor } from './
 import { modelDownloadService } from '../../services/modelDownloadService';
 import { uniformDownloadId } from '../../services/modelDownloadService/uniformId';
 import logger from '../../utils/logger';
+import { CivitaiSection } from './CivitaiSection';
 
 type Props = Pick<ModelsScreenViewModel,
   | 'imageSearchQuery' | 'setImageSearchQuery'
@@ -35,7 +36,10 @@ type Props = Pick<ModelsScreenViewModel,
   | 'handleDownloadImageModel' | 'handleCancelImageDownload' | 'loadHFModels'
   | 'clearImageFilters' | 'setUserChangedBackendFilter'
   | 'isRecommendedModel'
->;
+> & Partial<Pick<ModelsScreenViewModel, 'setAlertState' | 'downloadedSearchMatches'>>;
+
+/** Where the image tab lists models from: the converted NPU/GPU catalog, or a Civitai search. */
+type ImageSource = 'catalog' | 'civitai';
 
 interface ImageModelCardProps {
   model: HFImageModel & { _coreml?: boolean; _coremlFiles?: any[] };
@@ -140,6 +144,7 @@ interface ScrollContentProps {
   handleDownloadImageModel: Props['handleDownloadImageModel'];
   handleCancelImageDownload: Props['handleCancelImageDownload'];
   imageSearchQuery: string;
+  downloadedSearchMatches: number;
 }
 
 const ImageModelsScrollContent: React.FC<ScrollContentProps> = ({
@@ -152,13 +157,17 @@ const ImageModelsScrollContent: React.FC<ScrollContentProps> = ({
   hfModelsLoading, hfModelsError, loadHFModels,
   filteredHFModels, availableHFModels,
   isRecommendedModel, handleDownloadImageModel, handleCancelImageDownload,
-  imageSearchQuery,
+  imageSearchQuery, downloadedSearchMatches,
 }) => {
   const { colors } = useTheme();
   const styles = useThemedStyles(createStyles);
 
   let emptyMessage: string;
-  if (imageSearchQuery.trim()) {
+  if (imageSearchQuery.trim() && downloadedSearchMatches > 0) {
+    emptyMessage = downloadedSearchMatches === 1
+      ? 'The matching model is already downloaded'
+      : `All ${downloadedSearchMatches} matching models are already downloaded`;
+  } else if (imageSearchQuery.trim()) {
     emptyMessage = 'No models match your search';
   } else if (hasActiveImageFilters) {
     emptyMessage = 'No models match your filters';
@@ -260,13 +269,41 @@ export const ImageModelsTab: React.FC<Props> = ({
   imageRec, ramGB, imageRecommendation,
   handleDownloadImageModel, handleCancelImageDownload, loadHFModels,
   clearImageFilters, setUserChangedBackendFilter,
-  isRecommendedModel,
+  isRecommendedModel, setAlertState, downloadedSearchMatches = 0,
 }) => {
   const { colors } = useTheme();
   const styles = useThemedStyles(createStyles);
+  const [source, setSource] = useState<ImageSource>('catalog');
+  // Civitai files run on stable-diffusion.cpp, which this app has on Android only.
+  const civitaiAvailable = Platform.OS === 'android' && !!setAlertState;
+
+  const sourceSwitch = civitaiAvailable ? (
+    <View style={[styles.imageModelsSection, styles.filterChipWrap]}>
+      {([['catalog', 'NPU / GPU models'], ['civitai', 'Civitai']] as const).map(([key, label]) => (
+        <TouchableOpacity
+          key={key}
+          testID={`image-source-${key}`}
+          style={[styles.filterChip, source === key && styles.filterChipActive]}
+          onPress={() => setSource(key)}
+        >
+          <Text style={[styles.filterChipText, source === key && styles.filterChipTextActive]}>{label}</Text>
+        </TouchableOpacity>
+      ))}
+    </View>
+  ) : null;
+
+  if (civitaiAvailable && source === 'civitai' && setAlertState) {
+    return (
+      <View style={styles.imageTabContent}>
+        {sourceSwitch}
+        <CivitaiSection setAlertState={setAlertState} />
+      </View>
+    );
+  }
 
   return (
     <View style={styles.imageTabContent}>
+      {sourceSwitch}
       <View style={styles.imageModelsSection}>
         <View style={[styles.searchContainer, styles.searchContainerNoPadding]}>
           <TextInput
@@ -327,6 +364,7 @@ export const ImageModelsTab: React.FC<Props> = ({
         handleDownloadImageModel={handleDownloadImageModel}
         handleCancelImageDownload={handleCancelImageDownload}
         imageSearchQuery={imageSearchQuery}
+        downloadedSearchMatches={downloadedSearchMatches}
       />
     </View>
   );

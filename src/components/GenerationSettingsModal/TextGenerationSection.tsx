@@ -9,16 +9,21 @@ import {
   useTextGenerationSettings,
 } from '../../hooks/useTextGenerationSettings';
 import {
+  AdvancedSamplingSection,
   BackendSelector,
   BatchSizeSlider,
   CpuThreadsSlider,
   FlashAttentionToggle,
   KvCacheTypeToggle,
   LiteRTBackendSelector,
+  MemoryReadout,
+  MmapModeSelector,
   ModelLoadingModeSelector,
   ShowGenerationDetailsToggle,
   SpeculativeDecodingToggle,
   ThinkingBudgetSelector,
+  UbatchSlider,
+  VCacheTypeToggle,
 } from '../settings/textGenAdvancedSections';
 
 const ChatSettingSlider: React.FC<{ setting: NumericSettingModel }> = ({
@@ -33,7 +38,7 @@ export const TextGenerationSection: React.FC = () => {
     ? [liteRT.temperature, liteRT.maxTokens]
     : [llama.temperature, llama.contextLength, llama.maxTokens];
   const advancedSettings = isLiteRT
-    ? [liteRT.topP, toolCalls]
+    ? [liteRT.topP, liteRT.topK, toolCalls]
     : [llama.topP, llama.repeatPenalty, toolCalls];
 
   return (
@@ -56,16 +61,22 @@ export const TextGenerationSection: React.FC = () => {
           {isLiteRT ? (
             <>
               <LiteRTBackendSelector />
+              <MemoryReadout />
               <ModelLoadingModeSelector />
             </>
           ) : (
             <>
+              <AdvancedSamplingSection compact />
               <CpuThreadsSlider />
               <BatchSizeSlider />
+              <UbatchSlider />
               <BackendSelector />
               <FlashAttentionToggle />
               <SpeculativeDecodingToggle />
               <KvCacheTypeToggle />
+              <VCacheTypeToggle />
+              <MmapModeSelector />
+              <MemoryReadout />
               <ModelLoadingModeSelector />
             </>
           )}

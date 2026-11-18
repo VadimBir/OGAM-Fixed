@@ -23,7 +23,11 @@ import type {
   OpenAIConfig,
   OpenAIStreamState,
 } from './openAICompatibleTypes';
-import { remoteApiUrl, remoteAuthorizationHeaders } from '../remoteTransportPolicy';
+import {
+  acceptsServerExtensions,
+  remoteApiUrl,
+  remoteAuthorizationHeaders,
+} from '../remoteTransportPolicy';
 
 export type { OpenAIChatMessage, OpenAIConfig } from './openAICompatibleTypes';
 
@@ -39,19 +43,64 @@ export function isOllamaEndpoint(endpoint: string): boolean {
 /**
  * Sampling fields the app decides and the server must obey (llama-server / OpenAI-compatible names).
  * An unset option is not sent, so the server default applies only where the app has no value.
+ * `extensions` = the server takes non-OpenAI fields (top_k, repeat_penalty); a strict server 400s on them.
+ * `llamaServer` = the user's own server (acceptsServerExtensions): every value is sent, plus the
+ * llama.cpp-only fields (min_p, typical_p, repeat_last_n, DRY, XTC, mirostat).
+ * max_tokens is never sent: settings.maxTokens is the on-device cap (default 2048) and cut reasoning
+ * models short on a remote server, so the remote server owns the output limit.
  */
-export function openAISamplingParams(options: GenerationOptions): Record<string, unknown> {
-  const stop = options.stopSequences?.filter(sequence => sequence.length > 0) ?? [];
+export function openAISamplingParams(
+  options: GenerationOptions,
+  extensions: boolean,
+  llamaServer: boolean = false,
+): Record<string, unknown> {
+  const allStops = options.stopSequences?.filter(sequence => sequence.length > 0) ?? [];
+  // The OpenAI API takes at most 4 stop sequences; a strict host 400s on more. The user's own
+  // llama-server takes the whole list.
+  const stop = llamaServer ? allStops : allStops.slice(0, OPENAI_MAX_STOP_SEQUENCES);
+  // Third-party hosts: presence / frequency are standard OpenAI fields, sent only when they do
+  // something (0 = the OpenAI default = off), and a seed only when fixed (unset = random there).
+  // The user's own server gets every value, so a server-side default never decides one.
+  const nonZero = (v: number | undefined): v is number => v !== undefined && v !== 0;
   return {
     ...(options.temperature !== undefined && { temperature: options.temperature }),
     ...(options.topP !== undefined && { top_p: options.topP }),
-    ...(options.topK !== undefined && { top_k: options.topK }),
-    ...(options.repeatPenalty !== undefined && { repeat_penalty: options.repeatPenalty }),
-    ...(options.seed !== undefined && { seed: options.seed }),
+    ...(extensions && options.topK !== undefined && { top_k: options.topK }),
+    ...(extensions && options.repeatPenalty !== undefined && { repeat_penalty: options.repeatPenalty }),
+    ...((llamaServer ? options.presencePenalty !== undefined : nonZero(options.presencePenalty)) && { presence_penalty: options.presencePenalty }),
+    ...((llamaServer ? options.frequencyPenalty !== undefined : nonZero(options.frequencyPenalty)) && { frequency_penalty: options.frequencyPenalty }),
+    // llama-server: seed -1 = random (tools/server/README.md "Default: `-1`, which is a random seed").
+    ...(options.seed !== undefined && (llamaServer || options.seed >= 0) && { seed: options.seed }),
+    ...(llamaServer && llamaServerSamplingExtras(options)),
     ...(stop.length > 0 && { stop }),
-    // The app's max-tokens setting is the output cap. Sent only when it is a positive number.
-    ...(typeof options.maxTokens === 'number' && options.maxTokens > 0 && { max_tokens: options.maxTokens }),
   };
+}
+
+const OPENAI_MAX_STOP_SEQUENCES = 4;
+
+/**
+ * llama-server sampling fields beyond the OpenAI set (llama.cpp tools/server/README.md, POST
+ * /completion options; /v1/chat/completions takes the same llama.cpp-specific fields). Sent only to
+ * the user's own server (acceptsServerExtensions): a third-party host 400s on unknown fields.
+ */
+export function llamaServerSamplingExtras(options: GenerationOptions): Record<string, unknown> {
+  const pick: Array<[string, number | undefined]> = [
+    ['min_p', options.minP],
+    ['typical_p', options.typicalP],
+    ['repeat_last_n', options.penaltyLastN],
+    ['dry_multiplier', options.dryMultiplier],
+    ['dry_base', options.dryBase],
+    ['dry_allowed_length', options.dryAllowedLength],
+    ['dry_penalty_last_n', options.dryPenaltyLastN],
+    ['xtc_probability', options.xtcProbability],
+    ['xtc_threshold', options.xtcThreshold],
+    ['mirostat', options.mirostat],
+    ['mirostat_tau', options.mirostatTau],
+    ['mirostat_eta', options.mirostatEta],
+  ];
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of pick) if (value !== undefined) out[key] = value;
+  return out;
 }
 
 /**
@@ -115,14 +164,17 @@ export class OpenAICompatibleProvider implements LLMProvider {
     thinkingEnabled: boolean
   ): Record<string, unknown> {
     const isOpenRouter = new URL(this.config.endpoint).hostname === 'openrouter.ai';
+    // A server the user runs (LAN / Tailscale) takes the llama.cpp fields; a public host gets
+    // standard OpenAI fields only. OpenRouter keeps top_k / repeat_penalty, as before.
+    const localServer = acceptsServerExtensions(this.config.endpoint);
     return {
       model: this.config.modelId,
       messages: openaiMessages,
       stream: true,
-      // The app owns every sampling parameter, max_tokens included (settings.maxTokens).
-      ...openAISamplingParams(options),
+      // The app owns every sampling parameter; the output cap stays with the server (no max_tokens).
+      ...openAISamplingParams(options, localServer || isOpenRouter, localServer),
       // llama-server: reuse the KV cache of the shared prompt prefix across turns.
-      ...(!isOpenRouter && { cache_prompt: true }),
+      ...(localServer && { cache_prompt: true }),
       ...(this.modelCapabilities.supportsToolCalling && options.tools && options.tools.length > 0 && {
         tools: options.tools,
         tool_choice: 'auto',
@@ -169,9 +221,11 @@ export class OpenAICompatibleProvider implements LLMProvider {
 
       logger.log(`[Provider] generate — model=${this.config.modelId}, isOllama=${isOllamaEndpoint(this.config.endpoint)}, thinking=${thinkingEnabled}, tools=${options.tools?.length || 0}, messages=${openaiMessages.length}`);
 
-      // Route Ollama through its native /api/chat which supports think: true/false
+      // Route Ollama through its native /api/chat which supports think: true/false.
+      // Awaited: a bare `return` ran `finally` at once, nulled this.abortController, and
+      // stopGeneration() could no longer abort the Ollama stream.
       if (isOllamaEndpoint(this.config.endpoint)) {
-        return generateOllamaChatImpl(openaiMessages, {
+        await generateOllamaChatImpl(openaiMessages, {
           options, callbacks, signal,
           endpoint: this.config.endpoint,
           modelId: this.config.modelId,
@@ -180,6 +234,7 @@ export class OpenAICompatibleProvider implements LLMProvider {
           abort: () => controller.abort(),
           headers: remoteAuthorizationHeaders(this.config.endpoint, this.config.apiKey),
         });
+        return;
       }
 
       const requestBody = this.buildRequestBody(openaiMessages, options, thinkingEnabled);

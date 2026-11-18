@@ -52,6 +52,10 @@ export function resolveSdCppEffectiveSize(params: { width?: number | null; heigh
   };
 }
 
+function positiveDimension(px: number | null | undefined): number | undefined {
+  return typeof px === 'number' && Number.isFinite(px) && px > 0 ? Math.round(px) : undefined;
+}
+
 export interface EngineImageSettings {
   imageWidth?: number | null;
   imageHeight?: number | null;
@@ -59,6 +63,14 @@ export interface EngineImageSettings {
   imageScheduler?: string;
   imageLoras?: ImageLora[];
   imageSdVaeTiling?: boolean;
+  /** CLIP skip; <= 0 = model default. */
+  imageClipSkip?: number;
+}
+
+/** The positive integer CLIP skip, or undefined (= model default). */
+export function clipSkipOf(settings: { imageClipSkip?: number | null }): number | undefined {
+  const v = settings.imageClipSkip;
+  return typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.round(v) : undefined;
 }
 
 export interface EngineImageRequest {
@@ -72,7 +84,8 @@ export interface EngineImageRequest {
  * detection, generate_image tool call, retry) reaches here through imageGenerationService, so the
  * params always match the engine the model's format selected:
  *  - sdcpp: free W×H (64-px grid, no 256 floor), any sd.cpp sampler/scheduler, enabled LoRAs.
- *  - LocalDream: the existing square size policy; sampler only when the core supports it.
+ *  - LocalDream: the requested W×H, else the square size policy; sampler only when the core
+ *    supports it.
  */
 export function resolveEngineImageRequest(
   model: { backend?: string },
@@ -95,15 +108,24 @@ export function resolveEngineImageRequest(
         scheduler: (params.scheduler ?? settings.imageScheduler ?? '').trim(),
         loras,
         vaeTiling: settings.imageSdVaeTiling ?? true,
+        // sd.cpp JNI clipSkip slot (SdCppNative.kt nativeGenerate; sdcpp_jni.cpp: <= 0 -> -1 model default).
+        ...(clipSkipOf(settings) ? { clipSkip: clipSkipOf(settings) } : {}),
       },
     };
   }
   const localDreamSampler = (LOCALDREAM_SAMPLERS as readonly string[]).includes(sampler)
     ? sampler
     : undefined;
+  // An explicit request (generate_image tool, 64-512, W and H independent) is honoured; without one
+  // the model's square size policy applies. imageGenerationService then asks the loaded backend's
+  // planner (LocalDreamModule.getEffectiveImageSize: NPU 512 or a resolution-patch size, MNN square
+  // 128-512 on a 64 px grid) for the size it really renders.
+  const askedWidth = positiveDimension(params.width);
+  const askedHeight = positiveDimension(params.height);
+  const width = askedWidth ?? askedHeight ?? squareSize;
   return {
-    width: squareSize,
-    height: squareSize,
+    width,
+    height: askedHeight ?? width,
     engineOptions: localDreamSampler ? { sampler: localDreamSampler } : {},
   };
 }

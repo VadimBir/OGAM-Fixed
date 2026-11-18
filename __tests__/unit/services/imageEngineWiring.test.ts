@@ -9,6 +9,7 @@ export {};
 
 const mockLocalDreamModule = {
   generateImage: jest.fn(),
+  cancelGeneration: jest.fn(),
   getConstants: jest.fn(),
   getEffectiveImageSize: jest.fn(),
 };
@@ -64,6 +65,32 @@ describe('LocalDream: use_opencl reaches the native request', () => {
     expect(mockLocalDreamModule.generateImage).toHaveBeenCalledWith(
       expect.objectContaining({ useOpenCL: false }),
     );
+  });
+});
+
+// Falsify: one shared `generating` boolean -> the cancelled run's finally frees the new run.
+describe('LocalDream run ownership across a cancel', () => {
+  it('the cancelled run ending later does not free the run started after the cancel', async () => {
+    let service: any;
+    jest.isolateModules(() => {
+      service = require('../../../src/services/localDreamGenerator').localDreamGeneratorService;
+    });
+    let rejectFirst!: (e: unknown) => void;
+    let resolveSecond!: (v: unknown) => void;
+    mockLocalDreamModule.cancelGeneration.mockResolvedValue(true);
+    mockLocalDreamModule.generateImage
+      .mockImplementationOnce(() => new Promise((_, rej) => { rejectFirst = rej; }))
+      .mockImplementationOnce(() => new Promise(res => { resolveSecond = res; }));
+    const first = service.generateImage({ prompt: 'one' }).catch((e: any) => e);
+    await service.cancelGeneration();
+    expect(await service.isGenerating()).toBe(false);
+    const second = service.generateImage({ prompt: 'two' });
+    rejectFirst(new Error('Generation cancelled'));
+    await first;
+    expect(await service.isGenerating()).toBe(true);
+    resolveSecond(nativeResult);
+    await expect(second).resolves.toMatchObject({ id: 'i' });
+    expect(await service.isGenerating()).toBe(false);
   });
 });
 

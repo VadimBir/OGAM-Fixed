@@ -6,7 +6,7 @@ import { getActiveEngineService, prepareActiveConversation } from './engines';
 import { useAppStore, useChatStore, useRemoteServerStore } from '../stores';
 import type { Message, GenerationMeta } from '../types';
 import { buildLiteRTHistory } from './generationToolLoop';
-import { effectiveCacheType } from './llmHelpers';
+import { effectiveCacheType, resolveCacheTypeV } from './llmHelpers';
 import { modelInputImageUris, modelInputAudioUris } from './modelMedia';
 import { clearModelFailure } from './modelFailureHandler';
 import type { ToolResult } from './tools/types';
@@ -171,12 +171,16 @@ function buildBaseGenerationMeta(svc: any): GenerationMeta {
     decodeTokensPerSecond: perf.lastDecodeTokensPerSecond,
     timeToFirstToken: perf.lastTimeToFirstToken,
     tokenCount: perf.lastTokenCount,
-    cacheType: effectiveCacheType(
-      settings.inferenceBackend,
-      settings.cacheType,
-    ),
+    cacheType: kvCacheLabel(settings),
     truncated: perf.lastTruncated,
   };
+}
+
+/** "q8_0", or "q8_0/f16" (K/V) when the V cache type was split from K. */
+function kvCacheLabel(settings: { inferenceBackend?: string; cacheType?: string; cacheTypeV?: string }): string {
+  const k = effectiveCacheType(settings.inferenceBackend, settings.cacheType);
+  const v = effectiveCacheType(settings.inferenceBackend, resolveCacheTypeV(k, settings.cacheTypeV));
+  return k === v ? k : `${k}/${v}`;
 }
 
 function handleStreamChunk(
@@ -361,6 +365,7 @@ async function runLiteRTResponseImpl(
     await liteRTService.prepareConversation(conversationId, systemPrompt, {
       samplerConfig: {
         temperature: settings.liteRTTemperature,
+        topK: settings.liteRTTopK ?? 40,
         topP: settings.liteRTTopP,
       },
       history,

@@ -3,7 +3,7 @@
  * sliding window, vocab) — the single formula both the pre-load fit check (llmSafetyChecks) and
  * the residency/budget estimate (activeModelService/memory) use, so the two gates cannot disagree.
  *
- * KV = layers x ctx x kvHeads x (keyDim + valueDim) x bytes/element (f16 2, q8_0 34/32, q4_0 18/32).
+ * KV = layers x ctx x kvHeads x (keyDim x bytes/elem(K) + valueDim x bytes/elem(V)) (f16 2, q8_0 34/32, q4_0 18/32).
  * Compute = (vocab + embedding) x nBatch x 4 (logits + activations of one ubatch, f32).
  */
 
@@ -24,7 +24,8 @@ export function kvBytesPerElement(cacheType: string | undefined): number {
 /** Returns null when the metadata lacks the fields the formula needs (caller falls back). */
 export function estimateLlamaMemory(
   metadata: Record<string, unknown>,
-  opts: { ctxLen: number; cacheType: string | undefined; nBatch: number; weightsBytes: number },
+  /** cacheType = K cache type (and V's when cacheTypeV is absent). */
+  opts: { ctxLen: number; cacheType: string | undefined; cacheTypeV?: string; nBatch: number; weightsBytes: number },
 ): LlamaMemoryEstimate | null {
   const architecture = metadata['general.architecture'];
   if (typeof architecture !== 'string') return null;
@@ -42,7 +43,8 @@ export function estimateLlamaMemory(
   const vocabulary = number('vocab_size');
   if (!blocks || !kvHeads || !embedding || !keyLength || !valueLength) return null;
   const context = Math.min(opts.ctxLen, number('attention.sliding_window') ?? opts.ctxLen);
-  const kvBytes = blocks * context * kvHeads * (keyLength + valueLength) * kvBytesPerElement(opts.cacheType);
+  const kvBytes = blocks * context * kvHeads *
+    (keyLength * kvBytesPerElement(opts.cacheType) + valueLength * kvBytesPerElement(opts.cacheTypeV ?? opts.cacheType));
   const computeBytes = ((vocabulary ?? 0) + embedding) * opts.nBatch * 4;
   const totalBytes = Math.ceil((opts.weightsBytes + kvBytes + computeBytes) * 1.1);
   return { kvBytes, computeBytes, totalBytes, context };

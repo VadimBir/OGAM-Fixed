@@ -1,97 +1,115 @@
 import { ToolDefinition } from './types';
 import { imagePromptDescription } from './imageTool';
 
+/**
+ * Model-facing tool text. Written for ~3B on-device models: one imperative "when to use" sentence,
+ * the hard limits, and ONE example argument object (`example`). No call syntax here: native paths
+ * (llama.rn Jinja, LiteRT, OpenAI/Ollama `tools`) wrap the call in the template's own format, and
+ * the text-hint path (buildToolSystemPromptHint) adds the <tool_call> line itself. Ranges the handler
+ * clamps are stated in the descriptions, not as JSON-Schema keywords: llama.cpp / remote grammar
+ * compilers reject some keywords (see isToolGrammarError in generationToolLoop).
+ */
 export const AVAILABLE_TOOLS: ToolDefinition[] = [
   {
     id: 'web_search',
     name: 'web_search',
     displayName: 'Web Search',
-    description: 'Search the live web and return real-time result titles, snippets, and URLs. Use this for any question about current events, prices, weather, news, or anything that requires up-to-date information. When the snippet is insufficient, call read_url on the most relevant result URL to get the full page content.',
+    description: 'Search the web. Use for news, prices, weather, events or any fact that may have changed. Returns titles, snippets and URLs.',
     icon: 'globe',
     requiresNetwork: true,
     parameters: {
       query: {
         type: 'string',
-        description: 'Search query',
+        description: 'A few search words.',
         required: true,
       },
     },
+    example: { query: 'weather in Paris today' },
   },
   {
     id: 'calculator',
     name: 'calculator',
     displayName: 'Calculator',
-    description: 'Evaluate math expressions',
+    description: 'Compute arithmetic exactly. Use instead of doing math in your head. Only numbers, + - * / ^ % and parentheses.',
     icon: 'hash',
     parameters: {
       expression: {
         type: 'string',
-        description: 'Math expression',
+        description: 'Math expression, e.g. "(12.5*3)/4".',
         required: true,
       },
     },
+    example: { expression: '(12.5*3)/4' },
   },
   {
     id: 'get_current_datetime',
     name: 'get_current_datetime',
     displayName: 'Date & Time',
-    description: 'Get current date and time',
+    description: 'Get the current date and time. Use when the user asks the time, or the time in a place.',
     icon: 'clock',
     parameters: {
       timezone: {
         type: 'string',
-        description: 'IANA timezone, e.g. America/New_York',
+        description: 'Optional IANA timezone, e.g. "America/New_York". Default: this phone.',
       },
     },
+    example: {},
   },
   {
     id: 'get_device_info',
     name: 'get_device_info',
     displayName: 'Device Info',
-    description: 'Get device hardware info',
+    description: 'Read this phone\'s battery, storage or memory.',
     icon: 'smartphone',
     parameters: {
       info_type: {
         type: 'string',
-        description: 'Info type',
+        description: 'What to read. Default: all.',
         enum: ['battery', 'storage', 'memory', 'all'],
       },
     },
+    example: { info_type: 'battery' },
   },
   {
     id: 'search_knowledge_base',
     name: 'search_knowledge_base',
     displayName: 'Knowledge Base',
-    description: 'Search uploaded project documents',
+    description: 'Search the documents uploaded to this project. Use when the question is about the user\'s files.',
     icon: 'book-open',
     parameters: {
       query: {
         type: 'string',
-        description: 'Search query',
+        description: 'A few search words.',
         required: true,
       },
     },
+    example: { query: 'refund policy' },
   },
   {
     id: 'read_url',
     name: 'read_url',
     displayName: 'URL Reader',
-    description: 'Fetch the full live content of any URL. Use this after web_search to read the complete text of a result page, or directly when the user shares a link.',
+    description: 'Read the full text of a web page. Use when the user shares a link, or when a search snippet is not enough.',
     icon: 'link',
     requiresNetwork: true,
     parameters: {
       url: {
         type: 'string',
-        description: 'Full URL to fetch',
+        description: 'Full URL starting with http:// or https://.',
         required: true,
       },
     },
+    example: { url: 'https://example.com/article' },
   },
   {
     id: 'generate_image',
     name: 'generate_image',
     displayName: 'Generate Image',
-    description: 'Create an image and show it in the chat. Call it when the user asks to draw, paint, render or make an image, photo, logo or artwork. Only set optional arguments the user asked for; omitted ones use the user\'s settings.',
+    description:
+      'Make an image and show it in the chat. Call it at once when the user asks to draw, paint, ' +
+      'render or create a picture, photo, logo or artwork: do not ask first and do not describe the ' +
+      'image in text instead. Only prompt is needed; leave the other arguments out unless the user ' +
+      'asked for them (the app settings are used). After the result, reply with one short sentence.',
     icon: 'image',
     parameters: {
       prompt: {
@@ -100,20 +118,23 @@ export const AVAILABLE_TOOLS: ToolDefinition[] = [
         description: 'English description: subject, setting, style, lighting.',
         required: true,
       },
-      negative_prompt: { type: 'string', description: 'Things to avoid, e.g. "blurry, text".' },
-      width: { type: 'integer', description: 'Pixels, 64-512, multiple of 64.' },
-      height: { type: 'integer', description: 'Pixels, 64-512, multiple of 64.' },
-      steps: { type: 'integer', description: 'Denoising steps, 1-50. More = slower.' },
-      guidance: { type: 'number', description: 'Prompt strength (CFG), 1-20.' },
-      seed: { type: 'integer', description: 'Same seed = same image. Omit for random.' },
-      sampler: { type: 'string', description: 'Sampler name, e.g. "euler_a".' },
+      width: { type: 'integer', description: 'Optional. Pixels, 64-512, multiple of 64. Default: app setting.' },
+      height: { type: 'integer', description: 'Optional. Pixels, 64-512, multiple of 64. Default: app setting.' },
+      steps: { type: 'integer', description: 'Optional. 1-50; more = slower, finer. Default: app setting.' },
+      guidance: { type: 'number', description: 'Optional. How strictly to follow the prompt, 1-20. Default: app setting.' },
+      seed: { type: 'integer', description: 'Optional. Same seed = same image. Default: random.' },
+      negative_prompt: { type: 'string', description: 'Optional. Things to leave out, e.g. "blurry, text".' },
     },
+    example: { prompt: 'a red fox in a snowy forest, golden hour' },
   },
   {
     id: 'add_calendar_event',
     name: 'add_calendar_event',
     displayName: 'Add to Calendar',
-    description: 'Add an event or reminder to the user\'s phone calendar. Call this when the user asks to schedule, remind, book, or put something in the calendar. Resolve relative times ("tomorrow at 5", "in 2 hours") against the current local date and time and pass LOCAL times in ISO format. Make exactly one call per event. Every event created is logged so the user can undo it.',
+    description:
+      'Add an event or reminder to the phone calendar. Use when the user asks to schedule, remind or ' +
+      'book something. Turn "tomorrow at 5" or "in 2 hours" into a LOCAL ISO time using the current ' +
+      'date and time. One call per event. The user can undo it.',
     icon: 'calendar',
     parameters: {
       title: { type: 'string', description: 'Event name, e.g. "Dentist".', required: true },
@@ -124,6 +145,7 @@ export const AVAILABLE_TOOLS: ToolDefinition[] = [
       location: { type: 'string', description: 'Optional location.' },
       notes: { type: 'string', description: 'Optional notes / description.' },
     },
+    example: { title: 'Dentist', start: '2026-09-26T14:30' },
   },
 ];
 
@@ -257,6 +279,13 @@ function parameterDescription(tool: ToolDefinition, key: string, description: st
   return tool.id === 'generate_image' && key === 'prompt' ? imagePromptDescription() : description;
 }
 
+/** Built-in example argument object, appended to the DEFAULT description only: a user-edited
+ *  description (skill card) is sent exactly as written. */
+function toolExampleSuffix(tool: ToolDefinition): string {
+  const edited = !!skillOverrides[tool.id]?.description?.trim();
+  return tool.example && !edited ? ` Example arguments: ${JSON.stringify(tool.example)}` : '';
+}
+
 export function getToolsAsOpenAISchema(enabledToolIds: readonly string[]) {
   return AVAILABLE_TOOLS
     .filter(tool => enabledToolIds.includes(tool.id))
@@ -265,8 +294,9 @@ export function getToolsAsOpenAISchema(enabledToolIds: readonly string[]) {
       function: {
         name: tool.name,
         // 'content' repeats the text here; 'block' keeps it single (duplicate functions are invalid)
-        // and repeats standalone system blocks via buildToolBlockPromptHint.
-        description: toolDefinitionDescription(tool),
+        // and repeats standalone system blocks via buildToolBlockPromptHint. The example is format-
+        // neutral (arguments only): the chat template wraps the call in its own native syntax.
+        description: `${toolDefinitionDescription(tool)}${toolExampleSuffix(tool)}`,
         parameters: {
           type: 'object',
           properties: Object.fromEntries(
@@ -305,13 +335,32 @@ function toolParameterLines(tool: ToolDefinition): string {
 }
 
 /** A literal call the parser accepts (parseToolCallsFromText: <tool_call>{"name","arguments"}). */
-function toolCallExample(tool: ToolDefinition): string {
-  const args = Object.fromEntries(
-    Object.entries(tool.parameters)
-      .filter(([, p]) => p.required)
-      .map(([key, p]) => [key, p.type === 'integer' || p.type === 'number' ? 1 : '...']),
-  );
+export function toolCallExample(tool: ToolDefinition): string {
+  const args =
+    tool.example ??
+    Object.fromEntries(
+      Object.entries(tool.parameters)
+        .filter(([, p]) => p.required)
+        .map(([key, p]) => [key, p.type === 'integer' || p.type === 'number' ? 1 : '...']),
+    );
   return `<tool_call>${JSON.stringify({ name: tool.name, arguments: args })}</tool_call>`;
+}
+
+/** The one text call format (parsed by generationToolLoop.parseToolCallsFromText). */
+export const TEXT_TOOL_CALL_FORMAT = '<tool_call>{"name": "TOOL_NAME", "arguments": {"ARG": "VALUE"}}</tool_call>';
+
+/**
+ * Two lines for a model WITHOUT native tool calling: the exact text format plus one literal call
+ * (generate_image when enabled, else the first enabled tool). Empty when no built-in tool is enabled.
+ */
+export function buildTextToolCallFormatHint(enabledToolIds: readonly string[]): string {
+  const enabled = AVAILABLE_TOOLS.filter(t => enabledToolIds.includes(t.id));
+  if (enabled.length === 0) return '';
+  const sample = enabled.find(t => t.id === 'generate_image') ?? enabled[0];
+  return (
+    `\nTo call a tool, reply with only this line: ${TEXT_TOOL_CALL_FORMAT}\n` +
+    `Example: ${toolCallExample(sample)}`
+  );
 }
 
 export function buildToolSystemPromptHint(enabledToolIds: string[]): string {
@@ -327,10 +376,11 @@ export function buildToolSystemPromptHint(enabledToolIds: string[]): string {
     })
     .join('\n');
   return (
-    '\n\nTools available. You CAN use them: to call one, output exactly one line\n' +
-    '<tool_call>{"name": "TOOL_NAME", "arguments": {"ARG": "VALUE"}}</tool_call>\n' +
-    'and nothing else in that turn; the result comes back in the next message.\n' +
-    `${toolList}\nUse these tools proactively and precisely — call the right tool at the right moment rather than guessing or saying you cannot help.`
+    '\n\n# Tools\n' +
+    'You can call these tools. To call one, reply with only this line:\n' +
+    `${TEXT_TOOL_CALL_FORMAT}\n` +
+    'Write nothing else in that reply. The result comes back inside <tool_response>; then answer the user.\n' +
+    toolList
   );
 }
 

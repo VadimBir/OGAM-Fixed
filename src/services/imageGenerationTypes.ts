@@ -112,6 +112,8 @@ export interface EngineImageOptions {
   loras?: Array<{ path: string; weight: number }>;
   /** sd.cpp: decode the VAE in tiles (bounded memory at any resolution). */
   vaeTiling?: boolean;
+  /** sd.cpp: CLIP skip (absent = model default). */
+  clipSkip?: number;
 }
 
 export interface ActiveImageModel {

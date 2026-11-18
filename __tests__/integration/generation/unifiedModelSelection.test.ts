@@ -199,7 +199,9 @@ describe('Unified Model Selection', () => {
 
       expect(useRemoteServerStore.getState().activeRemoteImageModelId).toBe('llava');
       expect(useRemoteServerStore.getState().activeRemoteMediaServerIds.image).toBe(serverId);
-      expect(mockLoadModel).toHaveBeenCalledWith('llava');
+      // The server's provider serves TEXT chat: an image pick must not swap its model or the text pick.
+      expect(mockLoadModel).not.toHaveBeenCalled();
+      expect(useRemoteServerStore.getState().activeRemoteTextModelId).toBeNull();
     });
   });
 

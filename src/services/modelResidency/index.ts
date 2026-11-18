@@ -203,6 +203,35 @@ class ModelResidencyManager {
   }
 
   /**
+   * M4 gate, read on fresh RAM, evicts nothing: may every OTHER resident (the text model) stay in
+   * RAM while resident `key` (the image model) runs a generation that still has to allocate
+   * `pendingMB`? Two checks, both the budget's own numbers:
+   *  - live: pendingMB fits real free RAM minus the live headroom (the generating model's working
+   *    set is dirty memory, so it is live-gated on every platform, like budgetForSpec);
+   *  - physical: all residents together fit the physical ceiling of the current policy.
+   * The load-time makeRoomFor already applied the budget; this re-asks it at generation time,
+   * because free RAM moves after the load and sd.cpp allocates its weights only on first use.
+   * Absent `key` resident or nothing else resident: true (nothing competes).
+   */
+  async canKeepOthersDuringGeneration(key: string, pendingMB: number): Promise<boolean> {
+    if (!this.residents.has(key) || this.residents.size < 2) return true;
+    await hardwareService.refreshMemoryInfo().catch(() => {});
+    const residentMB = [...this.residents.values()].reduce((sum, r) => sum + r.sizeMB, 0);
+    const availMB = Math.round(hardwareService.getAvailableMemoryGB() * 1024);
+    const headroomMB =
+      this.loadPolicy === 'aggressive' ? AGGRESSIVE_DIRTY_HEADROOM_MB : DIRTY_AVAILABILITY_HEADROOM_MB;
+    const physicalCapMB =
+      this.budgetOverrideMB ??
+      computeBudgetMB(hardwareService.getTotalMemoryGB() * 1024, { policy: this.loadPolicy });
+    const liveFits = pendingMB <= availMB - headroomMB;
+    const physicalFits = residentMB <= physicalCapMB;
+    logger.log(
+      `[ModelResidency] generation gate ${key}: pendingMB=${Math.round(pendingMB)} availMB=${availMB} headroomMB=${headroomMB} residentMB=${Math.round(residentMB)} capMB=${Math.round(physicalCapMB)} → ${liveFits && physicalFits ? 'keep others' : 'others must yield'}`,
+    );
+    return liveFits && physicalFits;
+  }
+
+  /**
    * Global FIFO lock. Every model load/unload (text, image, whisper, tts,
    * classifier) runs through here, so only ONE heavy model operation touches
    * memory at a time. This is what makes the budget safe to enforce: makeRoomFor

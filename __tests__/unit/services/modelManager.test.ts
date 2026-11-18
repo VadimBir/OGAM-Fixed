@@ -200,11 +200,11 @@ describe('ModelManager', () => {
         { id: 'gone', name: 'Gone', filePath: '/models/gone.gguf', fileSize: 100 },
       ];
       mockedAsyncStorage.getItem.mockResolvedValue(JSON.stringify(storedModels));
-      mockedRNFS.exists
-        .mockResolvedValueOnce(true)
-        .mockResolvedValueOnce(false);
+      // By path, not call order: the heal re-reads the registry under the lock (storage.queueRegistryHeal).
+      mockedRNFS.exists.mockImplementation(async (p: string) => p === '/models/exists.gguf');
 
       await modelManager.getDownloadedModels();
+      await new Promise(resolve => setImmediate(resolve));
 
       // Should save updated list (only the existing model)
       expect(AsyncStorage.setItem).toHaveBeenCalledWith(
@@ -520,6 +520,11 @@ describe('ModelManager', () => {
     it('skips download when files already exist', async () => {
       mockedBackgroundDownloadService.isAvailable.mockReturnValue(true);
       mockedRNFS.exists.mockResolvedValue(true);
+      // "Already downloaded" needs the on-disk size to equal the catalog size (resolveLocalModelFile).
+      // statFile reads the parent dir listing (utils/fileStat.ts), so the listing carries the size.
+      mockedRNFS.readDir.mockResolvedValue([
+        { name: 'bg-model.gguf', path: '/mock/documents/models/bg-model.gguf', size: 8000000000, isFile: () => true, isDirectory: () => false } as any,
+      ]);
       mockedAsyncStorage.getItem.mockResolvedValue('[]');
       mockedAsyncStorage.setItem.mockResolvedValue(undefined as any);
 

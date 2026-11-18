@@ -50,6 +50,16 @@ class DownloadManagerModuleTest {
     }
 
     @Test
+    fun isHostAllowedAcceptsCivitaiDownloadUrl() {
+        assertTrue(WorkerDownload.isHostAllowed("https://civitai.com/api/download/models/12345?token=x"))
+    }
+
+    @Test
+    fun isHostAllowedRejectsCivitaiLookAlike() {
+        assertFalse(WorkerDownload.isHostAllowed("https://notcivitai.com/api/download/models/1"))
+    }
+
+    @Test
     fun isHostAllowedRejectsUnknownHost() {
         assertFalse(WorkerDownload.isHostAllowed("https://evil.com/malware.gguf"))
     }
@@ -302,5 +312,42 @@ class DownloadManagerModuleTest {
         val mgr = ctx.getSystemService(android.content.Context.NOTIFICATION_SERVICE)
             as android.app.NotificationManager
         assertNotNull(mgr.getNotificationChannel("model_downloads"))
+    }
+
+    // ── DownloadManagerModule teardown ────────────────────────────────────────
+
+    @Test
+    fun moduleOverridesInvalidateBecauseRnNeverCallsOnCatalystInstanceDestroy() {
+        // RN 0.83 BaseJavaModule.invalidate() is empty and does not forward to the
+        // deprecated onCatalystInstanceDestroy; cleanup living only there leaked the
+        // forever-LiveData observers and the coroutine scope.
+        val m = DownloadManagerModule::class.java.getDeclaredMethod("invalidate")
+        assertEquals(DownloadManagerModule::class.java, m.declaringClass)
+    }
+
+    // ── WorkerDownload.isExactSizeMatch ───────────────────────────────────────
+
+    @Test
+    fun exactSizeMatchRejectsFileShortByLessThanPointOnePercent() {
+        // Regression: the old 0.1% tolerance accepted a 4 GB GGUF that was 4 MB short.
+        val expected = 4_000_000_000L
+        assertFalse(WorkerDownload.isExactSizeMatch(expected - 4_000_000L, expected))
+        assertFalse(WorkerDownload.isExactSizeMatch(expected - 1L, expected))
+    }
+
+    @Test
+    fun exactSizeMatchRejectsOversizedFile() {
+        assertFalse(WorkerDownload.isExactSizeMatch(1_001L, 1_000L))
+    }
+
+    @Test
+    fun exactSizeMatchAcceptsExactSize() {
+        assertTrue(WorkerDownload.isExactSizeMatch(77_704_715L, 77_704_715L))
+    }
+
+    @Test
+    fun exactSizeMatchSkipsWhenExpectedSizeUnknown() {
+        assertTrue(WorkerDownload.isExactSizeMatch(12_345L, 0L))
+        assertTrue(WorkerDownload.isExactSizeMatch(12_345L, -1L))
     }
 }

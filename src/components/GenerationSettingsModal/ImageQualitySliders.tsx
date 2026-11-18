@@ -11,6 +11,7 @@ import {
   SWEET_SPOT_SIZE,
 } from '../../utils/imageGenAdvice';
 import { ImageEngineSettings } from '../ImageEngineSettings';
+import { ImageDefaultsSettings } from '../ImageDefaultsSettings';
 import { createStyles } from './styles';
 
 const ClearGPUCacheButton: React.FC = () => {
@@ -92,6 +93,8 @@ export const ImageQualityAdvancedSliders: React.FC = () => {
         min={1} max={8} step={1}
         onChange={(value) => updateSettings({ imageThreads: value })}
       />
+
+      <ImageDefaultsSettings compact />
 
       {Platform.OS === 'android' && (
         <View style={styles.settingGroup}>

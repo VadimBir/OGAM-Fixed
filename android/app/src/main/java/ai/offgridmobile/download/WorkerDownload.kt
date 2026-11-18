@@ -30,7 +30,6 @@ import java.io.FileOutputStream
 import java.net.URI
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
-import kotlin.math.abs
 import kotlinx.coroutines.Job
 import org.json.JSONObject
 
@@ -157,7 +156,7 @@ class WorkerDownload(
         val totalBytes = calculateTotalBytes(code, currentFileBytes, contentLength, download.totalBytes)
         Log.i(
             TAG,
-            "handleResponse id=$downloadId code=$code url=${download.url} existingBytes=$existingBytes currentFileBytes=$currentFileBytes contentLength=$contentLength dbExpectedBytes=${download.totalBytes} resolvedTotalBytes=$totalBytes shaPresent=${!download.expectedSha256.isNullOrEmpty()} fileName=${download.fileName}",
+            "handleResponse id=$downloadId code=$code url=${download.url.substringBefore('?')} existingBytes=$existingBytes currentFileBytes=$currentFileBytes contentLength=$contentLength dbExpectedBytes=${download.totalBytes} resolvedTotalBytes=$totalBytes shaPresent=${!download.expectedSha256.isNullOrEmpty()} fileName=${download.fileName}",
         )
         downloadDao.updateProgress(downloadId, currentFileBytes, totalBytes, DownloadStatus.RUNNING)
 
@@ -227,11 +226,11 @@ class WorkerDownload(
         // its LiteRT models. A transient Content-Length / payload undershoot from
         // the CDN should not be treated as corruption when no SHA is available.
         val skipSizeValidation = parseSkipSizeValidation(download.metadataJson)
-        if (authoritativeExpectedBytes > 0L && !skipSizeValidation) {
-            val sizeDiffPercent = abs(bytesWritten - authoritativeExpectedBytes).toDouble() / authoritativeExpectedBytes
-            if (sizeDiffPercent > 0.001) {
-                // A meaningful final size mismatch is corruption unless a known SHA can
-                // explicitly prove the downloaded file is still the expected artifact.
+        if (!skipSizeValidation) {
+            if (!isExactSizeMatch(bytesWritten, authoritativeExpectedBytes)) {
+                // ANY final size mismatch is corruption unless a known SHA can explicitly
+                // prove the downloaded file is still the expected artifact. A former 0.1%
+                // tolerance accepted truncated model files (e.g. 4 MB short on a 4 GB GGUF).
                 val expectedSha256 = download.expectedSha256
                 if (expectedSha256.isNullOrEmpty()) {
                     Log.w(
@@ -326,6 +325,11 @@ class WorkerDownload(
          * FILE_CORRUPTED when no SHA-256 was available to vouch for it. Fall back to
          * the seeded estimate only when the server reports no length (<= 0).
          */
+        /** Final-size check: when the expected size is known (> 0) the written byte
+         *  count must equal it exactly. Unknown expected size (<= 0) cannot be checked. */
+        internal fun isExactSizeMatch(actualBytes: Long, expectedBytes: Long): Boolean =
+            expectedBytes <= 0L || actualBytes == expectedBytes
+
         internal fun calculateTotalBytes(code: Int, currentFileBytes: Long, contentLength: Long, existingTotal: Long): Long {
             return when (code) {
                 206 -> if (contentLength > 0L) currentFileBytes + contentLength else existingTotal
@@ -382,6 +386,9 @@ class WorkerDownload(
             "huggingface.co",
             "cdn-lfs.huggingface.co",
             "cas-bridge.xethub.hf.co",
+            // Civitai "Download to phone" (civitaiDownload.ts): civitai.com/api/download/models/<id>
+            // answers a redirect to its signed CDN URL, which OkHttp follows (followRedirects).
+            "civitai.com",
         )
 
         fun isHostAllowed(url: String): Boolean {

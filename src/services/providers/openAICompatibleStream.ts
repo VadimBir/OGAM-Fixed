@@ -316,17 +316,28 @@ function handleOllamaChatLine(
  * Generate using Ollama's native /api/chat endpoint (NDJSON streaming).
  * Supports think: true/false for reasoning control.
  */
-/** Ollama /api/chat `options`: the same app-decided sampling values, under Ollama's names. */
+/**
+ * Ollama /api/chat `options`: the same app-decided sampling values, under Ollama's names.
+ * num_predict is never sent: settings.maxTokens is the on-device cap (default 2048) and cut
+ * reasoning models short; the remote server owns the output limit.
+ * Names = Ollama api/types.go Options json tags (top_k, min_p, repeat_last_n, repeat_penalty,
+ * presence_penalty, frequency_penalty, seed, stop; DefaultOptions Seed -1). Ollama has no DRY / XTC /
+ * mirostat option, and typical_p is deprecated there ("still accepted per request with a warning"),
+ * so those are not sent.
+ */
 export function ollamaSamplingOptions(options: GenerationOptions): Record<string, unknown> {
   const stop = options.stopSequences?.filter(sequence => sequence.length > 0) ?? [];
   return {
     ...(options.temperature !== undefined && { temperature: options.temperature }),
     ...(options.topP !== undefined && { top_p: options.topP }),
     ...(options.topK !== undefined && { top_k: options.topK }),
+    ...(options.minP !== undefined && { min_p: options.minP }),
     ...(options.repeatPenalty !== undefined && { repeat_penalty: options.repeatPenalty }),
+    ...(options.penaltyLastN !== undefined && { repeat_last_n: options.penaltyLastN }),
+    ...(options.presencePenalty !== undefined && { presence_penalty: options.presencePenalty }),
+    ...(options.frequencyPenalty !== undefined && { frequency_penalty: options.frequencyPenalty }),
     ...(options.seed !== undefined && { seed: options.seed }),
     ...(stop.length > 0 && { stop }),
-    ...(typeof options.maxTokens === 'number' && options.maxTokens > 0 && { num_predict: options.maxTokens }),
   };
 }
 
@@ -388,7 +399,7 @@ export async function generateOllamaChatImpl(
   const requestBody: Record<string, unknown> = {
     model: modelId, messages: ollamaMessages, stream: true, think,
     ...(options.tools && options.tools.length > 0 && { tools: options.tools }),
-    // The app owns every sampling value, the output cap (num_predict = settings.maxTokens) included.
+    // The app owns every sampling value; the output cap stays with the server (no num_predict).
     options: ollamaSamplingOptions(options),
   };
 

@@ -14,17 +14,22 @@ beforeEach(() => {
   jest.clearAllMocks();
 });
 
-describe('extractQuantization underscore-stripped match branch', () => {
-  it('matches a known quant when its single underscore is stripped from the filename', () => {
-    // quant.replace('_','') strips the FIRST underscore only: Q8_0 -> "Q80".
-    // A filename containing "Q80" must hit the underscore-stripped branch (line 119-121).
-    expect(service.extractQuantization('modelQ80.gguf')).toBe('Q8_0');
+// extractQuantization delegates to utils/quantization.parseQuantization (whole-token rule).
+describe('extractQuantization (whole-token quant parser)', () => {
+  it('reads an underscore-less token as its canonical label', () => {
+    expect(service.extractQuantization('model-Q80.gguf')).toBe('Q8_0');
   });
 
-  it('falls through to the regex extractor for an unlisted Q pattern', () => {
-    // No QUANTIZATION_INFO key matches -> regex /[QqFf]\d+.../ kicks in.
-    const result = service.extractQuantization('model-Q9_xyz.gguf');
-    expect(result.startsWith('Q9')).toBe(true);
+  it('does not read a quant glued to the model name (substring match was the old bug)', () => {
+    expect(service.extractQuantization('modelQ80.gguf')).toBe('Unknown');
+  });
+
+  it('returns Unknown for a Q pattern outside the llama.cpp vocabulary', () => {
+    expect(service.extractQuantization('model-Q9_xyz.gguf')).toBe('Unknown');
+  });
+
+  it('uses only the file name of a nested path', () => {
+    expect(service.extractQuantization('Q8_0/model-Q4_K_M.gguf')).toBe('Q4_K_M');
   });
 });
 

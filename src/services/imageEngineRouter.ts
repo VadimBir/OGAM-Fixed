@@ -1,4 +1,4 @@
-import { localDreamGeneratorService } from './localDreamGenerator';
+import { localDreamGeneratorService, type LocalDreamStatusEvent } from './localDreamGenerator';
 import { sdCppGeneratorService, type SdCppLoadConfig } from './sdCppGenerator';
 import { ImageGenerationParams, ImageGenerationProgress, GeneratedImage } from '../types';
 import logger from '../utils/logger';
@@ -86,6 +86,12 @@ class ImageEngineRouter {
   ): Promise<EffectiveImageSize> {
     if (this.active === 'sdcpp') return resolveSdCppEffectiveSize(params);
     return localDreamGeneratorService.getEffectiveSize(params);
+  }
+
+  /** Engine lifecycle status (LocalDream server restarting / ready / failed / fallback). sd.cpp runs
+   *  in-process and emits none, so one subscription covers both engines. Returns unsubscribe. */
+  subscribeToStatus(listener: (event: LocalDreamStatusEvent) => void): () => void {
+    return localDreamGeneratorService.subscribeToStatus(listener);
   }
 
   cancelGeneration(): Promise<boolean> {

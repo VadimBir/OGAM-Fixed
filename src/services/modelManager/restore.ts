@@ -10,6 +10,7 @@ import logger from '../../utils/logger';
 import { mmProjLocalName } from './download';
 import { isMmProjFileName } from '../downloadHydration';
 import { localFileNameFromMetadataJson } from './localModelFile';
+import { basenameOf } from './reconcileStoredPaths';
 
 export interface RestoreDownloadsOpts {
   modelsDir: string;
@@ -23,6 +24,8 @@ type RestorableDownloadInfo = BackgroundDownloadInfo & {
   combinedTotalBytes?: number;
   mmProjDownloadId?: string;
   quantization?: string;
+  /** Native v3 column, verbatim from startDownload (backgroundDownloadService.getActiveDownloads). */
+  modelKey?: string;
 };
 
 function isRestorable(download: BackgroundDownloadInfo): boolean {
@@ -105,6 +108,25 @@ interface RestoreEntryOpts {
   onProgress?: DownloadProgressCallback;
 }
 
+/**
+ * The CATALOG file name (`Q4_K_M/model-Q4_K_M.gguf` for a file inside a repo folder) of a native row.
+ * The native layer keeps only the base name in `fileName` (DownloadManagerModule.kt:66 `File(it).name`),
+ * so an id built from it (`<repo>/model-Q4_K_M.gguf`) differed from the in-session id
+ * (`<repo>/Q4_K_M/model-Q4_K_M.gguf`, storage.buildDownloadedModel). The row's modelKey is stored
+ * verbatim (`makeModelKey(modelId, file.name)`, download.ts startBgDownload; kt:74/101/236), so the
+ * catalog name is the modelKey minus `<modelId>/`. Rows without a modelKey keep the native name.
+ */
+export function catalogFileNameOf(download: Pick<RestorableDownloadInfo, 'modelId' | 'fileName' | 'modelKey'>): string {
+  const prefix = `${download.modelId}/`;
+  const key = download.modelKey;
+  if (key && key.startsWith(prefix) && key.length > prefix.length) {
+    const catalog = key.slice(prefix.length);
+    // Accept only a key that names this same file (its base name is the native file name).
+    if (basenameOf(catalog) === basenameOf(download.fileName)) return catalog;
+  }
+  return download.fileName;
+}
+
 function buildMetadataFromActiveDownload(download: RestorableDownloadInfo, modelsDir: string): PersistedDownloadInfo | null {
   // image: (image models) and whisper- (STT models) are owned by their own
   // managers, not the text model manager. Recovering them here registered them
@@ -136,7 +158,7 @@ function buildMetadataFromActiveDownload(download: RestorableDownloadInfo, model
   const localFileName = localFileNameFromMetadataJson(download.metadataJson);
   return {
     modelId: download.modelId,
-    fileName: download.fileName,
+    fileName: catalogFileNameOf(download),
     // A repo-qualified on-disk name chosen at download start (localModelFile.ts) lives only here.
     ...(localFileName ? { localFileName } : {}),
     quantization: download.quantization || 'Unknown',
@@ -156,7 +178,8 @@ async function restoreDownloadEntry(opts: RestoreEntryOpts): Promise<void> {
     backgroundDownloadContext, backgroundDownloadMetadataCallback, onProgress,
   } = opts;
 
-  const localPath = `${modelsDir}/${metadata.localFileName ?? metadata.fileName}`;
+  // The models dir is flat: the disk name is the base name even when fileName is a folder path.
+  const localPath = `${modelsDir}/${metadata.localFileName ?? basenameOf(metadata.fileName)}`;
   const mmProjLocalPath = metadata.mmProjLocalPath ?? null;
   const mainFileSize = metadata.mainFileSize ?? metadata.totalBytes;
   const mmProjFileSize = metadata.mmProjFileSize ?? 0;

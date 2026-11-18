@@ -117,9 +117,35 @@ async function validateAndResolveModels(
   return { validModels: models.filter((_, i) => verdicts[i].keep), pathsUpdated };
 }
 
+/**
+ * Persist a registry self-heal (rows dropped, paths rebased, duplicates collapsed) UNDER the registry
+ * lock. The heal used to save the list it had just read, outside the lock, from every reader -
+ * including the launch scan (App.tsx refreshModelLists) - so a download finalize or delete that saved
+ * between that read and that save was overwritten by the older list. The job re-reads and re-heals
+ * the CURRENT stored list, so it never writes a stale snapshot. Not awaited: a reader may itself run
+ * inside the (non-re-entrant) lock; the job then queues behind it.
+ */
+function queueRegistryHeal(heal: () => Promise<void>, label: string): void {
+  withModelRegistryLock(heal).catch((error: unknown) => {
+    logger.warn(`[ModelManagerStorage] ${label} registry self-heal failed: ${error instanceof Error ? error.message : String(error)}`);
+  });
+}
+
 export async function loadDownloadedModels(modelsDir: string): Promise<DownloadedModel[]> {
+  const { models, healed } = await readTextRegistry(modelsDir);
+  if (healed) {
+    queueRegistryHeal(async () => {
+      const current = await readTextRegistry(modelsDir);
+      if (current.healed) await saveModelsList(current.models);
+    }, 'text');
+  }
+  return models;
+}
+
+/** The stored text registry, healed in memory; `healed` says it differs from what is stored. */
+async function readTextRegistry(modelsDir: string): Promise<{ models: DownloadedModel[]; healed: boolean }> {
   const stored = await AsyncStorage.getItem(MODELS_STORAGE_KEY);
-  if (!stored) return [];
+  if (!stored) return { models: [], healed: false };
 
   let models: DownloadedModel[];
   try {
@@ -146,22 +172,30 @@ export async function loadDownloadedModels(modelsDir: string): Promise<Downloade
       preview: stored.slice(0, 100),
       error: error instanceof Error ? error.message : String(error),
     });
-    return [];
+    return { models: [], healed: false };
   }
 
   const { validModels, pathsUpdated } = await validateAndResolveModels(models, modelsDir);
   const { models: deduped, collapsed } = collapseDuplicateFileRows(validModels);
 
-  if (validModels.length !== models.length || pathsUpdated || collapsed > 0) {
-    await saveModelsList(deduped);
-  }
-
-  return deduped;
+  return { models: deduped, healed: validModels.length !== models.length || pathsUpdated || collapsed > 0 };
 }
 
 export async function loadDownloadedImageModels(imageModelsDir: string): Promise<ONNXImageModel[]> {
+  const { models, healed } = await readImageRegistry(imageModelsDir);
+  if (healed) {
+    queueRegistryHeal(async () => {
+      const current = await readImageRegistry(imageModelsDir);
+      if (current.healed) await saveImageModelsList(current.models);
+    }, 'image');
+  }
+  return models;
+}
+
+/** The stored image registry, healed in memory; `healed` says it differs from what is stored. */
+async function readImageRegistry(imageModelsDir: string): Promise<{ models: ONNXImageModel[]; healed: boolean }> {
   const stored = await AsyncStorage.getItem(IMAGE_MODELS_STORAGE_KEY);
-  if (!stored) return [];
+  if (!stored) return { models: [], healed: false };
 
   let models: ONNXImageModel[];
   try {
@@ -174,7 +208,7 @@ export async function loadDownloadedImageModels(imageModelsDir: string): Promise
       preview: stored.slice(0, 100),
       error: error instanceof Error ? error.message : String(error),
     });
-    return [];
+    return { models: [], healed: false };
   }
 
   const { verdicts, pathsUpdated } = await reconcilePrimaryPaths(models, imageModelsDir, {
@@ -189,11 +223,7 @@ export async function loadDownloadedImageModels(imageModelsDir: string): Promise
   // text registry does one function above.
   const { models: deduped, collapsed } = collapseDuplicateImageRows(validModels);
 
-  if (validModels.length !== models.length || pathsUpdated || collapsed > 0) {
-    await saveImageModelsList(deduped);
-  }
-
-  return deduped;
+  return { models: deduped, healed: validModels.length !== models.length || pathsUpdated || collapsed > 0 };
 }
 
 export interface BuildModelOpts {

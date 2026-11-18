@@ -250,9 +250,44 @@ function buildMessagesForContext(
   ) as Message;
   return [
     ...prefix,
-    ...filtered.slice(0, -1).map(withDocumentText),
+    // Captions are removed AFTER compaction: the compaction cutoff is found by message id.
+    ...withoutImageCaptions(filtered.slice(0, -1)).map(withDocumentText),
     userMessageForContext,
   ];
+}
+
+/** The app-written caption under a generated image (imageGenerationResult.ts: `Generated image for: "…"`,
+ *  generationMeta.resolution is set by the image generator alone). Not model speech. */
+export function isAppImageCaption(message: Message): boolean {
+  return (
+    message.role === 'assistant' &&
+    !message.toolCalls?.length &&
+    (Boolean(message.generationMeta?.resolution) ||
+      /^Generated image for:\s*["“]/i.test(message.content.trim()))
+  );
+}
+
+/**
+ * History sent to the model without the app's image captions. Fed back as if the model had said them,
+ * a small model imitates `Generated image for: "…"` instead of calling generate_image (the same finding
+ * imageGenerationHelpers.readableText documents for prompt enhancement).
+ * - Inside a tool turn (after the assistant tool-call record or a tool result) the caption is DROPPED,
+ *   which also keeps assistant(tool_calls) -> tool adjacent for strict OpenAI-style servers.
+ * - A standalone image turn (user -> caption) keeps the record, emptied of text and image, so the
+ *   user/assistant alternation that strict chat templates (Gemma) enforce is preserved.
+ */
+export function withoutImageCaptions(messages: readonly Message[]): Message[] {
+  const out: Message[] = [];
+  for (const message of messages) {
+    if (!isAppImageCaption(message)) {
+      out.push(message);
+      continue;
+    }
+    const prev = out.at(-1);
+    if (prev && (prev.role === 'tool' || (prev.role === 'assistant' && prev.toolCalls?.length))) continue;
+    out.push({ ...message, content: '', attachments: undefined });
+  }
+  return out;
 }
 /** The modality of a turn. Resolved ONCE from user intent when the turn is created, recorded on
  *  the turn's record, and READ on resend/edit so the same pipeline runs again (deterministic) —
@@ -699,6 +734,29 @@ const applyGemma4ThinkToken = (
   return prepend ? `<|think|>\n${prompt}` : prompt;
 };
 
+/**
+ * generate_image was toggled on but is not in the turn's tool list: say WHY in the log, so "the model
+ * never calls it" is diagnosable (it was never offered) instead of silent. Exported for tests.
+ */
+export function droppedImageToolReason(
+  toggled: readonly string[],
+  sent: readonly string[],
+  g: { uiGate?: boolean; localToolSupport: boolean; isRemoteText: boolean; localLlama: boolean },
+): string | null {
+  if (!toggled.includes('generate_image') || sent.includes('generate_image')) return null;
+  if (g.uiGate === false) return 'tools gated off (supportsToolCalling=false: model reports no tool support)';
+  if (!g.localToolSupport && !g.isRemoteText && !g.localLlama) return 'no tool-capable text engine active';
+  return 'no image model selected (activeImageEngine() === null: none downloaded/selected, or it was unloaded)';
+}
+function logDroppedImageTool(
+  toggled: readonly string[],
+  sent: readonly string[],
+  g: { uiGate?: boolean; localToolSupport: boolean; isRemoteText: boolean; localLlama: boolean },
+): void {
+  const reason = droppedImageToolReason(toggled, sent, g);
+  if (reason) logger.warn(`[TOOLS] dropped generate_image: ${reason}`);
+}
+
 function resolveToolsAndPrompt(
   deps: GenerationDeps,
   conversation: any,
@@ -712,10 +770,16 @@ function resolveToolsAndPrompt(
   // Native tool-calling of the ACTIVE LOCAL engine (llama Jinja support / LiteRT loaded), resolved
   // by the engine registry — no engine === 'litert' branch here (OCP: add a backend in engines.ts).
   const localToolSupport = activeLocalTextCapabilities(deps.activeModel).tools;
+  const isRemoteText = !!(activeServerId && activeRemoteTextModelId);
+  // A LOCAL llama model is offered tools even when its GGUF template reports no native tool support:
+  // that is exactly the text-hint path (useTextHint below needs activeTools.length > 0). Requiring
+  // localToolSupport here emptied the list and made the text-hint path unreachable (generate_image
+  // never offered to e.g. abliterated Qwen GGUFs whose template lacks the tools block).
+  const localLlama = !isRemoteText && deps.activeModel?.engine === 'llama';
   // Honour the UI gate: "N/A" (supportsToolCalling === false) means the picker is unreachable, so don't inject tools the user can't disable.
   const canUseTools =
     deps.supportsToolCalling !== false &&
-    (localToolSupport || !!(activeServerId && activeRemoteTextModelId));
+    (localToolSupport || isRemoteText || localLlama);
 
   // SINGLE source of truth for the turn's tools: ONLY what the user toggled (settings.enabledTools).
   // No auto-injection — a project no longer silently adds search_knowledge_base. This keeps the tools
@@ -724,6 +788,9 @@ function resolveToolsAndPrompt(
   // The user enables KB search explicitly when they want it.
   // A toggled tool whose engine is absent (generate_image with no image model) is not sent.
   const enabledTools = canUseTools ? availableToolIds(deps.settings.enabledTools || []) : [];
+  logDroppedImageTool(deps.settings.enabledTools || [], enabledTools, {
+    uiGate: deps.supportsToolCalling, localToolSupport, isRemoteText, localLlama,
+  });
 
   const characterPrompt =
     project?.systemPrompt ||
@@ -1310,7 +1377,7 @@ export async function regenerateResponseFn(
         {
           id: targetConversationId,
           prompt: systemPrompt,
-          messages: [...prefix, ...filtered],
+          messages: [...prefix, ...withoutImageCaptions(filtered)],
           setDebugInfo,
           assistantEnabled,
         },

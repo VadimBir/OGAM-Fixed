@@ -43,7 +43,7 @@ export const TextFiltersSection: React.FC<Props> = ({
   const typeLabel = filterState.type === 'all' ? 'Type' : (MODEL_TYPE_OPTIONS.find(o => o.key === filterState.type)?.label ?? 'Type');
   const sourceLabel = filterState.source === 'all' ? 'Source' : (CREDIBILITY_OPTIONS.find(o => o.key === filterState.source)?.label ?? 'Source');
   const sizeLabel = filterState.size === 'all' ? 'Size' : (SIZE_OPTIONS.find(o => o.key === filterState.size)?.label ?? 'Size');
-  const quantLabel = filterState.quant === 'all' ? 'Quant' : filterState.quant;
+  const quantLabel = filterState.quant === 'all' ? 'Quant' : (QUANT_OPTIONS.find(o => o.key === filterState.quant)?.label ?? filterState.quant);
 
   return (
     <View style={styles.filterBar}>

@@ -9,6 +9,8 @@ import android.os.Build
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import android.os.Environment
+import android.os.Handler
+import android.os.Looper
 import android.os.PowerManager
 import android.provider.Settings
 import androidx.lifecycle.Observer
@@ -29,6 +31,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
 import ai.offgridmobile.SafePromise
 
 class DownloadManagerModule(reactContext: ReactApplicationContext) :
@@ -46,11 +49,27 @@ class DownloadManagerModule(reactContext: ReactApplicationContext) :
 
     override fun getName(): String = NAME
 
-    override fun onCatalystInstanceDestroy() {
-        workObservers.keys.toList().forEach { removeWorkObserver(it) }
-        workObservers.clear()
-        super.onCatalystInstanceDestroy()
+    private val invalidated = AtomicBoolean(false)
+
+    /** React teardown. RN 0.83 calls invalidate() and never the deprecated
+     *  onCatalystInstanceDestroy (BaseJavaModule.invalidate() is empty and does not
+     *  forward), so the forever-LiveData observers and the coroutine scope leaked.
+     *  Idempotent: a second call is a no-op. LiveData.removeObserver must run on the
+     *  main thread, so the observer cleanup is posted there when called off-main. */
+    override fun invalidate() {
+        if (!invalidated.compareAndSet(false, true)) return
+        val cleanup = Runnable {
+            workObservers.keys.toList().forEach { removeWorkObserver(it) }
+            workObservers.clear()
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) cleanup.run() else Handler(Looper.getMainLooper()).post(cleanup)
         scope.cancel()
+        super.invalidate()
+    }
+
+    @Deprecated("Use invalidate()", ReplaceWith("invalidate()"))
+    override fun onCatalystInstanceDestroy() {
+        invalidate()
     }
 
     // -------------------------------------------------------------------------

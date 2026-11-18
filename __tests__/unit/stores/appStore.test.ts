@@ -285,7 +285,7 @@ describe('appStore', () => {
       const settings = getAppState().settings;
 
       expect(settings.temperature).toBe(0.7);
-      expect(settings.maxTokens).toBe(1024);
+      expect(settings.maxTokens).toBe(1024); // resetStores fixture (testHelpers.ts:51), not DEFAULT_SETTINGS (2048)
       expect(settings.maxToolCalls).toBe(25);
       expect(settings.topP).toBe(0.9);
       expect(settings.contextLength).toBe(4096);
@@ -301,7 +301,7 @@ describe('appStore', () => {
 
       const settings = getAppState().settings;
       expect(settings.temperature).toBe(0.9);
-      expect(settings.maxTokens).toBe(1024); // unchanged
+      expect(settings.maxTokens).toBe(1024); // unchanged (resetStores fixture)
     });
 
     it('updateSettings can update multiple settings at once', () => {
@@ -1400,7 +1400,7 @@ describe('appStore', () => {
         useAppStore.getState(),
       );
       expect(result.settings.contextLength).toBe(4096); // DEFAULT_SETTINGS.contextLength
-      expect(result.settings.maxTokens).toBe(1024); // DEFAULT_SETTINGS.maxTokens
+      expect(result.settings.maxTokens).toBe(2048); // DEFAULT_SETTINGS.maxTokens
     });
 
     it('resets liteRTMaxTokens pinned at the boost ceiling back to the default', () => {

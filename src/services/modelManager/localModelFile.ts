@@ -15,12 +15,13 @@ import { basenameOf } from './reconcileStoredPaths';
  *     not the catalog `fileName`, is the identity of the artifact. Every row written so far has
  *     `filePath = <modelsDir>/<fileName>`, so existing installs keep their identity and their path.
  *  2. A download first tries the plain name `<basename of file.name>`. It may use it when nothing
- *     is there, or what is there is ITS OWN file: a registry row with the same id or the same repo,
- *     or an unattributed row / unregistered file whose size equals the catalog size (= complete).
+ *     is there, or what is there is ITS OWN file: a registry row with the same id, or the same repo
+ *     and the same catalog file (sameCatalogFile), or an unattributed row / unregistered file whose
+ *     size equals the catalog size (= complete).
  *     An UNREGISTERED file of another size is not a finished copy: the name is used and the file
  *     is fetched again (replaced only when the new download finishes).
  *  3. Otherwise (another repo's registered row, an unattributed registered row of other bytes, or
- *     another repo's in-flight download targeting that name) it uses a repo-qualified name
+ *     another repo's or another file's in-flight download targeting that name) it uses a repo-qualified name
  *     `<stem>--<owner>-<hash6>.gguf` (hash of the full repo id), then `…-2`, `…-3` on a further clash.
  *     The qualified name rides in the native row's metadataJson (`localFileName`) so restore after
  *     an app kill finalizes to the same path.
@@ -62,6 +63,18 @@ export function modelRowMatchesCatalogFile(
   if (model.fileName !== fileName) return false;
   const repo = repoIdOfModel(model);
   return repo === undefined || repo === modelId;
+}
+
+/**
+ * Whether two catalog names of ONE repo name the same file. A repo can publish the same base name in
+ * two folders (`v1/model.gguf`, `v2/model.gguf`); both land on the same flat disk name, so the repo
+ * alone does not make a row "ours". A bare name (native download rows keep only the base name,
+ * DownloadManagerModule.kt:66; rows restored before restore.catalogFileNameOf) matches by base name.
+ */
+function sameCatalogFile(a: string, b: string): boolean {
+  if (a === b) return true;
+  if (a.includes('/') && b.includes('/')) return false;
+  return basenameOf(a) === basenameOf(b);
 }
 
 function hash6(text: string): string {
@@ -127,20 +140,21 @@ export async function resolveLocalModelFile(
 
     const takenByOtherDownload = downloads.some(d =>
       d.modelType === 'text' &&
-      d.modelId !== modelId &&
+      !(d.modelId === modelId && sameCatalogFile(d.fileName, catalogFileName)) &&
       d.status !== 'completed' && d.status !== 'cancelled' &&
       (localFileNameFromMetadataJson(d.metadataJson) ?? basenameOf(d.fileName)) === name,
     );
     if (takenByOtherDownload) continue;
 
     const rows = registry.filter(m => diskFileNameOf(m) === name);
-    const ownRow = rows.find(m => m.id === targetId || repoIdOfModel(m) === modelId);
+    const ownRow = rows.find(m =>
+      m.id === targetId || (repoIdOfModel(m) === modelId && sameCatalogFile(m.fileName, catalogFileName)));
     const { exists, size } = await probe.stat(name);
 
     // This repo's registered install: complete when the file is there (its registered size wins
     // over a catalog that may have been re-uploaded since).
     if (ownRow) return { name, complete: exists, exists };
-    // Another repo's registered install: never reuse, overwrite or delete it.
+    // Another repo's (or this repo's other file's) registered install: never reuse, overwrite or delete it.
     if (rows.some(m => repoIdOfModel(m) !== undefined)) continue;
 
     if (!exists) return { name, complete: false, exists };

@@ -217,12 +217,42 @@ describe('buildOAIMessages', () => {
     const result = buildOAIMessages(messages);
 
     expect(result).toHaveLength(1);
+    // Qwen's own tool-response wrapper (its template renders role:'tool' the same way, and the Qwen3
+    // template treats a user turn that starts/ends with these tags as a tool turn, not a new query).
     expect(result[0]).toEqual(
       expect.objectContaining({
         role: 'user',
-        content: '[Tool Result: calculator]\n{"result": 42}\n[End Tool Result]',
+        content: '<tool_response>\n[calculator] {"result": 42}\n</tool_response>',
       }),
     );
+    expect((result[0].content as string).startsWith('<tool_response>')).toBe(true);
+    expect((result[0].content as string).endsWith('</tool_response>')).toBe(true);
+  });
+
+  // Two results of one round as two user turns broke strict-alternation templates (Gemma, Mistral).
+  it('merges consecutive tool results into ONE user message so roles alternate', () => {
+    const result = buildOAIMessages([
+      createMessage({ role: 'user', content: 'q' }),
+      createMessage({ role: 'assistant', content: '', toolCalls: [
+        { id: 'a', name: 'calculator', arguments: '{"expression":"1+1"}' },
+        { id: 'b', name: 'web_search', arguments: '{"query":"x"}' },
+      ] }),
+      createMessage({ role: 'tool', content: '2', toolCallId: 'a', toolName: 'calculator' }),
+      createMessage({ role: 'tool', content: 'res', toolCallId: 'b', toolName: 'web_search' }),
+    ]);
+    expect(result.map(m => m.role)).toEqual(['user', 'assistant', 'user']);
+    expect(result[2].content).toBe(
+      '<tool_response>\n[calculator] 2\n</tool_response>\n<tool_response>\n[web_search] res\n</tool_response>',
+    );
+  });
+
+  it('toolRole: results go out as role tool with tool_call_id and name (template renders them)', () => {
+    const result = buildOAIMessages(
+      [createMessage({ role: 'tool', content: '{"status":"ok"}', toolCallId: 'c1', toolName: 'generate_image' })],
+      false,
+      { toolRole: true },
+    );
+    expect(result[0]).toEqual({ role: 'tool', content: '{"status":"ok"}', tool_call_id: 'c1', name: 'generate_image' });
   });
 
   it('flattens assistant tool calls into plain text content', () => {

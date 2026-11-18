@@ -519,7 +519,9 @@ describe('LocalDreamGeneratorService', () => {
         width: 512,
         height: 512,
         previewInterval: 2,
-        useOpenCL: true,
+        // Unset useOpenCL defaults OFF (localDreamGenerator.buildNativeParams): the GPU VAE only
+        // decodes cleanly at 512x512, so OpenCL is opt-in per request.
+        useOpenCL: false,
       });
     });
 

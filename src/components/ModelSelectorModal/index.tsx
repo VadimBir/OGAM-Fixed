@@ -196,7 +196,8 @@ export const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
   }, [servers, serverHealth]);
 
   const handleSelectImageModel = async (model: ONNXImageModel) => {
-    if (activeImageModelId === model.id && !activeRemoteImageModelId) return;
+    // Already selected AND resident: nothing to do. Selected but not loaded (after Unload): load it.
+    if (activeImageModelId === model.id && !activeRemoteImageModelId && modelStatus.image.isLoaded) return;
     // Shared inline Load-Anyway flow so a memory-blocked image load offers the
     // override here too, instead of a dead-end "Failed to Load".
     await loadModelWithOverride(
@@ -224,7 +225,9 @@ export const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
   const handleUnloadImageModel = async () => {
     setIsLoadingImage(true);
     try {
-      await activeModelService.unloadImageModel();
+      // Unload frees RAM but KEEPS the selection: generate_image stays available and the model
+      // lazy-reloads on the next image request (imageGenerationService._ensureImageModelLoaded).
+      await activeModelService.unloadImageModel(true);
       remoteServerManager.clearActiveRemoteMediaModel('image');
       onUnloadImageModel?.();
     } catch (error) {
@@ -350,6 +353,7 @@ export const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
             activeRemoteImageServerId={activeRemoteMediaServerIds.image ?? null}
               isAnyLoading={isAnyLoading}
               isLoadingImage={isLoadingImage}
+              isImageModelLoaded={modelStatus.image.isLoaded}
               loadingModelId={loadingImageModelId}
               loadingRemoteModelKey={loadingRemoteImageModelKey}
               onSelectImageModel={handleSelectImageModel}

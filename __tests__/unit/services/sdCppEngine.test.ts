@@ -28,6 +28,7 @@ const mockLocalDream = {
   clearOpenCLCache: jest.fn(async () => 0),
   getConstants: jest.fn(() => ({})),
   getEffectiveSize: jest.fn(async () => ({ engine: 'localdream', width: 512, height: 512, adjusted: false })),
+  subscribeToStatus: jest.fn(() => jest.fn()),
 };
 const mockSdCpp = {
   isAvailable: jest.fn(() => true),
@@ -131,6 +132,19 @@ describe('resolveEngineImageRequest (param signature per engine)', () => {
     expect(resolveEngineImageRequest({ backend: 'mnn' }, { ...settings, imageSampler: 'dpm++2m' }, {}, 512))
       .toEqual({ width: 512, height: 512, engineOptions: {} });
   });
+
+  // Falsify: return squareSize for LocalDream again -> the tool's 64x512 request goes red.
+  it('LocalDream: a requested W×H (generate_image tool) reaches the engine, not the square policy', () => {
+    const settings = { imageWidth: 512, imageHeight: 512 };
+    expect(resolveEngineImageRequest({ backend: 'mnn' }, settings, { width: 64, height: 512 }, 256))
+      .toMatchObject({ width: 64, height: 512 });
+    expect(resolveEngineImageRequest({ backend: 'qnn' }, settings, { width: 384 }, 256))
+      .toMatchObject({ width: 384, height: 384 });
+    expect(resolveEngineImageRequest({ backend: 'qnn' }, settings, { height: 192 }, 256))
+      .toMatchObject({ width: 192, height: 192 });
+    expect(resolveEngineImageRequest({ backend: 'mnn' }, settings, { width: NaN, height: -1 }, 256))
+      .toMatchObject({ width: 256, height: 256 });
+  });
 });
 
 describe('imageEngineRouter', () => {
@@ -181,6 +195,13 @@ describe('imageEngineRouter', () => {
       engine: 'sdcpp', width: 64, height: 512, adjusted: false,
     });
     expect(mockLocalDream.getEffectiveSize).not.toHaveBeenCalled();
+  });
+
+  it('subscribeToStatus delegates to LocalDream (the only engine with a server lifecycle)', async () => {
+    const listener = jest.fn();
+    const unsubscribe = router.subscribeToStatus(listener);
+    expect(mockLocalDream.subscribeToStatus).toHaveBeenCalledWith(listener);
+    expect(typeof unsubscribe).toBe('function');
   });
 
   it('gallery store stays LocalDream (shared generated_images dir)', async () => {

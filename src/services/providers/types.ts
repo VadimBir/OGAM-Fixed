@@ -70,8 +70,24 @@ export interface GenerationOptions {
   topK?: number;
   /** Repeat penalty */
   repeatPenalty?: number;
-  /** Seed for reproducibility */
+  /** Seed for reproducibility; -1 = random */
   seed?: number;
+  /** Advanced sampling (the app's values; each provider sends what its server accepts). */
+  minP?: number;
+  typicalP?: number;
+  /** Look-back window of the repeat / presence / frequency penalties. */
+  penaltyLastN?: number;
+  presencePenalty?: number;
+  frequencyPenalty?: number;
+  dryMultiplier?: number;
+  dryBase?: number;
+  dryAllowedLength?: number;
+  dryPenaltyLastN?: number;
+  xtcProbability?: number;
+  xtcThreshold?: number;
+  mirostat?: number;
+  mirostatTau?: number;
+  mirostatEta?: number;
   /** System prompt override */
   systemPrompt?: string;
   /** Tools available for calling */

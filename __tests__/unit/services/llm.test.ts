@@ -2090,6 +2090,34 @@ describe('LLMService', () => {
       );
     });
 
+    describe('clamp to the GGUF trained context (read before init)', () => {
+      const { loadLlamaModelInfo } = require('llama.rn');
+      afterEach(() => { (loadLlamaModelInfo as jest.Mock).mockImplementation(() => Promise.resolve({})); });
+
+      it('clamps a selected context above the header trained context', async () => {
+        setupContextLoadTest({ modelContextLength: '2048', userContextLength: 8192 });
+        (loadLlamaModelInfo as jest.Mock).mockImplementation(() =>
+          Promise.resolve({ 'general.architecture': 'qwen3', 'qwen3.context_length': 2048 }));
+
+        await llmService.loadModel('/models/test.gguf');
+
+        expect(initLlama).toHaveBeenCalledTimes(1);
+        expect(initLlama).toHaveBeenCalledWith(expect.objectContaining({ n_ctx: 2048 }));
+        expect(llmService.getPerformanceSettings().contextLength).toBe(2048);
+        // The stored global setting is the user's choice and is never rewritten.
+        expect(useAppStore.getState().settings.contextLength).toBe(8192);
+      });
+
+      it('uses the selected context when the header cannot be read', async () => {
+        setupContextLoadTest({ modelContextLength: '2048', userContextLength: 8192 });
+        (loadLlamaModelInfo as jest.Mock).mockImplementation(() => Promise.reject(new Error('bad header')));
+
+        await llmService.loadModel('/models/test.gguf');
+
+        expect(initLlama).toHaveBeenCalledWith(expect.objectContaining({ n_ctx: 8192 }));
+      });
+    });
+
     it('does not perform a second metadata-driven scaling init', async () => {
       const [ctx1] = setupContextLoadTest({
         modelContextLength: '8192',

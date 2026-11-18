@@ -11,6 +11,7 @@ import { ensureNativeLogCapture, resetNativeLogCapture, recentNativeLog } from '
 
 import { HTP_ENABLED } from '../config/featureFlags';
 import { LIVE_RAM_MARGIN_MB } from './memoryBudget';
+import { customStopStrings, resolveSampling, type SamplingSettings } from './samplingParams';
 
 const RESPONSE_RESERVE = 512;
 /** Prompt compaction target. Output length is the user's model-aware maxTokens setting. */
@@ -77,12 +78,39 @@ export interface ModelLoadParams {
   nBatch: number;
   ctxLen: number;
   nGpuLayers: number;
-  /** Whether the EFFECTIVE KV cache is f16 (OpenCL/HTP coerce to it regardless of the
-   *  user setting). The single source for the memory guard's KV-size estimate — read
-   *  this instead of re-deriving from settings.cacheType, which misses the coercion. */
+  /** Whether the EFFECTIVE KV cache is f16 (effectiveCacheType; an unset setting resolves to
+   *  q8_0 or f16 in buildModelParams). The single source for the memory guard's KV-size estimate —
+   *  read this instead of re-deriving from settings.cacheType, which misses that default. */
   usesF16Cache: boolean;
-  /** The KV cache type actually sent to llama.cpp (f16 | q8_0 | q4_0). */
+  /** The K cache type actually sent to llama.cpp (f16 | q8_0 | q4_0). Equals cacheTypeV unless the
+   *  user split them (settings.cacheTypeV). */
   cacheType: string;
+  /** The V cache type actually sent (cache_type_v). */
+  cacheTypeV: string;
+  /** The n_ubatch sent (0 < nUbatch <= nBatch). */
+  nUbatch: number;
+}
+
+/** mmap decision for a load: 'on' / 'off' are the user's; 'auto' (or unset) = shouldDisableMmap. */
+export function resolveUseMmap(
+  modelPath: string,
+  mode: 'auto' | 'on' | 'off' | undefined,
+  opts?: { modelFileSizeBytes?: number; liveAvailableMB?: number },
+): boolean {
+  if (mode === 'on') return true;
+  if (mode === 'off') return false;
+  return !shouldDisableMmap(modelPath, opts);
+}
+
+/** n_ubatch: 0 / unset follows nBatch (the old behaviour); otherwise capped at nBatch, the same cap
+ *  llama.cpp applies (vendor src/llama-context.cpp:247 n_ubatch = min(n_batch, n_ubatch)). */
+export function resolveUbatch(nBatch: number, nUbatch: number | undefined): number {
+  return nUbatch && nUbatch > 0 ? Math.min(Math.floor(nUbatch), nBatch) : nBatch;
+}
+
+/** The V cache type requested: 'same' / unset follows the K type. */
+export function resolveCacheTypeV(cacheTypeK: string, requestedV: string | undefined): string {
+  return !requestedV || requestedV === 'same' ? cacheTypeK : requestedV;
 }
 
 /**
@@ -124,10 +152,11 @@ export function resolveFlashAttnType(opts: { android: boolean; requestedOff: boo
 
 export function buildModelParams(
   modelPath: string,
-  settings: { nThreads?: number; nBatch?: number; contextLength?: number; flashAttn?: boolean; enableGpu?: boolean; gpuLayers?: number; cacheType?: string; inferenceBackend?: string; speculativeDecoding?: boolean; modelFileSizeBytes?: number; liveAvailableMB?: number; modelMaxContext?: number | null },
+  settings: { nThreads?: number; nBatch?: number; nUbatch?: number; contextLength?: number; flashAttn?: boolean; enableGpu?: boolean; gpuLayers?: number; cacheType?: string; cacheTypeV?: string; mmapMode?: 'auto' | 'on' | 'off'; inferenceBackend?: string; speculativeDecoding?: boolean; modelFileSizeBytes?: number; liveAvailableMB?: number; modelMaxContext?: number | null },
 ): ModelLoadParams {
   const nThreads = settings.nThreads || getOptimalThreadCount();
   const nBatch = settings.nBatch || getOptimalBatchSize();
+  const nUbatch = resolveUbatch(nBatch, settings.nUbatch);
   // Clamp the global context to the model's trained context: a KV cache past n_ctx_train only
   // costs RAM (the model cannot use it). Unknown trained context -> the requested value stands.
   const requestedCtx = settings.contextLength || APP_CONFIG.maxContextLength;
@@ -148,13 +177,16 @@ export function buildModelParams(
   const nGpuLayers = gpuEnabled ? (settings.gpuLayers ?? DEFAULT_GPU_LAYERS) : 0;
   // An unset cache type defaults to q8_0 whenever flash attention will run (always on Android).
   const requestedCache = settings.cacheType || (flashAttnRequestedOff && !flashAttnForced ? 'f16' : 'q8_0');
-  // effectiveCacheType coerces OpenCL/HTP to f16 (single source shared with the UI).
+  // effectiveCacheType is the single source shared with the UI (no backend coerces to f16 now).
   const cacheType = effectiveCacheType(backend, requestedCache);
-  const flash_attn_type = resolveFlashAttnType({ android: flashAttnForced, requestedOff: flashAttnRequestedOff, cacheType });
+  const cacheTypeV = effectiveCacheType(backend, resolveCacheTypeV(cacheType, settings.cacheTypeV));
+  // Flash attention is decided by the V cache: llama.cpp refuses a quantized V cache without it
+  // (vendor src/llama-context.cpp:3732-3740); a quantized K cache alone does not need it.
+  const flash_attn_type = resolveFlashAttnType({ android: flashAttnForced, requestedOff: flashAttnRequestedOff, cacheType: cacheTypeV });
   return {
     baseParams: {
-      model: modelPath, use_mlock: false, n_batch: nBatch, n_ubatch: nBatch, n_threads: nThreads,
-      use_mmap: !shouldDisableMmap(modelPath, { modelFileSizeBytes: settings.modelFileSizeBytes, liveAvailableMB: settings.liveAvailableMB }), vocab_only: false, flash_attn_type,
+      model: modelPath, use_mlock: false, n_batch: nBatch, n_ubatch: nUbatch, n_threads: nThreads,
+      use_mmap: resolveUseMmap(modelPath, settings.mmapMode, { modelFileSizeBytes: settings.modelFileSizeBytes, liveAvailableMB: settings.liveAvailableMB }), vocab_only: false, flash_attn_type,
       // Do NOT force kv_unified — let llama.cpp pick it per architecture. Forcing
       // `true` (a marginal single-seq perf tweak) hung gemma3n (gemma-4 E2B/E4B):
       // its interleaved sliding-window + heterogeneous KV layers froze building the
@@ -167,17 +199,19 @@ export function buildModelParams(
       // the target model's embedded ones when `draft` is omitted. A model without MTP weights
       // simply never drafts, so the flag is safe to leave on for models that can't use it.
       ...(settings.speculativeDecoding ? { speculative: { enabled: true, type: 'mtp' as const } } : {}),
-      // Pass the (backend-coerced) KV cache type for every backend, OpenCL included. The ggml
-      // OpenCL backend honors q8_0/q4_0 KV; only HTP is coerced to f16 upstream. Historically this
+      // Pass the chosen KV cache type for every backend, OpenCL and HTP included (backendForcesF16Cache
+      // is false for all). The ggml OpenCL backend honors q8_0/q4_0 KV. Historically this
       // was omitted for OpenCL to dodge an Adreno init crash on some older devices — if that
       // resurfaces, the fix is a per-device guard, not blanket f16 for all OpenCL GPUs.
-      cache_type_k: cacheType, cache_type_v: cacheType,
+      cache_type_k: cacheType, cache_type_v: cacheTypeV,
     },
     nThreads, nBatch, ctxLen, nGpuLayers,
-    // cacheType is already coerced to 'f16' above for OpenCL/HTP; OpenCL also omits the
-    // explicit cache params and llama.cpp defaults to f16 — both are captured here.
-    usesF16Cache: cacheType === 'f16',
+    // The cache types sent above (cache_type_k/v) for every backend. With K and V split, "f16" is
+    // reported when EITHER half is f16: the heuristic memory check then sizes the larger cache.
+    usesF16Cache: cacheType === 'f16' || cacheTypeV === 'f16',
     cacheType,
+    cacheTypeV,
+    nUbatch,
   };
 }
 export interface ContextInitResult {
@@ -198,11 +232,20 @@ const HTP_INIT_TIMEOUT_MS = 30000;
  *  gemma3n froze indefinitely at kv-cache/graph construction) falls back to CPU
  *  instead of spinning the loader forever. */
 const GPU_INIT_TIMEOUT_MS_IOS = 45000;
+/** Marks a rejection produced by withTimeout (a hung init, not an init the engine refused). */
+const INIT_TIMEOUT_CODE = 'INIT_TIMEOUT';
+function isInitTimeout(e: unknown): boolean {
+  return (e as { code?: unknown } | null)?.code === INIT_TIMEOUT_CODE;
+}
 /** Race a promise against a timeout; rejects with descriptive error on expiry. */
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout>;
   const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+    timer = setTimeout(() => {
+      const err = new Error(`${label} timed out after ${ms}ms`) as Error & { code?: string };
+      err.code = INIT_TIMEOUT_CODE;
+      reject(err);
+    }, ms);
   });
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
@@ -235,8 +278,65 @@ async function tryGpuInit(promise: Promise<LlamaContext>, nGpuLayers: number, is
   catch (e) { timedOut = true; throw e; }
 }
 
-/** Init llama with GPU/HTP, then retry on CPU at the selected context. */
+/**
+ * One GPU/HTP retry after a GPU init that ran with flash_attn_type 'on' (Android always sends 'on',
+ * resolveFlashAttnType) was REFUSED by the engine. Flash attention stays the default; this only keeps
+ * the load on the GPU/NPU when the forced value was the reason it failed (the OpenCL/HTP + FA crash
+ * reported before is unconfirmed, docs/GPU-ACCELERATION-INVESTIGATION.md).
+ * The retry sends 'auto' with an f16 KV cache: llama.cpp turns 'auto' back into ENABLED whenever the
+ * V cache is quantized (node_modules/llama.rn/vendor/llama.cpp/src/llama-context.cpp:3732-3735), so
+ * 'auto' + q8_0/q4_0 would repeat the failed attempt unchanged; only f16 lets 'auto' drop FA.
+ * Skipped on a timeout: that init is still running natively (tryGpuInit releases it late), and a
+ * second GPU init on a hung driver would only stack another wait before the CPU fallback.
+ */
+async function retryGpuWithoutForcedFlashAttn(
+  params: object,
+  contextLength: number,
+  nGpuLayers: number,
+  isHtp: boolean,
+  firstError: unknown,
+): Promise<{ context?: LlamaContext; message?: string }> {
+  const p = params as Record<string, unknown>;
+  if (p.flash_attn_type !== 'on' || isInitTimeout(firstError)) return {};
+  const fromCache = String(p.cache_type_v ?? p.cache_type_k ?? 'f16');
+  logger.warn(`[LLM] Retry 1b: ${isHtp ? 'HTP' : 'GPU'} init with flash_attn_type auto (was on), KV cache f16 (was ${fromCache}); a larger f16 KV cache than the memory check assumed`);
+  try {
+    const retryPromise = initLlama({ ...p, flash_attn_type: 'auto', cache_type_k: 'f16', cache_type_v: 'f16', n_ctx: contextLength, n_gpu_layers: nGpuLayers } as any);
+    const context = await tryGpuInit(retryPromise, nGpuLayers, isHtp);
+    logger.warn('[LLM] GPU init succeeded with flash_attn_type auto + f16 KV cache (forced flash attention was refused)');
+    return { context };
+  } catch (retryError: any) {
+    const message = retryError?.message || String(retryError);
+    logger.warn(`[LLM] Retry 1b failed (GPU, flash_attn auto + f16 KV): ${message}`);
+    return { message };
+  }
+}
+
+/**
+ * Init llama with GPU/HTP (one flash-attention retry on GPU, see above), then retry on CPU at the
+ * selected context. When the user split the K and V cache types and every attempt failed, the whole
+ * chain runs once more with V = K: MLA models (DeepSeek 2/3, ...) refuse different K and V types
+ * ("model does not support different K (..) and V (..) cache types", vendor
+ * src/llama-context.cpp:3727-3730), which would otherwise fail the load on CPU too.
+ */
 export async function initContextWithFallback(
+  params: object,
+  contextLength: number,
+  nGpuLayers: number,
+): Promise<ContextInitResult> {
+  const p = params as Record<string, unknown>;
+  try {
+    return await initContextChain(params, contextLength, nGpuLayers);
+  } catch (error) {
+    if (p.cache_type_k == null || p.cache_type_v == null || p.cache_type_k === p.cache_type_v) throw error;
+    logger.warn(`[LLM] Load failed with K cache ${String(p.cache_type_k)} / V cache ${String(p.cache_type_v)}; retrying with V = K (some models refuse different K and V types)`);
+    // A quantized V (= K now) cannot run with flash attention 'off'; 'auto' lets llama.cpp enable it.
+    const flashAttn = p.flash_attn_type === 'off' && p.cache_type_k !== 'f16' ? 'auto' : p.flash_attn_type;
+    return initContextChain({ ...p, cache_type_v: p.cache_type_k, flash_attn_type: flashAttn }, contextLength, nGpuLayers);
+  }
+}
+
+async function initContextChain(
   params: object,
   contextLength: number,
   nGpuLayers: number,
@@ -258,9 +358,12 @@ export async function initContextWithFallback(
     logger.log('[LLM] GPU init succeeded');
     return { context, gpuAttemptFailed, actualLength: contextLength };
   } catch (gpuError: any) {
-    const gpuMsg = gpuError?.message || String(gpuError);
+    let gpuMsg = gpuError?.message || String(gpuError);
     if (nGpuLayers > 0) {
       logger.warn(`[LLM] Attempt 1/2 failed (GPU): ${gpuMsg}`);
+      const retry = await retryGpuWithoutForcedFlashAttn(params, contextLength, nGpuLayers, isHtp, gpuError);
+      if (retry.context) return { context: retry.context, gpuAttemptFailed, actualLength: contextLength };
+      if (retry.message) gpuMsg = `${gpuMsg} | GPU flash_attn auto + f16 KV: ${retry.message}`;
       gpuAttemptFailed = true;
     } else {
       logger.warn(`[LLM] Attempt 1/2 failed (no GPU requested): ${gpuMsg}`);
@@ -355,9 +458,26 @@ function thinkingOffParams(isGemma4: boolean): ThinkingCompletionParams {
     thinking_end_tag: isGemma4 ? '<channel|>' : '</think>',
   };
 }
-export function buildThinkingCompletionParams(enableThinking: boolean, isGemma4: boolean = false, reasoningBudget?: number): ThinkingCompletionParams {
+/**
+ * Finite thinking budget sent for budget = Auto on the TOOL path. Why: llama.rn builds the reasoning-budget
+ * sampler only when thinking_budget_tokens >= 0 (JSIParams.cpp:497-517); without it grammar_should_apply()
+ * (vendor common/sampling.cpp) has no rbudget and the LAZY tool grammar may trigger inside <think>.
+ * Value: 3/4 of n_predict, at least 512, but always leaving >= 128 tokens of n_predict for the answer /
+ * tool call (a thinking run that eats all of n_predict never calls the tool). n_predict <= 256: budget =
+ * n_predict, so the sampler exists but never force-closes thinking before the cap. KV/RAM unaffected.
+ */
+export function autoThinkingBudgetTokens(nPredict: number): number {
+  const n = Math.max(1, Math.floor(nPredict));
+  if (n <= 256) return n;
+  return Math.min(Math.max(512, Math.floor((n * 3) / 4)), n - 128);
+}
+export function buildThinkingCompletionParams(enableThinking: boolean, isGemma4: boolean = false, reasoningBudget?: number, autoBudgetNPredict?: number): ThinkingCompletionParams {
   // Budget 0 = "no thinking" (Thinking Budget slider's left end) = same hard-off as the toggle.
   if (!enableThinking || reasoningBudget === 0) return thinkingOffParams(isGemma4);
+  const isAuto = reasoningBudget == null || reasoningBudget < 0;
+  if (isAuto && autoBudgetNPredict != null && autoBudgetNPredict > 0) {
+    return { enable_thinking: true, reasoning_format: isGemma4 ? 'auto' : 'deepseek', thinking_budget_tokens: autoThinkingBudgetTokens(autoBudgetNPredict) };
+  }
   // Native-first (parse-once at the runtime boundary): Gemma 4 uses its own
   // <|channel>thought\n...<channel|> format, not DeepSeek's <think> tags. reasoning_format:'auto'
   // lets llama.cpp detect the model's chat_format and parse reasoning + tool calls NATIVELY —
@@ -489,19 +609,46 @@ export async function fitMessagesInBudget(
 export { BYTES_PER_GB, getGpuLayersForDevice } from './llmDeviceLimits';
 export { validateModelFile, checkMemoryForModel, safeCompletion, resolveSafeContext } from './llmSafetyChecks';
 const STOP_TOKENS = ['</s>', '<|end|>', '<|eot_id|>'];
+/**
+ * Completion params for llama.rn. Every sampling value is sent on every call, never left out: llama.rn
+ * reads each one with the context's PREVIOUS value as its fallback (cpp/jsi/JSIParams.cpp:428-458,
+ * `getPropertyAsX(params, "min_p", sparams.min_p)`), so an omitted field would keep whatever an
+ * earlier completion set. Names = llama.rn 0.13 NativeCompletionParams (src/types.ts:278-397).
+ * `stop` is a FRESH array each call: llama.rn appends the template's additional_stops to the array
+ * it was handed (src/index.ts:467-470 and :875-878, a shallow `{ ...params }` copy), which grew the
+ * old shared module-level STOP_TOKENS on every completion.
+ */
 export function buildCompletionParams(settings: {
   maxTokens?: number; temperature?: number; topP?: number; repeatPenalty?: number;
-}, options?: { disableCtxShift?: boolean }): Record<string, any> {
+} & SamplingSettings, options?: { disableCtxShift?: boolean }): Record<string, any> {
   const requestedMaxTokens = Math.max(1, Math.floor(settings.maxTokens || RESPONSE_RESERVE));
+  const s = resolveSampling(settings);
+  const stop = [...STOP_TOKENS];
+  for (const extra of customStopStrings(settings)) if (!stop.includes(extra)) stop.push(extra);
   return {
     // Do not impose a second app-owned output ceiling. The setting surface already
     // uses the model's context maximum; llama.rn owns the actual per-turn fit.
     n_predict: requestedMaxTokens,
     temperature: settings.temperature ?? 0.7,
-    top_k: 40,
+    top_k: s.topK,
     top_p: settings.topP ?? 0.95,
+    min_p: s.minP,
+    typical_p: s.typicalP,
+    penalty_last_n: s.penaltyLastN,
     penalty_repeat: settings.repeatPenalty ?? 1.1,
-    stop: STOP_TOKENS,
+    penalty_present: s.presencePenalty,
+    penalty_freq: s.frequencyPenalty,
+    dry_multiplier: s.dryMultiplier,
+    dry_base: s.dryBase,
+    dry_allowed_length: s.dryAllowedLength,
+    dry_penalty_last_n: s.dryPenaltyLastN,
+    xtc_probability: s.xtcProbability,
+    xtc_threshold: s.xtcThreshold,
+    mirostat: s.mirostat,
+    mirostat_tau: s.mirostatTau,
+    mirostat_eta: s.mirostatEta,
+    seed: s.seed,
+    stop,
     ctx_shift: options?.disableCtxShift ? false : true,
   };
 }

@@ -47,3 +47,33 @@ export function resolveMobileImageParameters(
     size: Math.max(SWEET_SPOT_SIZE, resolved.size),
   };
 }
+
+export interface ImageDefaultSettings {
+  imageNegativePrompt?: string | null;
+  imageSeed?: number | null;
+}
+
+/**
+ * The user's image defaults applied to a request that names none: a request's own negative prompt
+ * / seed (generate_image tool, retry) wins. Seed -1 (or unset) leaves the seed out, so each engine
+ * picks a random one as before (sdCppGenerator / remoteImageGeneration generateRandomSeed,
+ * LocalDreamModule.kt random when no "seed" key).
+ */
+export function applyImageDefaults<T extends { negativePrompt?: string; seed?: number }>(
+  params: T,
+  settings: ImageDefaultSettings,
+): T {
+  const negative = params.negativePrompt?.trim()
+    ? params.negativePrompt
+    : (settings.imageNegativePrompt ?? '').trim() || params.negativePrompt;
+  const fixedSeed =
+    typeof settings.imageSeed === 'number' && Number.isInteger(settings.imageSeed) && settings.imageSeed >= 0
+      ? settings.imageSeed
+      : undefined;
+  const seed = params.seed ?? fixedSeed;
+  return {
+    ...params,
+    ...(negative !== undefined ? { negativePrompt: negative } : {}),
+    ...(seed !== undefined ? { seed } : {}),
+  };
+}

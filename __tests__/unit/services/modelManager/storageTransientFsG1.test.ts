@@ -43,6 +43,7 @@ describe('loadDownloadedModels — transient FS error (B5/G1)', () => {
     expect(models).toHaveLength(1);
     expect(models[0].filePath).toBe(VALID_MODEL.filePath);
     // And the stored registry is NOT rewritten to a pruned list (nothing was provably removed).
+    await new Promise(resolve => setImmediate(resolve));
     expect(mockedAsyncStorage.setItem).not.toHaveBeenCalled();
   });
 
@@ -53,6 +54,8 @@ describe('loadDownloadedModels — transient FS error (B5/G1)', () => {
     const models = await loadDownloadedModels(MODELS_DIR);
 
     expect(models).toHaveLength(0);
+    // The heal is persisted under the registry lock, queued after this read (storage.queueRegistryHeal).
+    await new Promise(resolve => setImmediate(resolve));
     // The pruned (empty) registry is persisted — real orphan cleanup is preserved.
     expect(mockedAsyncStorage.setItem).toHaveBeenCalledTimes(1);
     const [, persisted] = mockedAsyncStorage.setItem.mock.calls[0];
@@ -65,6 +68,7 @@ describe('loadDownloadedModels — transient FS error (B5/G1)', () => {
     const models = await loadDownloadedModels(MODELS_DIR);
 
     expect(models).toHaveLength(1);
+    await new Promise(resolve => setImmediate(resolve));
     expect(mockedAsyncStorage.setItem).not.toHaveBeenCalled();
   });
 });

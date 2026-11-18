@@ -6,6 +6,7 @@
 import { useAppStore, useChatStore, useRemoteServerStore } from '../stores';
 import { runToolLoop } from './generationToolLoop';
 import type { GenerationOptions, CompletionResult } from './providers/types';
+import { remoteSamplingOptions } from './samplingParams';
 import logger from '../utils/logger';
 import {
   FLUSH_INTERVAL_MS,
@@ -48,16 +49,13 @@ export async function generateRemoteResponseImpl(
   // abortRequested is reset by the next generation's prepareGeneration().
   const { signal: generationSignal } = svc.currentRemoteAbortController;
 
-  const { temperature, maxTokens, topP, repeatPenalty, thinkingEnabled, reasoningBudget } =
-    useAppStore.getState().settings;
-  // The app decides every sampling value; the server only executes. topK / seed / minP have no
-  // settings field yet, so they are not sent and the server's default applies to them.
+  const appSettings = useAppStore.getState().settings;
+  const { thinkingEnabled, reasoningBudget } = appSettings;
+  // The app decides every sampling value; the server only executes. remoteSamplingOptions carries
+  // all of them; the provider sends the ones its server accepts (openAISamplingParams /
+  // ollamaSamplingOptions).
   const options: GenerationOptions = {
-    temperature,
-    maxTokens,
-    topP,
-    repeatPenalty,
-    stopSequences: [],
+    ...remoteSamplingOptions(appSettings),
     enableThinking:
       provider.capabilities.supportsThinking &&
       (provider.capabilities.thinkingLevelsOnly || (thinkingEnabled && reasoningBudget !== 0)),

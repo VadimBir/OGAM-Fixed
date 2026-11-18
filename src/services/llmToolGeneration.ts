@@ -10,6 +10,24 @@ import { recordGenerationStats, buildCompletionParams, buildThinkingCompletionPa
 import type { StreamToken } from './llmStreamTypes';
 import logger from '../utils/logger';
 import { TOOL_CALL_OPENERS, TOOL_CALL_CLOSERS, maxPartialTagSuffix } from '../utils/messageContent';
+import { TEXT_TOOL_CALL_FORMAT } from './tools/registry';
+
+/** Shared Gemma openers + the Qwen/Hermes `<tool_call>` block (closed by `</tool_call>`, already a
+ *  shared closer). Used by the tool path's stream filter for EVERY model. */
+export const TOOL_CALL_OPENERS_ALL: string[] = [...TOOL_CALL_OPENERS, '<tool_call>'];
+
+/**
+ * Did our system instruction survive the GGUF chat template? Diagnostic for [WIRE-TEMPLATED-PROMPT].
+ * The tool-hint marker is TEXT_TOOL_CALL_FORMAT itself - the exact line both text hints embed
+ * (registry.ts buildToolSystemPromptHint / buildTextToolCallFormatHint) - not hint WORDING, which
+ * changed ("Tools available" -> "# Tools") and silently made the old regex miss.
+ */
+export function systemInstructionSurvived(promptText: string): boolean {
+  return (
+    /<character|user_persona|<skills>|<caveats|character_caveats/i.test(promptText) ||
+    promptText.includes(TEXT_TOOL_CALL_FORMAT)
+  );
+}
 
 type ToolStreamCallback = (data: StreamToken) => void;
 type ToolCompleteCallback = (fullResponse: string, reasoningContent: string) => void;
@@ -29,6 +47,12 @@ export class ToolCallTokenFilter {
   private inBlock = false;
   private buffer = '';
 
+  /** Default = the shared Gemma grammar; the tool path passes TOOL_CALL_OPENERS_ALL (adds Hermes <tool_call>). */
+  constructor(
+    private readonly openers: string[] = TOOL_CALL_OPENERS,
+    private readonly closers: string[] = TOOL_CALL_CLOSERS,
+  ) {}
+
   process(token: string): string {
     this.buffer += token;
     return this.flush();
@@ -40,19 +64,19 @@ export class ToolCallTokenFilter {
     while (this.buffer.length > 0) {
       if (this.inBlock) {
         // Inside a tool block: end it at the NEAREST closer of any form.
-        const closeIdx = this.earliestIndex(TOOL_CALL_CLOSERS);
+        const closeIdx = this.earliestIndex(this.closers);
         if (closeIdx === -1) {
-          const partial = maxPartialTagSuffix(this.buffer, TOOL_CALL_CLOSERS);
+          const partial = maxPartialTagSuffix(this.buffer, this.closers);
           this.buffer = partial > 0 ? this.buffer.slice(this.buffer.length - partial) : '';
           break;
         }
-        this.buffer = this.buffer.slice(closeIdx + this.matchedLengthAt(TOOL_CALL_CLOSERS, closeIdx));
+        this.buffer = this.buffer.slice(closeIdx + this.matchedLengthAt(this.closers, closeIdx));
         this.inBlock = false;
       } else {
         // Outside: enter a block at the EARLIEST opener of any form.
-        const openIdx = this.earliestIndex(TOOL_CALL_OPENERS);
+        const openIdx = this.earliestIndex(this.openers);
         if (openIdx === -1) {
-          const partial = maxPartialTagSuffix(this.buffer, TOOL_CALL_OPENERS);
+          const partial = maxPartialTagSuffix(this.buffer, this.openers);
           if (partial > 0) {
             output += this.buffer.slice(0, this.buffer.length - partial);
             this.buffer = this.buffer.slice(this.buffer.length - partial);
@@ -63,7 +87,7 @@ export class ToolCallTokenFilter {
           break;
         }
         output += this.buffer.slice(0, openIdx);
-        this.buffer = this.buffer.slice(openIdx + this.matchedLengthAt(TOOL_CALL_OPENERS, openIdx));
+        this.buffer = this.buffer.slice(openIdx + this.matchedLengthAt(this.openers, openIdx));
         this.inBlock = true;
       }
     }
@@ -168,18 +192,28 @@ export async function generateWithToolsImpl(
     let streamedReasoningSoFar = '';
     let firstReceived = false;
     const collectedToolCalls: ToolCall[] = [];
-    // Gemma 4 emits <|tool_call>...<tool_call|> tokens in the stream; filter them out.
-    const toolCallFilter = deps.isGemma4Model ? new ToolCallTokenFilter() : null;
+    // Raw text as the model emitted it (tool markup included). Returned only when no STRUCTURED call
+    // was parsed, so the tool loop's text fallback (resolveToolCalls -> parseToolCallsFromText /
+    // parseGemmaNativeToolCalls) still sees the markup it parses and strips itself.
+    let rawResponse = '';
+    // Every model (not only Gemma 4): when llama.rn's partial parse fails, data.content is absent and
+    // the content falls back to data.token, which carries the raw call markup (<|tool_call>, <tool_call:,
+    // Qwen/Hermes <tool_call>). Filter it from the visible stream and from the structured-call reply.
+    const toolCallFilter = new ToolCallTokenFilter(TOOL_CALL_OPENERS_ALL, TOOL_CALL_CLOSERS);
 
+    const baseParams = buildCompletionParams(settings, { disableCtxShift: deps.disableCtxShift });
     const completionParams = {
       messages: oaiMessages,
-      ...buildCompletionParams(settings, { disableCtxShift: deps.disableCtxShift }),
+      ...baseParams,
       tools: options.tools,
       tool_choice: 'auto',
+      // n_predict passed so budget Auto still sends a finite thinking_budget_tokens: that is what makes
+      // llama.rn build the reasoning-budget sampler that keeps the lazy tool grammar out of <think>.
       ...buildThinkingCompletionParams(
         deps.isThinkingEnabled && !options.disableThinking,
         deps.isGemma4Model,
         settings.reasoningBudget,
+        baseParams.n_predict,
       ),
     };
     logger.log('[LLM-Tools] === INPUT ===');
@@ -202,7 +236,7 @@ export async function generateWithToolsImpl(
             typeof formatted === 'string' ? formatted : formatted?.prompt ?? JSON.stringify(formatted);
           logger.log(
             `[WIRE-TEMPLATED-PROMPT] len=${promptText.length} ` +
-              `systemSurvived=${/<character|user_persona|Tools available|<skills>|<caveats|character_caveats/i.test(promptText)}\n` +
+              `systemSurvived=${systemInstructionSurvived(promptText)}\n` +
               promptText.slice(0, 4000),
           );
         } else {
@@ -214,7 +248,12 @@ export async function generateWithToolsImpl(
     }
     const completionResult: any = await safeCompletion(deps.context, () => deps.context.completion(completionParams as any, (data: any) => {
       if (!generating) return;
-      if (data.tool_calls) {
+      // llama.rn re-parses the WHOLE generated text on every token (RNLlamaJSI.cpp parseChatOutput(true)),
+      // so data.tool_calls is the CUMULATIVE list, not a delta: replace, never append. Appending made N
+      // copies of the same partial call; if the final parse then threw (JSICompletion.h ignores it) all
+      // N ran with {} args.
+      if (Array.isArray(data.tool_calls)) {
+        collectedToolCalls.length = 0;
         for (const tc of data.tool_calls) {
           collectedToolCalls.push(parseToolCall(tc));
         }
@@ -234,7 +273,8 @@ export async function generateWithToolsImpl(
       if (data.reasoning_content) streamedReasoningSoFar = data.reasoning_content;
       if (reasoningPiece) { fullReasoning += reasoningPiece; options.onStream?.({ reasoningContent: reasoningPiece }); }
       if (contentPiece) {
-        const visible = toolCallFilter ? toolCallFilter.process(contentPiece) : contentPiece;
+        rawResponse += contentPiece;
+        const visible = toolCallFilter.process(contentPiece);
         fullResponse += visible;
         if (visible) options.onStream?.({ content: visible });
       }
@@ -252,8 +292,11 @@ export async function generateWithToolsImpl(
 
     // If streaming didn't capture tokens, fall back to the CLEAN parsed content — NEVER cr.text, which
     // carries the raw <|channel>thought…<channel|> reasoning markers. reasoning falls back likewise.
-    if (!fullResponse) {
-      fullResponse = cr?.content ?? cr?.text ?? '';
+    // Keyed on rawResponse (what STREAMED), not fullResponse: a stream that was all call markup filters
+    // to '' and must not refill from cr.text (raw markup) when the final parse left cr.content unset.
+    if (!rawResponse) {
+      rawResponse = cr?.content ?? cr?.text ?? '';
+      fullResponse = new ToolCallTokenFilter(TOOL_CALL_OPENERS_ALL, TOOL_CALL_CLOSERS).process(rawResponse);
       tokenCount = cr?.tokens_predicted || tokenCount;
       logger.log(`[LLM-Tools] Using completionResult.content as response (${fullResponse.length} chars)`);
     }
@@ -285,6 +328,10 @@ export async function generateWithToolsImpl(
       logger.log('[LLM-Tools] Context full detected — signalling for compaction');
       throw new Error('Context is full');
     }
+    // Structured calls parsed -> the filtered text is the reply (markup would only duplicate the call in
+    // history). None parsed -> hand back the RAW text so the loop's text-format fallback can find and
+    // strip the markup itself (filtering it here would make those calls unparseable).
+    if (collectedToolCalls.length === 0 && rawResponse) fullResponse = rawResponse;
     options.onComplete?.(fullResponse, finalReasoning);
     // Surface a native interrupt (user stop landing mid-completion) to the caller — the tool
     // loop must treat it as a STOPPED turn, never as a normal empty result (which re-ran a

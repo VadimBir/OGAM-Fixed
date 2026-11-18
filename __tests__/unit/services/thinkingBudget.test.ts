@@ -14,7 +14,7 @@ jest.mock('../../../src/utils/logger', () => ({ __esModule: true, default: { log
 jest.mock('react-native-fs', () => ({}), { virtual: true });
 
 import { budgetToSliderValue, sliderValueToBudget } from '../../../src/utils/thinkingBudget';
-import { buildThinkingCompletionParams } from '../../../src/services/llmHelpers';
+import { buildThinkingCompletionParams, autoThinkingBudgetTokens } from '../../../src/services/llmHelpers';
 import { migratePersistedState } from '../../../src/stores/appStoreMigrations';
 
 describe('Thinking Budget slider scale', () => {
@@ -41,6 +41,37 @@ describe('buildThinkingCompletionParams budget mapping', () => {
     expect(buildThinkingCompletionParams(true, false, 0)).toEqual(hardOff);
     expect(buildThinkingCompletionParams(true, false, 3)).toMatchObject({ enable_thinking: true, thinking_budget_tokens: 3 });
     expect(buildThinkingCompletionParams(true, false, -1)).not.toHaveProperty('thinking_budget_tokens');
+  });
+  // Tool path: llama.rn builds the reasoning-budget sampler only for thinking_budget_tokens >= 0
+  // (JSIParams.cpp:497); without it the lazy tool grammar can fire inside <think>. Auto + n_predict
+  // must therefore send a finite budget that leaves room for the call.
+  it('Auto with n_predict sends a finite budget leaving >= 128 tokens for the answer', () => {
+    expect(autoThinkingBudgetTokens(2048)).toBe(1536);
+    expect(autoThinkingBudgetTokens(1024)).toBe(768);
+    expect(autoThinkingBudgetTokens(600)).toBe(472); // max(512,450)=512 > 600-128 -> 472
+    expect(autoThinkingBudgetTokens(256)).toBe(256); // tiny cap: sampler exists, never closes early
+    expect(autoThinkingBudgetTokens(100)).toBe(100);
+    for (const n of [257, 300, 640, 1024, 2048, 8192]) {
+      const b = autoThinkingBudgetTokens(n);
+      expect(b).toBeGreaterThan(0);
+      expect(b).toBeLessThanOrEqual(n - 128);
+    }
+    expect(buildThinkingCompletionParams(true, false, -1, 2048)).toEqual({ enable_thinking: true, reasoning_format: 'deepseek', thinking_budget_tokens: 1536 });
+    expect(buildThinkingCompletionParams(true, true, undefined, 1024)).toMatchObject({ reasoning_format: 'auto', thinking_budget_tokens: 768 });
+    // An explicit user cap still wins; off still wins.
+    expect(buildThinkingCompletionParams(true, false, 300, 2048)).toMatchObject({ thinking_budget_tokens: 300 });
+    expect(buildThinkingCompletionParams(false, false, -1, 2048)).toEqual(hardOff);
+  });
+});
+
+describe('maxTokens default 1024 -> 2048 migration', () => {
+  const run = (settings: Record<string, unknown>) =>
+    (migratePersistedState({ settings }, { settings: {} }, { defaultSettings: { maxTokens: 2048, maxTokensDefault2048: true } as any }) as any).settings;
+  it('raises only the exact old default, once', () => {
+    expect(run({ maxTokens: 1024, cacheType: 'q8_0', inferenceBackend: 'cpu' })).toMatchObject({ maxTokens: 2048, maxTokensDefault2048: true });
+    expect(run({ maxTokens: 512, cacheType: 'q8_0', inferenceBackend: 'cpu' })).toMatchObject({ maxTokens: 512, maxTokensDefault2048: true });
+    // After the one-time migration a user-chosen 1024 is kept.
+    expect(run({ maxTokens: 1024, maxTokensDefault2048: true, cacheType: 'q8_0', inferenceBackend: 'cpu' }).maxTokens).toBe(1024);
   });
 });
 

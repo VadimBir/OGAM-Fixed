@@ -103,7 +103,9 @@ describe('pasting text into a knowledge base', () => {
 
     // Grouped, because the number is the point: a paste that took half a page is a different thing from one
     // that took forty.
-    expect(view.getByText('4,210 characters')).toBeTruthy();
+    // The sheet groups with the device locale (toLocaleString), so the expectation does too: a hard-coded
+    // '4,210' failed on any host whose default locale groups differently.
+    expect(view.getByText(`${(4210).toLocaleString()} characters`)).toBeTruthy();
   });
 
   it('stops saying how much was pasted once the text is cleared', () => {

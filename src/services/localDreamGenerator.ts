@@ -44,7 +44,11 @@ type PreviewCallback = (preview: { previewPath: string; step: number; totalSteps
  */
 class LocalDreamGeneratorService {
   private loadedThreads: number | null = null;
-  private generating = false;
+  /** The run JS currently owns (null = none). cancelGeneration releases it at once so a new request
+   *  can queue natively behind the cancelled run (native refuses the cancelled one by run id); a
+   *  superseded run's finally must not clear the newer run's ownership. */
+  private activeRun: number | null = null;
+  private runCounter = 0;
   private eventEmitter: NativeEventEmitter | null = null;
   private statusSubscription: { remove(): void } | null = null;
   private statusListeners = new Set<StatusListener>();
@@ -283,7 +287,7 @@ class LocalDreamGeneratorService {
     if (!this.isAvailable()) {
       throw new Error('LocalDream image generation is not available on this platform');
     }
-    if (this.generating) {
+    if (this.activeRun !== null) {
       throw new Error('Image generation already in progress');
     }
     const trimmedPrompt = (params.prompt || '').trim();
@@ -291,7 +295,8 @@ class LocalDreamGeneratorService {
       throw new Error('Cannot generate image with an empty prompt');
     }
 
-    this.generating = true;
+    const run = ++this.runCounter;
+    this.activeRun = run;
     this.ensureStatusListener();
     const progressSubscription = this.subscribeToProgress(onProgress, onPreview);
 
@@ -308,19 +313,19 @@ class LocalDreamGeneratorService {
       }
       throw error;
     } finally {
-      this.generating = false;
+      if (this.activeRun === run) this.activeRun = null;
       progressSubscription?.remove();
     }
   }
 
   async cancelGeneration(): Promise<boolean> {
     if (!this.isAvailable()) return true;
-    this.generating = false;
+    this.activeRun = null;
     return await DiffusionModule.cancelGeneration();
   }
 
   async isGenerating(): Promise<boolean> {
-    return this.generating;
+    return this.activeRun !== null;
   }
 
   async getGeneratedImages(): Promise<GeneratedImage[]> {

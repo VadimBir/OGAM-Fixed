@@ -281,7 +281,7 @@ describe('Parallel mmproj download', () => {
 
     it('returns immediately when both files already exist', async () => {
       mockedRNFS.exists.mockResolvedValue(true);
-      mockedRNFS.stat.mockResolvedValue({ size: 500_000_000 } as any);
+      mockedRNFS.stat.mockResolvedValue({ size: 4_000_000_000, isFile: () => true } as any); // main size must equal file.size (resolveLocalModelFile)
       mockedAsyncStorage.getItem.mockResolvedValue('[]');
 
       const info = await performBackgroundDownload({
@@ -844,7 +844,7 @@ describe('Parallel mmproj download', () => {
   describe('watchBackgroundDownload — already-downloaded recovery', () => {
     it('persists already-downloaded models before firing onComplete', async () => {
       mockedRNFS.exists.mockResolvedValue(true);
-      mockedRNFS.stat.mockResolvedValue({ size: 4_500_000_000, isFile: () => true } as any);
+      mockedRNFS.stat.mockResolvedValue({ size: 4_000_000_000, isFile: () => true } as any);
 
       const info = await performBackgroundDownload({
         modelId: 'test/model',
@@ -879,7 +879,7 @@ describe('Parallel mmproj download', () => {
 
     it('still fires onComplete when persistence fails for already-downloaded models', async () => {
       mockedRNFS.exists.mockResolvedValue(true);
-      mockedRNFS.stat.mockResolvedValue({ size: 4_500_000_000, isFile: () => true } as any);
+      mockedRNFS.stat.mockResolvedValue({ size: 4_000_000_000, isFile: () => true } as any);
       mockedAsyncStorage.setItem.mockRejectedValueOnce(new Error('storage write failed'));
 
       const info = await performBackgroundDownload({
@@ -1044,6 +1044,56 @@ describe('Parallel mmproj download', () => {
       // Progress listeners for both
       expect(mockService.onProgress).toHaveBeenCalledWith('42', expect.any(Function));
       expect(mockService.onProgress).toHaveBeenCalledWith('43', expect.any(Function));
+    });
+
+    // Native keeps only the base name in fileName (DownloadManagerModule.kt:66) but stores the
+    // modelKey verbatim; restore must rebuild the in-session catalog name and id from it.
+    it('a file inside a repo folder restores to the in-session catalog name, id and flat disk path', async () => {
+      mockService.getActiveDownloads.mockResolvedValue([
+        {
+          downloadId: '50', status: 'running', fileName: 'model-Q4_K_M.gguf', modelId: 'org/repo',
+          modelKey: 'org/repo/Q4_K_M/model-Q4_K_M.gguf',
+          metadataJson: JSON.stringify({ localFileName: 'model-Q4_K_M.gguf' }),
+          bytesDownloaded: 1, totalBytes: 10, startedAt: 0,
+        } as any,
+      ]);
+
+      await restoreInProgressDownloads({
+        modelsDir: MODELS_DIR,
+        backgroundDownloadContext: bgContext,
+        backgroundDownloadMetadataCallback: metadataCallback,
+      });
+
+      const ctx = bgContext.get('50') as any;
+      expect(ctx.file.name).toBe('Q4_K_M/model-Q4_K_M.gguf');
+      expect(ctx.localPath).toBe(`${MODELS_DIR}/model-Q4_K_M.gguf`);
+      expect(metadataCallback).toHaveBeenCalledWith('50', expect.objectContaining({ fileName: 'Q4_K_M/model-Q4_K_M.gguf' }));
+      // The finalized row id = `${modelId}/${file.name}` (storage.buildDownloadedModel) = the in-session id.
+      const { buildDownloadedModel } = require('../../../src/services/modelManager/storage');
+      const model = await buildDownloadedModel({ modelId: 'org/repo', file: ctx.file, resolvedLocalPath: ctx.localPath });
+      expect(model.id).toBe('org/repo/Q4_K_M/model-Q4_K_M.gguf');
+    });
+
+    it('a row from before localFileName still lands on the flat base name', async () => {
+      mockService.getActiveDownloads.mockResolvedValue([
+        {
+          downloadId: '51', status: 'running', fileName: 'model-Q4_K_M.gguf', modelId: 'org/repo',
+          modelKey: 'org/repo/Q4_K_M/model-Q4_K_M.gguf', bytesDownloaded: 1, totalBytes: 10, startedAt: 0,
+        } as any,
+      ]);
+      await restoreInProgressDownloads({ modelsDir: MODELS_DIR, backgroundDownloadContext: bgContext, backgroundDownloadMetadataCallback: metadataCallback });
+      const ctx = bgContext.get('51') as any;
+      expect(ctx.file.name).toBe('Q4_K_M/model-Q4_K_M.gguf');
+      expect(ctx.localPath).toBe(`${MODELS_DIR}/model-Q4_K_M.gguf`);
+    });
+
+    it('catalogFileNameOf keeps the native name when the modelKey is absent or names another file', () => {
+      const { catalogFileNameOf } = require('../../../src/services/modelManager/restore');
+      expect(catalogFileNameOf({ modelId: 'o/r', fileName: 'a.gguf' })).toBe('a.gguf');
+      expect(catalogFileNameOf({ modelId: 'o/r', fileName: 'a.gguf', modelKey: 'o/r/a.gguf' })).toBe('a.gguf');
+      expect(catalogFileNameOf({ modelId: 'o/r', fileName: 'a.gguf', modelKey: 'o/r/dir/b.gguf' })).toBe('a.gguf');
+      expect(catalogFileNameOf({ modelId: 'o/r', fileName: 'a.gguf', modelKey: 'x/y/dir/a.gguf' })).toBe('a.gguf');
+      expect(catalogFileNameOf({ modelId: 'o/r', fileName: 'a.gguf', modelKey: 'o/r/dir/a.gguf' })).toBe('dir/a.gguf');
     });
 
     it('handles mmproj completed while app was dead', async () => {

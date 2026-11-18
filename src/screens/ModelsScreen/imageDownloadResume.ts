@@ -10,6 +10,7 @@ import { imageDescriptorFromMetadata } from './imageDescriptor';
 import { validateImageModelDir, ensureImageExtractionComplete } from '../../utils/imageModelIntegrity';
 import { makeImageModelKey } from '../../utils/modelKey';
 import logger from '../../utils/logger';
+import { finalizeSdCppFileDownload } from '../../services/civitaiDownload';
 
 type ResumeCtx = { entry: DownloadEntry; modelId: string; metadata: Record<string, any>; deps: ImageDownloadDeps };
 
@@ -205,6 +206,24 @@ async function resumeMultifileDownload(ctx: ResumeCtx): Promise<void> {
   await registerAndNotify(deps, { imageModel, modelName: metadata.imageModelName });
 }
 
+/** A single .safetensors (Civitai "Download to phone"): move it out of staging and register it. */
+async function resumeSdCppFileDownload(ctx: ResumeCtx): Promise<void> {
+  const { entry, modelId, metadata, deps } = ctx;
+  const existingModels = await modelManager.getDownloadedImageModels();
+  if (existingModels.some(m => m.id === modelId)) {
+    useDownloadStore.getState().remove(makeImageModelKey(modelId));
+    return;
+  }
+  logger.log(`[ImageDownload] resumeImageDownload sdcpp-file - finalizing ${modelId}`);
+  await finalizeSdCppFileDownload({
+    downloadId: entry.downloadId,
+    modelId,
+    fileName: metadata.imageModelFileName || entry.fileName,
+    displayName: metadata.imageModelName || entry.fileName,
+    deps,
+  });
+}
+
 export async function resumeImageDownload(entry: DownloadEntry, deps: ImageDownloadDeps): Promise<void> {
   const modelId = entry.modelId.replace('image:', '');
   logger.log(`[ImageDownload] resumeImageDownload modelId=${modelId} downloadId=${entry.downloadId}`);
@@ -223,6 +242,8 @@ export async function resumeImageDownload(entry: DownloadEntry, deps: ImageDownl
       await resumeZipDownload({ entry, modelId, metadata, deps });
     } else if (metadata.imageDownloadType === 'multifile') {
       await resumeMultifileDownload({ entry, modelId, metadata, deps });
+    } else if (metadata.imageDownloadType === 'sdcpp-file') {
+      await resumeSdCppFileDownload({ entry, modelId, metadata, deps });
     }
   } catch (error: any) {
     logger.error(`[ImageDownload] resumeImageDownload failed for ${modelId}`, error?.message);

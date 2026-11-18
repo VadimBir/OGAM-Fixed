@@ -122,7 +122,10 @@ function nextVoiceSession(session, event, handsFree) {
   var s = session || _stopped();
   switch (event) {
     case 'userStart':
-      return _listening('recording');
+      // The microphone opens before anyone has spoken: listening, not yet recording a turn.
+      // Already listening: a second start is not a new turn (no reset of a turn being recorded).
+      return s.state === 'listen' ? s : _listening('listening');
+    case 'speechHeard':
     case 'voiceDetected':
     case 'speechStarted':
       return s.state === 'listen' ? _listening('recording') : s;

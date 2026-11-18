@@ -220,16 +220,20 @@ function parseChatModelOutput(content, reasoningContent) {
   var answer = stripChatControlTokens(parsed.response);
   var reasoning = parsed.thinking;
   var label = parsed.thinkingLabel;
+  var complete = parsed.isThinkingComplete;
   if (typeof reasoningContent === 'string' && reasoningContent.trim()) {
     var sep = _withLabel({ thinking: null }, reasoningContent);
     reasoning = sep.thinking;
     if (!label && sep.thinkingLabel) label = sep.thinkingLabel;
+    // Separate reasoning channel (litert / remote): no closing tag ever arrives in content, so the
+    // reasoning is complete only once the answer has started. Consumers gate this on isStreaming.
+    if (parsed.thinking == null) complete = answer.trim().length > 0;
   }
   if (typeof reasoning === 'string') reasoning = _stripToolMarkup(reasoning).trim();
   var out = {
     reasoning: reasoning == null ? null : reasoning,
     answer: answer,
-    isReasoningComplete: parsed.isThinkingComplete,
+    isReasoningComplete: complete,
   };
   if (label) out.reasoningLabel = label;
   return out;
@@ -306,6 +310,7 @@ function hasProAccess(input) {
 }
 var _MESH_FAILURES = {
   invalid_key: { title: 'Invalid license key', description: 'Check the key and try again.' },
+  invalid_credential: { title: 'License not accepted', description: 'That license key is invalid or revoked.' },
   expired: { title: 'License expired', description: 'This license key has expired.' },
   device_cap_reached: { title: 'Device limit reached', description: 'Deactivate another device to use Pro here.' },
   network: { title: 'No connection', description: 'Connect to the internet and try again.' },
@@ -319,11 +324,12 @@ function projectPersonalMeshActivationFailure(reason) {
 // =============================================================================================
 // Live chat stream previews (paired devices; empty in the free build)
 // =============================================================================================
-var _STATUS_PHASES = ['waiting', 'loading', 'loading_model', 'tool', 'tools', 'searching', 'generating_image', 'enhancing'];
+var _STATUS_PHASES = ['waiting', 'loading', 'loading_model', 'loading_image_model', 'tool', 'tools', 'searching', 'generating_image', 'enhancing'];
 var _PHASE_LABELS = {
   waiting: 'Waiting...',
   loading: 'Loading model...',
   loading_model: 'Loading model...',
+  loading_image_model: 'Loading image model...',
   thinking: 'Thinking...',
   tool: 'Using tools...',
   tools: 'Using tools...',
@@ -337,13 +343,14 @@ function chatStreamPhaseIsStatus(phase) {
 function chatStreamPhaseLabel(phase, progress) {
   var label = _PHASE_LABELS[phase];
   if (!label) return undefined;
-  if (progress && typeof progress.step === 'number' && typeof progress.total === 'number' && progress.total > 0) {
-    return label.replace(/\.\.\.$/, '') + ' ' + progress.step + '/' + progress.total;
+  var done = progress && (typeof progress.current === 'number' ? progress.current : progress.step);
+  if (typeof done === 'number' && typeof progress.total === 'number' && progress.total > 0) {
+    return label + ' ' + done + '/' + progress.total;
   }
   return label;
 }
 function chatStreamPreviewHasMessageBody(preview) {
-  return !!(preview && typeof preview.content === 'string' && preview.content.trim());
+  return !!(preview && typeof preview.content === 'string' && /[^\s\p{P}]/u.test(preview.content));
 }
 function chatStreamPreviewRows(previews, activeConversationId) {
   var list = Array.isArray(previews) ? previews : previews && typeof previews === 'object' ? Object.values(previews) : [];

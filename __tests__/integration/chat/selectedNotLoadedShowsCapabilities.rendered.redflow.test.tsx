@@ -14,7 +14,8 @@
  * Gemma-4-named GGUF selected-but-NOT-loaded (deferInitialLoad — the exact lazy-flow state) →
  * open the quick-settings popover via its real button → the Thinking toggle IS present and Tools
  * shows its count badge (not "N/A"). Falsifier: an unknown-named GGUF in the same unloaded state
- * still hides Thinking + reads "N/A" — proving the affordance is model-derived, not always-on.
+ * still hides Thinking — proving that affordance is model-derived. Tools are offered to every local
+ * llama model since 2026-11-18 (template-less GGUFs use the text-hint path), so no "N/A" there.
  */
 import { setupChatScreen } from '../../harness/chatHarness';
 
@@ -43,7 +44,7 @@ describe('selected-but-not-loaded GGUF shows its real capability settings (rende
     expect(view.queryByText('N/A')).toBeNull();
   });
 
-  it('falsifier — an unknown-named GGUF in the same unloaded state promises nothing (no Thinking toggle, Tools N/A)', async () => {
+  it('falsifier — an unknown-named GGUF in the same unloaded state gets no Thinking promise; Tools stay offered (text-hint path)', async () => {
     const h = await setupChatScreen({ engine: 'llama', platform: 'android', deferInitialLoad: true });
     h.render();
     const { rtl } = h; const view = h.view!;
@@ -53,8 +54,9 @@ describe('selected-but-not-loaded GGUF shows its real capability settings (rende
 
     // The popover is open (Tools row renders)…
     await rtl.waitFor(() => { expect(view.queryByTestId('quick-tools')).not.toBeNull(); }, { timeout: 4000 });
-    // …but an unrecognized model gets no predicted promise: Thinking hidden, Tools reads N/A.
+    // …an unrecognized model gets no predicted Thinking. Tools are offered to every local llama model
+    // (natively or via the text-hint path; useChatModelActions useChatModelStateSync), so no "N/A".
     expect(view.queryByTestId('quick-thinking-toggle')).toBeNull();
-    expect(view.queryByText('N/A')).not.toBeNull();
+    expect(view.queryByText('N/A')).toBeNull();
   });
 });

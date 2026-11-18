@@ -13,11 +13,16 @@ import { activeModelService } from '../../../src/services/activeModelService';
 import { llmService } from '../../../src/services/llm';
 import { resetStores, flushPromises } from '../../utils/testHelpers';
 import { createONNXImageModel } from '../../utils/factories';
+import { reportModelFailure } from '../../../src/services/modelFailureHandler';
 
 jest.mock('../../../src/services/localDreamGenerator');
 jest.mock('../../../src/services/activeModelService');
 jest.mock('../../../src/services/llm');
 jest.mock('../../../src/services/modelFailureHandler', () => ({ reportModelFailure: jest.fn() }));
+const mockRunRemote = jest.fn();
+jest.mock('../../../src/services/remoteImageGeneration', () => ({
+  runRemoteImageGeneration: (...args: any[]) => mockRunRemote(...args),
+}));
 
 const mockDream = localDreamGeneratorService as jest.Mocked<typeof localDreamGeneratorService>;
 const mockActive = activeModelService as jest.Mocked<typeof activeModelService>;
@@ -139,5 +144,118 @@ describe('generateImageWithOutcome', () => {
     expect(await imageGenerationService.generateImage({ prompt: 'x' })).toMatchObject({ imagePath: '/mock/out.png' });
     useAppStore.setState({ downloadedImageModels: [], activeImageModelId: null });
     expect(await imageGenerationService.generateImage({ prompt: 'x' })).toBeNull();
+  });
+});
+
+describe('cancel isolation: a cancelled run never drives the next request', () => {
+  // Falsify: one service-wide cancel flag reset by the new request -> the old run's late error
+  // fails / resets the new request.
+  it('the cancelled run failing late does not fail or reset the request started after the cancel', async () => {
+    setupModel();
+    let rejectFirst!: (e: unknown) => void;
+    let resolveSecond!: (v: any) => void;
+    mockDream.generateImage
+      .mockImplementationOnce(async () => new Promise((_, rej) => { rejectFirst = rej; }))
+      .mockImplementationOnce(async () => new Promise(res => { resolveSecond = res; }));
+    const first = imageGenerationService.generateImageWithOutcome({ prompt: 'first' });
+    await flushPromises();
+    await imageGenerationService.cancelGeneration();
+    const second = imageGenerationService.generateImageWithOutcome({ prompt: 'second' });
+    await flushPromises();
+    expect(imageGenerationService.getState().phase).toBe('generating');
+
+    // LocalDream rejects a disconnected run with a non-"cancelled" text.
+    rejectFirst(new Error('Failed to generate image: [SocketException] Socket closed'));
+    expect(await first).toMatchObject({ ok: false, reason: 'cancelled' });
+    expect(imageGenerationService.getState()).toMatchObject({ phase: 'generating', prompt: 'second' });
+    expect(reportModelFailure).not.toHaveBeenCalled();
+
+    resolveSecond(OK_RESULT);
+    expect(await second).toMatchObject({ ok: true });
+  });
+});
+
+describe('size planning and engine status', () => {
+  // Falsify: skip the planner -> native gets 320x320 although the NPU renders 512x512.
+  it('sends the size the loaded engine plans for the tool request', async () => {
+    setupModel();
+    (mockDream.getEffectiveSize as jest.Mock).mockResolvedValueOnce({
+      engine: 'localdream', requestedWidth: 320, requestedHeight: 320, width: 512, height: 512,
+      adjusted: true, reason: 'NPU model has no 320x320 resolution patch', useOpenCL: false,
+    });
+    await imageGenerationService.generateImageWithOutcome({ prompt: 'x', width: 320, height: 320 });
+    expect(mockDream.getEffectiveSize).toHaveBeenCalledWith(expect.objectContaining({ width: 320, height: 320 }));
+    expect(mockDream.generateImage).toHaveBeenCalledWith(
+      expect.objectContaining({ width: 512, height: 512 }), expect.any(Function), expect.any(Function),
+    );
+  });
+
+  it('a non-square tool request reaches LocalDream when the planner keeps it', async () => {
+    setupModel();
+    (mockDream.getEffectiveSize as jest.Mock).mockResolvedValueOnce({
+      engine: 'localdream', width: 256, height: 512, adjusted: false, reason: null, useOpenCL: false,
+    });
+    await imageGenerationService.generateImageWithOutcome({ prompt: 'x', width: 256, height: 512 });
+    expect(mockDream.generateImage).toHaveBeenCalledWith(
+      expect.objectContaining({ width: 256, height: 512 }), expect.any(Function), expect.any(Function),
+    );
+  });
+
+  it('a planner failure keeps the requested size', async () => {
+    setupModel();
+    (mockDream.getEffectiveSize as jest.Mock).mockRejectedValueOnce(new Error('boom'));
+    await imageGenerationService.generateImageWithOutcome({ prompt: 'x', width: 192, height: 64 });
+    expect(mockDream.generateImage).toHaveBeenCalledWith(
+      expect.objectContaining({ width: 192, height: 64 }), expect.any(Function), expect.any(Function),
+    );
+  });
+
+  // Falsify: drop the subscription -> the NPU restart status never reaches the card.
+  it('LocalDream lifecycle status shows in the in-flight state, never when idle', async () => {
+    setupModel();
+    let statusListener: ((e: any) => void) | undefined;
+    (mockDream.subscribeToStatus as jest.Mock).mockImplementation((l: (e: any) => void) => {
+      statusListener = l;
+      return jest.fn();
+    });
+    let finish!: (v: any) => void;
+    mockDream.generateImage.mockImplementationOnce(async () => new Promise(r => { finish = r; }));
+    const run = imageGenerationService.generateImageWithOutcome({ prompt: 'x' });
+    await flushPromises();
+    expect(statusListener).toBeDefined();
+    statusListener!({ status: 'restarting', message: 'Reloading the NPU model for 320x320' });
+    expect(imageGenerationService.getState().status).toBe('Reloading the NPU model for 320x320');
+    statusListener!({ status: 'ready', message: null });
+    expect(imageGenerationService.getState().status).toBe('Image engine ready, generating...');
+    finish(OK_RESULT);
+    await run;
+    statusListener!({ status: 'restarting', message: 'Stopping the cancelled generation' });
+    expect(imageGenerationService.getState().status).not.toBe('Stopping the cancelled generation');
+  });
+});
+
+describe('remote outcome reports only what the server was sent', () => {
+  it('steps / seed / guidance / sampler come from onUsed, not from the image fallbacks', async () => {
+    const spy = jest.spyOn(imageGenerationService, 'activeImageEngine')
+      .mockReturnValue({ kind: 'remote', server: { id: 's', name: 'PC' } } as any);
+    mockRunRemote.mockImplementationOnce(async (_p: any, _s: any, deps: any) => {
+      deps.onUsed({ width: 384, height: 256, steps: 12, seed: 5, cfgScale: 6, sampler: 'euler' });
+      return { ...OK_RESULT, width: 384, height: 256, steps: 12, seed: 5 };
+    });
+    expect(await imageGenerationService.generateImageWithOutcome({ prompt: 'x' })).toMatchObject({
+      ok: true, used: { engine: 'remote', width: 384, height: 256, steps: 12, seed: 5, guidance: 6, sampler: 'euler' },
+    });
+    // A public server is sent no steps / seed: the image carries app fallbacks, which are not reported.
+    mockRunRemote.mockImplementationOnce(async (_p: any, _s: any, deps: any) => {
+      deps.onUsed({ width: 512, height: 512 });
+      return { ...OK_RESULT, width: 512, height: 512, steps: 20, seed: 123 };
+    });
+    const outcome = await imageGenerationService.generateImageWithOutcome({ prompt: 'x' });
+    expect(outcome.ok && outcome.used).toMatchObject({ engine: 'remote', width: 512, height: 512 });
+    if (outcome.ok) {
+      expect(outcome.used.steps).toBeUndefined();
+      expect(outcome.used.seed).toBeUndefined();
+    }
+    spy.mockRestore();
   });
 });

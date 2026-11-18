@@ -1,4 +1,4 @@
-import { formatNumber, formatBytes, getDirectorySize, getModelType, matchesSdVersionFilter, getImageModelCompatibility, hfModelToDescriptor } from '../../../../src/screens/ModelsScreen/utils';
+import { formatNumber, formatBytes, getDirectorySize, getModelType, matchesSdVersionFilter, getImageModelCompatibility, hfModelToDescriptor, fileMatchesQuantFilter, fileQuantLabel } from '../../../../src/screens/ModelsScreen/utils';
 import RNFS from 'react-native-fs';
 
 jest.mock('react-native-fs', () => ({
@@ -449,6 +449,35 @@ describe('ModelsScreen/utils', () => {
       expect(desc.backend).toBe('coreml');
       expect(desc.coremlFiles).toHaveLength(1);
       expect(desc.repo).toBe('apple/coreml-sd');
+    });
+  });
+  // ==========================================================================
+  // fileMatchesQuantFilter / fileQuantLabel (TextModelsTab quant filter)
+  // ==========================================================================
+  describe('fileMatchesQuantFilter', () => {
+    it('matches lower-case quant tokens (old name.includes was case-sensitive)', () => {
+      expect(fileMatchesQuantFilter('qwen2.5-1.5b-instruct-q4_k_m.gguf', 'Q4_K_M')).toBe(true);
+    });
+
+    it('does not match a longer quant that merely contains the filter text', () => {
+      expect(fileMatchesQuantFilter('Model-Q6_K_L.gguf', 'Q6_K')).toBe(false);
+      expect(fileMatchesQuantFilter('Model-Q6_K.gguf', 'Q6_K')).toBe(true);
+    });
+
+    it('does not match a quant-like substring inside another token', () => {
+      // "IQ4_XS" contains no Q4_K_M; "XQ8_0X" is not a whole token, so the parsed quant is IQ4_XS.
+      expect(fileMatchesQuantFilter('Model-XQ8_0X-IQ4_XS.gguf', 'Q8_0')).toBe(false);
+      expect(fileMatchesQuantFilter('Model-XQ8_0X-IQ4_XS.gguf', 'IQ4_XS')).toBe(true);
+    });
+
+    it('treats unsloth UD- files as their base quant', () => {
+      expect(fileQuantLabel('Model-UD-Q4_K_M.gguf')).toBe('Q4_K_M');
+      expect(fileMatchesQuantFilter('Model-UD-Q4_K_M.gguf', 'Q4_K_M')).toBe(true);
+    });
+
+    it("passes everything for 'all' and nothing for an unparseable name", () => {
+      expect(fileMatchesQuantFilter('anything.gguf', 'all')).toBe(true);
+      expect(fileMatchesQuantFilter('anything.gguf', 'Q4_K_M')).toBe(false);
     });
   });
 });

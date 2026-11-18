@@ -9,7 +9,7 @@ import logger from '../utils/logger';
 import { generateId } from '../utils/generateId';
 import { useRemoteServerStore } from '../stores/remoteServerStore';
 import { runRemoteImageGeneration } from './remoteImageGeneration';
-import { resolveMobileImageParameters } from './imageParameterPolicy';
+import { applyImageDefaults, resolveMobileImageParameters } from './imageParameterPolicy';
 import { resolveEngineImageRequest } from './imageEngineParams';
 import {
   generationProgressStatus,
@@ -20,6 +20,7 @@ import {
   completedImageGenerationState,
   saveImageGenerationResult,
 } from './imageGenerationResult';
+import type { LocalDreamStatusEvent } from './localDreamGenerator';
 import { reportModelFailure } from './modelFailureHandler';
 import { reasonFromLoadError } from './modelFailureReasons';
 import { isOverridableMemoryError } from './modelLoadErrors';
@@ -52,7 +53,12 @@ const UNSUPPORTED_IMG2IMG_MESSAGE =
 /** Per-request record of how a generate call ended, filled by every terminal path. */
 interface ImageRequestTrack {
   failure: { reason: ImageGenFailureReason; message: string } | null;
-  used: Pick<ImageGenUsedParams, 'engine' | 'guidance' | 'sampler'> | null;
+  used: Pick<ImageGenUsedParams, 'engine' | 'guidance' | 'sampler' | 'steps' | 'seed'> | null;
+  /** Set by cancelGeneration. Per request, not per service: after a cancel the phase is idle at
+   *  once, so a new request can start while the cancelled one is still unwinding (enhance, load,
+   *  native generate); a shared flag would be reset by the new request and the old run would go on
+   *  to drive the new run's state. */
+  cancelled: boolean;
 }
 
 /** Memory pressure wins over the call site's own reason: the same wall shows up as a load error
@@ -89,7 +95,8 @@ class ImageGenerationService {
   };
 
   private readonly listeners: Set<ImageGenerationListener> = new Set();
-  private cancelRequested: boolean = false;
+  /** Unsubscribe for the image engine's own lifecycle status (LocalDream server restarts). */
+  private engineStatusUnsubscribe: (() => void) | null = null;
   private remoteRequest: AbortController | null = null;
   /** Last generate request, so a failure card's Retry button can re-run it. */
   private _lastParams: GenerateImageParams | null = null;
@@ -232,6 +239,7 @@ class ImageGenerationService {
     activeImageModelId: string | null,
     activeImageModel: ActiveImageModel,
     opts: { desiredThreads: number; override?: boolean },
+    request: ImageRequestTrack,
   ): Promise<boolean> {
     const isImageModelLoaded = await onnxImageGeneratorService.isModelLoaded();
     const loadedPath = await onnxImageGeneratorService.getLoadedModelPath();
@@ -263,6 +271,8 @@ class ImageGenerationService {
       );
       return true;
     } catch (error: any) {
+      // Cancelled while loading: end quietly, never fail a newer request's state.
+      if (request.cancelled) return false;
       // Pass the TYPED error as `cause` — an OverridableMemoryError here is what lets
       // the failure card offer "Load Anyway". Stringifying it (as before) hid it.
       const message = `Failed to load image model: ${error?.message || 'Unknown error'}`;
@@ -274,8 +284,70 @@ class ImageGenerationService {
     }
   }
 
+  /** A cancelled request ends quietly. cancelGeneration already reset the state; reset it again
+   *  only while no newer request owns it (a superseded run must not reset the new run's card). */
+  private _endCancelled(request: ImageRequestTrack, message = 'Image generation was cancelled.'): null {
+    if (!request.failure) request.failure = { reason: 'cancelled', message };
+    if (this.request === request) this.resetState();
+    return null;
+  }
+
+  /** Engine lifecycle status (LocalDream: server restart after a cancel, NPU resolution-patch
+   *  restart, CPU fallback) shown in the in-flight card. Subscribed lazily through the engine
+   *  router (no new import edge, nothing at module load). */
+  private _ensureEngineStatusSubscription(): void {
+    if (this.engineStatusUnsubscribe) return;
+    try {
+      const unsubscribe = onnxImageGeneratorService.subscribeToStatus(event =>
+        this._onEngineStatus(event),
+      );
+      if (typeof unsubscribe === 'function') this.engineStatusUnsubscribe = unsubscribe;
+    } catch (e) {
+      logger.warn('[ImageGen] Engine status subscription failed:', e);
+    }
+  }
+
+  private _onEngineStatus(event: LocalDreamStatusEvent | undefined): void {
+    if (!event || !isInFlight(this.state.phase) || this.request?.cancelled) return;
+    const status =
+      event.status === 'ready'
+        ? 'Image engine ready, generating...'
+        : event.message ||
+          (event.status === 'restarting'
+            ? 'Restarting the image engine...'
+            : `Image engine: ${event.status}`);
+    this.updateState({ status });
+  }
+
+  /** Ask the loaded engine what it will really render (LocalDream: NPU 512 or a resolution-patch
+   *  size, MNN square 128-512 on a 64 px grid; sd.cpp: 64 px grid), so the size sent is the size
+   *  rendered. Any failure keeps the request. */
+  private async _planEngineSize(
+    width: number,
+    height: number,
+    useOpenCL: boolean,
+  ): Promise<{ width: number; height: number }> {
+    try {
+      const plan = await onnxImageGeneratorService.getEffectiveSize({ width, height, useOpenCL });
+      if (
+        plan &&
+        Number.isFinite(plan.width) && plan.width > 0 &&
+        Number.isFinite(plan.height) && plan.height > 0
+      ) {
+        if (plan.adjusted) {
+          logger.log(`[IMG-SIZE] ${width}x${height} -> ${plan.width}x${plan.height}: ${plan.reason}`);
+        }
+        return { width: plan.width, height: plan.height };
+      }
+    } catch (e) {
+      logger.warn('[ImageGen] Effective size plan failed, sending the request size:', e);
+    }
+    return { width, height };
+  }
+
   private async _runGenerationAndSave(
     opts: RunGenerationOptions,
+    request: ImageRequestTrack,
   ): Promise<GeneratedImage | null> {
     const {
       params,
@@ -345,7 +417,7 @@ class ImageGenerationService {
             : {}),
         },
         progress => {
-          if (this.cancelRequested) return;
+          if (request.cancelled) return;
           const displayStep = Math.min(progress.step, steps);
           // Once steps are advancing it IS generating — don't mislabel it "GPU
           // optimization" (which read as if generation hadn't started). On the first run
@@ -361,7 +433,7 @@ class ImageGenerationService {
           });
         },
         preview => {
-          if (this.cancelRequested) return;
+          if (request.cancelled) return;
           const displayStep = Math.min(preview.step, steps);
           this.updateState({
             previewPath: `file://${preview.previewPath}?t=${Date.now()}`,
@@ -369,7 +441,8 @@ class ImageGenerationService {
           });
         },
       );
-      if (this.cancelRequested || !result?.imagePath) {
+      if (request.cancelled) return this._endCancelled(request);
+      if (!result?.imagePath) {
         this.resetState();
         return null;
       }
@@ -389,11 +462,10 @@ class ImageGenerationService {
       });
     } catch (error: any) {
       const errorMsg = error?.message || 'Image generation failed';
-      if (errorMsg.includes('cancelled')) {
-        if (this.request) {
-          this.request.failure = { reason: 'cancelled', message: errorMsg };
-        }
-        this.resetState();
+      // A cancelled request's error is the cancel (e.g. LocalDream's dropped connection), whatever
+      // its text: it must not pop an error or fail a newer request.
+      if (request.cancelled || errorMsg.includes('cancelled')) {
+        this._endCancelled(request, errorMsg);
       } else if (error?.code === SDCPP_UNSUPPORTED_FEATURE_CODE) {
         // sd.cpp has no img2img/inpaint parameters (SdCppUnsupportedFeatureError). Not a crash:
         // say so plainly instead of the generic engine-failure path.
@@ -474,7 +546,7 @@ class ImageGenerationService {
         message: 'Another image is still being generated.',
       };
     }
-    const request: ImageRequestTrack = { failure: null, used: null };
+    const request: ImageRequestTrack = { failure: null, used: null, cancelled: false };
     this.request = request;
     try {
       const image = await this._generate(params, opts, request);
@@ -487,19 +559,17 @@ class ImageGenerationService {
             engine: local ? 'local' : 'remote',
             width: image.width,
             height: image.height,
-            ...(local
-              ? {
-                  steps: image.steps,
-                  seed: image.seed,
-                  guidance: request.used?.guidance,
-                  sampler: request.used?.sampler,
-                }
-              : {}),
+            // Local: what the engine ran. Remote: only what the server was really sent / echoed
+            // (onUsed); the image's steps / seed are app fallbacks for a public server, not used.
+            steps: local ? image.steps : request.used?.steps,
+            seed: local ? image.seed : request.used?.seed,
+            guidance: request.used?.guidance,
+            sampler: request.used?.sampler,
           },
         };
       }
       if (request.failure) return { ok: false, ...request.failure };
-      return this.cancelRequested
+      return request.cancelled
         ? { ok: false, reason: 'cancelled', message: 'Image generation was cancelled.' }
         : { ok: false, reason: 'engine_error', message: 'The image engine returned no image.' };
     } finally {
@@ -508,27 +578,32 @@ class ImageGenerationService {
   }
 
   private async _generate(
-    params: GenerateImageParams,
+    requested: GenerateImageParams,
     opts: { override?: boolean } | undefined,
     request: ImageRequestTrack,
   ): Promise<GeneratedImage | null> {
-    this.cancelRequested = false;
+    // The user's default negative prompt / fixed seed fill a request that names none; one place for
+    // every engine (remote, sd.cpp, LocalDream, Core ML) and every entry point.
+    const params = applyImageDefaults(requested, useAppStore.getState().settings);
     this._lastParams = params; // so a failure card's Retry can re-run this exact request
     const engine = this.activeImageEngine();
     if (engine?.kind === 'remote') {
       request.used = { engine: 'remote' };
       const remoteServer = engine.server;
       const enhancedPrompt = await this._enhancePrompt(params);
-      if (this.cancelRequested) {
-        this.resetState();
-        return null;
-      }
+      if (request.cancelled) return this._endCancelled(request);
       return runRemoteImageGeneration(params, remoteServer, {
         updateState: state => this.updateState(state),
         fail: (message, cause) => this._fail(message, { cause, remote: true }),
-        isCancelled: () => this.cancelRequested,
+        isCancelled: () => request.cancelled,
         setRequest: controller => {
           this.remoteRequest = controller;
+        },
+        // What the server was really sent (or echoed), per server kind (remoteMediaRuntime).
+        onUsed: used => {
+          request.used = {
+            engine: 'remote', steps: used.steps, seed: used.seed, guidance: used.cfgScale, sampler: used.sampler,
+          };
         },
       }, { ...opts, enhancedPrompt });
     }
@@ -581,10 +656,7 @@ class ImageGenerationService {
     );
     // Stop can arrive while prompt enhancement owns the text engine. Do not clear that request and
     // continue into the image model after the user already pressed X.
-    if (this.cancelRequested) {
-      this.resetState();
-      return null;
-    }
+    if (request.cancelled) return this._endCancelled(request);
 
     // Establish the generating state unconditionally — not only when enhancement
     // is off. When enhancement is ON but _enhancePrompt bailed early (e.g. no text
@@ -603,16 +675,20 @@ class ImageGenerationService {
       result: null,
     });
 
+    this._ensureEngineStatusSubscription();
     const loaded = await this._ensureImageModelLoaded(
       activeImageModelId,
       activeImageModel,
       { desiredThreads: settings.imageThreads ?? 4, override: opts?.override },
+      request,
     );
+    if (request.cancelled) return this._endCancelled(request);
     if (!loaded) return null;
-    if (this.cancelRequested) {
-      this.resetState();
-      return null;
-    }
+
+    const useOpenCL = settings.imageUseOpenCL ?? false;
+    // The loaded backend decides what it can render (NPU patch sizes, MNN square): plan after load.
+    const planned = await this._planEngineSize(imageWidth, imageHeight, useOpenCL);
+    if (request.cancelled) return this._endCancelled(request);
 
     return this._runGenerationAndSave({
       params,
@@ -620,16 +696,16 @@ class ImageGenerationService {
       activeImageModel,
       steps,
       guidanceScale,
-      imageWidth,
-      imageHeight,
-      useOpenCL: settings.imageUseOpenCL ?? false,
+      imageWidth: planned.width,
+      imageHeight: planned.height,
+      useOpenCL,
       engineOptions,
-    });
+    }, request);
   }
 
   async cancelGeneration(): Promise<void> {
     if (!isInFlight(this.state.phase)) return;
-    this.cancelRequested = true;
+    if (this.request) this.request.cancelled = true;
     this.remoteRequest?.abort();
     // Publish the terminal while conversation identity is still present. Sync subscribers run
     // synchronously, so every peer can remove its live image card before native cancellation waits.

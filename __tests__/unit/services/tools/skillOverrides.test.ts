@@ -115,6 +115,8 @@ describe('skill-card overrides (editable tool text the model receives)', () => {
     const hint = buildToolSystemPromptHint(['generate_image']);
     expect(hint).toContain('<tool_call>{"name": "TOOL_NAME", "arguments": {"ARG": "VALUE"}}</tool_call>');
     expect(hint).toContain('prompt (string, required)');
-    expect(hint).toContain('example: <tool_call>{"name":"generate_image","arguments":{"prompt":"..."}}</tool_call>');
+    expect(hint).toContain(
+      'example: <tool_call>{"name":"generate_image","arguments":{"prompt":"a red fox in a snowy forest, golden hour"}}</tool_call>',
+    );
   });
 });

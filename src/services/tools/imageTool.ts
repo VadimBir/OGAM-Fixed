@@ -18,6 +18,7 @@ import type {
 /** Size range the tool accepts from the model (owner rule: 64x64 up to 512x512, W and H independent). */
 export const IMAGE_TOOL_MIN_SIZE = 64;
 export const IMAGE_TOOL_MAX_SIZE = 512;
+export const IMAGE_TOOL_SIZE_STEP = 64;
 const STEPS_MIN = 1;
 const STEPS_MAX = 50;
 const GUIDANCE_MIN = 1;
@@ -68,6 +69,38 @@ function boundArg(
   return v;
 }
 
+/** The tool description promises "multiple of 64": a bounded size that is not one is rounded to the
+ *  nearest multiple (still inside 64-512) and noted, so every engine gets the size the text promised. */
+function snapSize(name: string, v: number | undefined, notes: string[]): number | undefined {
+  if (v === undefined) return undefined;
+  const step = IMAGE_TOOL_SIZE_STEP;
+  const snapped = Math.min(IMAGE_TOOL_MAX_SIZE, Math.max(IMAGE_TOOL_MIN_SIZE, Math.round(v / step) * step));
+  if (snapped !== v) notes.push(`${name} ${v} rounded to ${snapped}`);
+  return snapped;
+}
+
+/** Keys a small model uses for the image description instead of `prompt` (most specific first). */
+const PROMPT_ALIASES = ['prompt', 'image_prompt', 'description', 'image_description', 'text', 'query', 'input', 'caption'];
+
+function promptText(v: unknown): string | null {
+  if (typeof v === 'string') return v.trim() || null;
+  if (typeof v === 'number' && Number.isFinite(v)) return String(v);
+  if (Array.isArray(v)) {
+    const parts = v.filter(p => typeof p === 'string' && p.trim()).map(p => (p as string).trim());
+    return parts.length ? parts.join(', ') : null;
+  }
+  return null;
+}
+
+/** The image prompt from the model's arguments: `prompt`, else a common alias key. Null when none. */
+export function imagePromptFromArgs(args: Record<string, unknown> | undefined): string | null {
+  for (const key of PROMPT_ALIASES) {
+    const text = promptText(args?.[key]);
+    if (text) return text;
+  }
+  return null;
+}
+
 /** Samplers the active engine accepts; null = the engine is not sent a sampler (remote). */
 function engineSamplers(engine: ActiveImageEngine): readonly string[] | null {
   if (!engine || engine.kind === 'remote') return null;
@@ -89,8 +122,8 @@ export function resolveImageToolRequest(
 ): ImageToolRequest {
   const notes: string[] = [];
   const size = { min: IMAGE_TOOL_MIN_SIZE, max: IMAGE_TOOL_MAX_SIZE, integer: true };
-  const width = boundArg('width', args.width, size, notes);
-  const height = boundArg('height', args.height, size, notes);
+  const width = snapSize('width', boundArg('width', args.width, size, notes), notes);
+  const height = snapSize('height', boundArg('height', args.height, size, notes), notes);
   const steps = boundArg('steps', args.steps, { min: STEPS_MIN, max: STEPS_MAX, integer: true }, notes);
   const guidance = boundArg(
     'guidance',
@@ -125,6 +158,11 @@ export function resolveImageToolRequest(
   };
 }
 
+/** What the model does after a successful image: one short reply, no description, no re-call. */
+export const IMAGE_TOOL_NEXT_STEP =
+  'The image is already shown to the user. Reply with one short sentence (mention a note if there is one). ' +
+  'Do not describe the image. Do not call generate_image again unless the user asks for a new image.';
+
 /** Compact JSON the model reads back: the values USED, plus a note for each value it did not get. */
 export function imageToolSuccessContent(
   used: ImageGenUsedParams,
@@ -138,13 +176,16 @@ export function imageToolSuccessContent(
   };
   differs('width', used.width);
   differs('height', used.height);
+  differs('steps', used.steps);
+  differs('guidance', used.guidance);
+  differs('seed', used.seed);
   if (used.engine === 'remote') {
-    const unsent = (['steps', 'guidance', 'seed', 'sampler'] as const).filter(k => asked[k] !== undefined);
-    if (unsent.length) out.push(`${unsent.join(', ')} not sent: the remote engine takes prompt and size only`);
-  } else {
-    differs('steps', used.steps);
-    differs('guidance', used.guidance);
-    differs('seed', used.seed);
+    // A remote server is sent only the fields its kind accepts (remoteMediaRuntime); USED holds
+    // exactly those, so an asked value missing from USED was not sent.
+    const unsent = (['steps', 'guidance', 'seed', 'sampler'] as const).filter(
+      k => asked[k] !== undefined && used[k] === undefined,
+    );
+    if (unsent.length) out.push(`${unsent.join(', ')} not sent: this remote server does not take them`);
   }
   return JSON.stringify({
     status: 'ok',
@@ -154,9 +195,13 @@ export function imageToolSuccessContent(
     ...(used.steps !== undefined ? { steps: used.steps } : {}),
     ...(used.guidance !== undefined ? { guidance: used.guidance } : {}),
     ...(used.seed !== undefined ? { seed: used.seed } : {}),
-    ...(used.engine === 'local' ? { sampler: used.sampler || 'default' } : {}),
+    ...(used.engine === 'local'
+      ? { sampler: used.sampler || 'default' }
+      : used.sampler
+        ? { sampler: used.sampler }
+        : {}),
     ...(out.length ? { notes: out } : {}),
-    next: 'The image is already shown to the user. Do not call generate_image again unless asked for another image.',
+    next: IMAGE_TOOL_NEXT_STEP,
   });
 }
 

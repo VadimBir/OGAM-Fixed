@@ -4,7 +4,7 @@ import { ToolCall, ToolResult } from './types';
 import type { RagSearchResult } from '../rag';
 import logger from '../../utils/logger';
 import { handleAddCalendarEvent } from './calendarTool';
-import { handleGenerateImage } from './imageTool';
+import { handleGenerateImage, imagePromptFromArgs } from './imageTool';
 
 function makeResult(call: ToolCall, start: number, opts: { content: string; error?: string }): ToolResult {
   return { toolCallId: call.id, name: call.name, content: opts.content, error: opts.error, durationMs: Date.now() - start };
@@ -49,7 +49,9 @@ async function dispatchTool(call: ToolCall): Promise<string> {
       return handleReadUrl(url);
     }
     case 'generate_image': {
-      const prompt = requireString(call, 'prompt');
+      // Small models put the description under another key (description/text/query...) or as a list;
+      // the tool loop also fills an absent prompt from the user's message before this runs.
+      const prompt = imagePromptFromArgs(call.arguments);
       if (!prompt) throw new Error('Missing required parameter: prompt');
       return handleGenerateImage(prompt, call);
     }

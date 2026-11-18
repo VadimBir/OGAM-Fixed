@@ -13,6 +13,7 @@ import {
   SWEET_SPOT_SIZE,
 } from '../../utils/imageGenAdvice';
 import { ImageEngineSettings } from '../../components/ImageEngineSettings';
+import { ImageDefaultsSettings } from '../../components/ImageDefaultsSettings';
 import { createStyles } from './styles';
 
 // ─── Advanced Sub-Components ─────────────────────────────────────────────────
@@ -58,7 +59,7 @@ const ImageGpuSection: React.FC = () => {
   const { settings, updateSettings } = useAppStore();
   const { clearing, handleClearCache } = useClearGpuCache();
   const trackColor = { false: colors.surfaceLight, true: `${colors.primary}80` };
-  const isOpenCL = settings?.imageUseOpenCL ?? true;
+  const isOpenCL = settings?.imageUseOpenCL ?? DEFAULT_SETTINGS.imageUseOpenCL; // == store default (false), as ImageQualitySliders + imageGenerationService
 
   return (
     <>
@@ -154,6 +155,8 @@ const ImageAdvancedSection: React.FC = () => {
         min={1} max={8} step={1}
         onChange={(value) => updateSettings({ imageThreads: value })}
       />
+
+      <ImageDefaultsSettings />
 
       <DetectionMethodRow />
       <EnhanceImageToggle />

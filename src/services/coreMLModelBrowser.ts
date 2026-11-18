@@ -202,25 +202,27 @@ export async function fetchAvailableCoreMLModels(
     return cachedModels;
   }
 
+  const results = await Promise.allSettled(REPOS.map(repoInfo => fetchModelFromRepo(repoInfo)));
+
+  // REPOS order, not network-completion order: the list must not reshuffle between opens.
   const models: CoreMLImageModel[] = [];
-
-  const results = await Promise.allSettled(
-    REPOS.map(async (repoInfo) => {
-      const model = await fetchModelFromRepo(repoInfo);
-      if (model) {
-        models.push(model);
-      }
-    }),
-  );
-
+  const failures: unknown[] = [];
   results.forEach((r, i) => {
     if (r.status === 'rejected') {
-      console.warn(`[CoreMLBrowser] Failed to fetch ${REPOS[i].repo}:`, r.reason);
+      failures.push(r.reason);
       logger.warn(`[CoreMLBrowser] Failed to fetch ${REPOS[i].repo}:`, r.reason);
+    } else if (r.value) {
+      models.push(r.value);
     }
   });
 
-  cachedModels = models;
-  cacheTimestamp = Date.now();
+  // Every repo failed (offline, HF down): an error the screen shows with Retry. Returning [] here
+  // rendered a blank tab with no message and no Retry, and cached that blank for the whole TTL.
+  if (failures.length === REPOS.length) throw failures[0];
+  // A partial list is shown but not cached, so the next open retries the repos that failed.
+  if (failures.length === 0) {
+    cachedModels = models;
+    cacheTimestamp = Date.now();
+  }
   return models;
 }

@@ -94,7 +94,11 @@ export const SDCPP_SCHEDULERS = [
 class SdCppGeneratorService {
   private loadedThreads: number | null = null;
   private loadedConfig: SdCppLoadConfig | null = null;
-  private generating = false;
+  /** The run JS currently owns (null = none). cancelGeneration releases it at once so a new request
+   *  can queue natively behind the cancelled run (native refuses the cancelled one by run id); a
+   *  superseded run's finally must not clear the newer run's ownership. */
+  private activeRun: number | null = null;
+  private runCounter = 0;
   private eventEmitter: NativeEventEmitter | null = null;
 
   private getEmitter(): NativeEventEmitter {
@@ -217,13 +221,14 @@ class SdCppGeneratorService {
     if (!this.isAvailable()) {
       throw new Error('stable-diffusion.cpp image generation is not available on this platform');
     }
-    if (this.generating) throw new Error('Image generation already in progress');
+    if (this.activeRun !== null) throw new Error('Image generation already in progress');
     const trimmedPrompt = (params.prompt || '').trim();
     if (!trimmedPrompt) throw new Error('Cannot generate image with an empty prompt');
     if (params.initImage) throw new SdCppUnsupportedFeatureError('initImage');
     if (params.maskImage) throw new SdCppUnsupportedFeatureError('maskImage');
 
-    this.generating = true;
+    const run = ++this.runCounter;
+    this.activeRun = run;
     const subscription = this.getEmitter().addListener(
       'SdCppProgress',
       (event: { step: number; totalSteps: number; progress: number }) => {
@@ -256,19 +261,19 @@ class SdCppGeneratorService {
       }
       throw error;
     } finally {
-      this.generating = false;
+      if (this.activeRun === run) this.activeRun = null;
       subscription.remove();
     }
   }
 
   async cancelGeneration(): Promise<boolean> {
     if (!this.isAvailable()) return true;
-    this.generating = false;
+    this.activeRun = null;
     return await SdCppImageModule.cancelGeneration();
   }
 
   async isGenerating(): Promise<boolean> {
-    return this.generating;
+    return this.activeRun !== null;
   }
 }
 

@@ -22,7 +22,7 @@ import { aggregateActiveDownloads } from '../../utils/downloadAggregate';
 import { TextFiltersSection } from './TextFiltersSection';
 import { FilterState, SortOption } from './types';
 import { SORT_OPTIONS } from './constants';
-import { formatNumber, getTextModelCompatibility } from './utils';
+import { fileMatchesQuantFilter, fileQuantLabel, formatNumber, getTextModelCompatibility } from './utils';
 import { buildCuratedLiteRTFiles, curatedLiteRTDownloadWarning, getCuratedLiteRTEntry, LITERT_PARENT_ID } from '../../services/curatedLiteRTRegistry';
 import { LITERT_FILE_META, LITERT_RECOMMENDED_MODEL, LITERT_PARENT_RECOMMENDED } from './litertRecommended';
 import { modelManager } from '../../services';
@@ -75,16 +75,18 @@ type DetailProps = Pick<Props,
 // Build the file card's onDownload handler. Whether to show the curated confirm-download
 // warning is the registry's single DEVICE-AWARE decision (curatedLiteRTDownloadWarning),
 // shared with the onboarding screen — never a static per-model flag re-derived here.
-function buildFileDownloadHandler({ s, fileName, sizeBytes, ramGB, proceedDownload, setAlertState }: {
+function buildFileDownloadHandler({ s, fileName, quantization, sizeBytes, ramGB, proceedDownload, setAlertState }: {
   s: { downloaded: boolean; progress: unknown; hasFailed: boolean };
   fileName: string;
+  /** GGUF quant label; a quant with CPU-only weight types asks before downloading (ggufCpuFallbackWarning). */
+  quantization?: string;
   sizeBytes: number; ramGB: number;
   proceedDownload: () => void;
   setAlertState: (state: AlertState) => void;
 }): (() => void) | undefined {
   if (s.downloaded || s.progress || s.hasFailed) return undefined;
   return () => {
-    const warning = curatedLiteRTDownloadWarning(fileName, sizeBytes, ramGB);
+    const warning = curatedLiteRTDownloadWarning(fileName, sizeBytes, ramGB) ?? ggufCpuFallbackWarning(quantization);
     if (warning) {
       setAlertState(showAlert(warning.title, warning.message, [
         { text: 'Cancel', style: 'cancel', onPress: () => setAlertState(hideAlert()) },
@@ -272,12 +274,12 @@ const ModelDetailView: React.FC<DetailProps> = ({
       ) : (
         <FlatList
           data={modelFiles
-            .filter(f => f.size > 0 && !fileExceedsBudget(f.size, ramGB) && (filterState.quant === 'all' || f.name.includes(filterState.quant)))
+            .filter(f => f.size > 0 && !fileExceedsBudget(f.size, ramGB) && fileMatchesQuantFilter(f.name, filterState.quant))
             .sort((a, b) => {
               if (selectedModel.id === LITERT_PARENT_ID) return a.size - b.size; // curated: small-first
               // Tier: Q4_K_M (CPU default, lowest size) → GPU/NPU Q4_0/Q8_0 → rest (CPU
               // fallback). Accelerable tier small-first (Q4_0 before Q8_0); others size desc.
-              const tier = (f: ModelFile) => f.name.includes('Q4_K_M') ? 0 : isAccelerableQuant(f.quantization) ? 1 : 2;
+              const tier = (f: ModelFile) => fileQuantLabel(f.name) === 'Q4_K_M' ? 0 : isAccelerableQuant(f.quantization) ? 1 : 2;
               if (tier(a) !== tier(b)) return tier(a) - tier(b);
               return tier(a) === 1 ? a.size - b.size : b.size - a.size;
             })}

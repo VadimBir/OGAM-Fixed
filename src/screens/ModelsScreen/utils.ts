@@ -5,10 +5,32 @@ import { ImageModelDescriptor, ModelTypeFilter } from './types';
 import { imageBackendLabel } from '../../utils/imageBackend';
 import { looksLikeVisionModel } from '../../utils/visionModel';
 import { sizeToBytes } from '../../utils/fileSize';
+import { parseQuantization } from '../../utils/quantization';
+import { isAccelerableQuant } from '../../utils/acceleration';
 
 // Re-export the canonical byte formatter so existing importers keep working while
 // there is only ONE implementation (see src/utils/formatBytes.ts).
 export { formatBytes } from '../../utils/formatBytes';
+
+/**
+ * Quant label of a file for filtering/sorting: the shared parser's canonical label with the
+ * unsloth `UD-` packaging prefix removed (UD-Q4_K_M is a Q4_K_M file). A raw `name.includes`
+ * was case-sensitive (missed `model-q4_k_m.gguf`) and substring-based (`Q6_K` matched `Q6_K_L`).
+ */
+export function fileQuantLabel(fileName: string): string {
+  return parseQuantization(fileName).replace(/^UD-/, '');
+}
+
+/** Quant-filter key that keeps only files whose quant runs fully on the GPU (isAccelerableQuant). */
+export const GPU_QUANT_FILTER = 'gpu';
+
+/** True when `fileName` passes the Models-screen quant filter (`'all'` passes everything). */
+export function fileMatchesQuantFilter(fileName: string, quantFilter: string): boolean {
+  if (quantFilter === 'all') return true;
+  // The UD- prefix is kept here: an unsloth dynamic mix has no fixed tensor types, so it is not GPU-proven.
+  if (quantFilter === GPU_QUANT_FILTER) return isAccelerableQuant(parseQuantization(fileName));
+  return fileQuantLabel(fileName) === quantFilter.toUpperCase();
+}
 
 export function formatNumber(num: number): string {
   if (num >= 1000000) return `${(num / 1000000).toFixed(1)}M`;

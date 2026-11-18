@@ -18,9 +18,12 @@ jest.mock('@react-navigation/native', () => ({
   useIsFocused: () => true,
 }));
 
-type Cfg = { label: string; backend: 'mnn' | 'qnn'; platform: 'ios' | 'android'; expected: string };
+// GPU Acceleration (imageUseOpenCL) defaults OFF (appStore default false: the GPU VAE only decodes
+// cleanly at 512x512), so MNN runs on CPU unless the user turns the switch on.
+type Cfg = { label: string; backend: 'mnn' | 'qnn'; platform: 'ios' | 'android'; expected: string; gpuAcceleration?: boolean };
 const CONFIGS: Cfg[] = [
-  { label: 'MNN GPU (Android)', backend: 'mnn', platform: 'android', expected: 'MNN (GPU)' },
+  { label: 'MNN GPU (Android)', backend: 'mnn', platform: 'android', expected: 'MNN (GPU)', gpuAcceleration: true },
+  { label: 'MNN CPU (Android, default)', backend: 'mnn', platform: 'android', expected: 'MNN (CPU)' },
   { label: 'Metal (Core ML, iOS)', backend: 'mnn', platform: 'ios', expected: 'Core ML (ANE)' },
 ];
 
@@ -28,6 +31,7 @@ describe('happy — image generation shows the correct backend label (heavy entr
   it.each(CONFIGS)('$label: produces an image and the details show "$expected"', async (cfg) => {
     const h = await setupChatScreen({ engine: 'litert', platform: cfg.platform });
     h.enableGenerationDetailsViaUI(); // turn details on BEFORE mounting the chat (separate render)
+    if (cfg.gpuAcceleration) h.useAppStore.getState().updateSettings({ imageUseOpenCL: true });
     h.render();
     await h.placeImageModel({ backend: cfg.backend });
 

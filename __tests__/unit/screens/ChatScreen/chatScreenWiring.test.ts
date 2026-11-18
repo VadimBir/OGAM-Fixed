@@ -17,6 +17,7 @@ import {
   useChatRuntimeSubscriptions,
 } from '../../../../src/screens/ChatScreen/useChatScreenLifecycle';
 import { generationService, imageGenerationService } from '../../../../src/services';
+import { QUEUE_PROCESSOR_NOT_READY } from '../../../../src/services/generationService';
 
 function actionArgs(overrides: Record<string, any> = {}): any {
   return {
@@ -138,7 +139,7 @@ describe('queue drain when the screen mounts again', () => {
     expect(drain).toHaveBeenCalled();
   });
 
-  it('waits for a running image generation (it drains on completion)', () => {
+  it('drains during a running image generation too: drainQueue itself waits for the image', () => {
     const drain = jest.spyOn(generationService, 'drainQueue').mockImplementation(() => {});
     jest
       .spyOn(imageGenerationService, 'getState')
@@ -146,6 +147,20 @@ describe('queue drain when the screen mounts again', () => {
     renderHook(() =>
       useChatRuntimeSubscriptions({ current: null }, { current: null }),
     );
-    expect(drain).not.toHaveBeenCalled();
+    // The image gate lives in generationService.processNextInQueue (see generationService.queueStopImage.test).
+    expect(drain).toHaveBeenCalled();
+  });
+
+  it('screen not ready: the registered processor reports NOT_READY (service keeps the message) instead of dropping it', async () => {
+    jest.spyOn(generationService, 'drainQueue').mockImplementation(() => {});
+    const setProcessor = jest.spyOn(generationService, 'setQueueProcessor');
+    renderHook(() =>
+      useChatRuntimeSubscriptions({ current: null }, { current: null }),
+    );
+    const processor = setProcessor.mock.calls.find(c => c[0] !== null)?.[0];
+    expect(processor).toBeTruthy();
+    await expect(
+      processor!({ id: 'q1', conversationId: 'c1', text: 'hi', messageText: 'hi' }),
+    ).resolves.toBe(QUEUE_PROCESSOR_NOT_READY);
   });
 });

@@ -7,6 +7,7 @@
 // and rethrows as java.lang.RuntimeException.
 #include <jni.h>
 #include <android/log.h>
+#include <dlfcn.h>
 
 #include <atomic>
 #include <climits>
@@ -21,6 +22,10 @@
 #include <vector>
 
 #include "stable-diffusion.h"
+
+#ifdef SDCPP_GPU_ONLY
+#include <vulkan/vulkan.h>
+#endif
 
 #define TAG "SdCppJNI"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
@@ -129,6 +134,84 @@ bool is_quantized_type(enum sd_type_t t) {
   }
 }
 
+
+#ifdef SDCPP_GPU_ONLY
+// GPU-only build (app policy: GPU or NPU, never CPU). Before ggml touches Vulkan, probe the loader and
+// device list with plain Vulkan calls: a missing/broken driver becomes a Java exception ("ERR_NO_GPU")
+// instead of a GGML_ABORT inside the backend that would kill the process. The probe cannot catch a
+// driver that crashes later inside real compute; that is only observable on the device.
+struct GpuProbe {
+  bool ok = false;
+  std::string device;   // first non-CPU physical device
+  std::string error;    // set when !ok
+};
+
+GpuProbe run_gpu_probe() {
+  GpuProbe r;
+  void* lib = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
+  if (lib == nullptr) {
+    r.error = "libvulkan.so could not be loaded: no Vulkan driver on this device";
+    return r;
+  }
+  auto get_proc = reinterpret_cast<PFN_vkGetInstanceProcAddr>(dlsym(lib, "vkGetInstanceProcAddr"));
+  if (get_proc == nullptr) {
+    r.error = "vkGetInstanceProcAddr missing in libvulkan.so";
+    return r;
+  }
+  auto create_instance = reinterpret_cast<PFN_vkCreateInstance>(get_proc(nullptr, "vkCreateInstance"));
+  if (create_instance == nullptr) {
+    r.error = "vkCreateInstance unavailable";
+    return r;
+  }
+  VkApplicationInfo app{};
+  app.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+  app.pApplicationName = "ai.offgridmobile.sdcpp.probe";
+  app.apiVersion = VK_API_VERSION_1_0;
+  VkInstanceCreateInfo ci{};
+  ci.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+  ci.pApplicationInfo = &app;
+  VkInstance inst = VK_NULL_HANDLE;
+  const VkResult cr = create_instance(&ci, nullptr, &inst);
+  if (cr != VK_SUCCESS || inst == VK_NULL_HANDLE) {
+    r.error = "vkCreateInstance failed (VkResult " + std::to_string(static_cast<int>(cr)) + ")";
+    return r;
+  }
+  auto destroy = reinterpret_cast<PFN_vkDestroyInstance>(get_proc(inst, "vkDestroyInstance"));
+  auto enum_dev = reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(get_proc(inst, "vkEnumeratePhysicalDevices"));
+  auto get_props = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(get_proc(inst, "vkGetPhysicalDeviceProperties"));
+  if (enum_dev == nullptr || get_props == nullptr) {
+    r.error = "Vulkan device enumeration entry points missing";
+  } else {
+    uint32_t n = 0;
+    if (enum_dev(inst, &n, nullptr) != VK_SUCCESS || n == 0) {
+      r.error = "no Vulkan physical device";
+    } else {
+      std::vector<VkPhysicalDevice> devs(n);
+      if (enum_dev(inst, &n, devs.data()) != VK_SUCCESS) {
+        r.error = "vkEnumeratePhysicalDevices failed";
+      } else {
+        for (uint32_t i = 0; i < n && !r.ok; ++i) {
+          VkPhysicalDeviceProperties props;
+          get_props(devs[i], &props);
+          if (props.deviceType != VK_PHYSICAL_DEVICE_TYPE_CPU) {
+            r.ok = true;
+            r.device = props.deviceName;
+          }
+        }
+        if (!r.ok) r.error = "only CPU (software) Vulkan devices found; GPU required";
+      }
+    }
+  }
+  if (destroy != nullptr) destroy(inst, nullptr);
+  return r;
+}
+
+const GpuProbe& gpu_probe() {
+  static const GpuProbe cached = run_gpu_probe();  // thread-safe one-time init
+  return cached;
+}
+#endif  // SDCPP_GPU_ONLY
+
 struct LoadOptions {
   std::string model, vae, taesd, wtype;
   int n_threads = 0;
@@ -146,6 +229,12 @@ struct LoadOptions {
 
 sd_ctx_t* load_ctx(JNIEnv* env, const LoadOptions& o) {
   const std::string empty;
+#ifdef SDCPP_GPU_ONLY
+  if (!gpu_probe().ok) {
+    throw_java(env, ("ERR_NO_GPU: " + gpu_probe().error + " (this build runs on the GPU only)").c_str());
+    return nullptr;
+  }
+#endif
 
   sd_ctx_params_t p;
   sd_ctx_params_init(&p);
@@ -172,8 +261,13 @@ sd_ctx_t* load_ctx(JNIEnv* env, const LoadOptions& o) {
   p.pulid_weights_path = empty.c_str();
   p.tensor_type_rules = empty.c_str();
   p.max_vram = empty.c_str();
-  p.backend = empty.c_str();
+  p.backend = empty.c_str();  // overridden to "gpu" below in GPU-only builds
   p.params_backend = o.params_backend.c_str();
+#ifdef SDCPP_GPU_ONLY
+  // "gpu" = first GPU (then integrated GPU) device from the ggml device list; never resolves to CPU.
+  static const std::string kGpuBackend = "gpu";
+  p.backend = kGpuBackend.c_str();
+#endif
   p.split_mode = empty.c_str();
   p.rpc_servers = empty.c_str();
   p.model_args = nullptr;
@@ -190,8 +284,7 @@ sd_ctx_t* load_ctx(JNIEnv* env, const LoadOptions& o) {
     }
   }
   // flash_attn covers the text encoder + VAE; the diffusion model always uses it (owner requirement).
-  // This library is built CPU-only (CMakeLists.txt enables no GPU backend), so there is no backend
-  // fallback here. If a backend rejects the flash op, ggml_ext_attention_ext uses plain attention
+  // If a backend rejects the flash op, ggml_ext_attention_ext uses plain attention
   // (ggml_backend_supports_op, core/ggml_extend.cpp at the pinned commit; not re-verified here).
   p.flash_attn = o.flash_attn;
   p.diffusion_flash_attn = true;
@@ -259,6 +352,10 @@ extern "C" JNIEXPORT jstring JNICALL
 Java_ai_offgridmobile_sdcpp_SdCppNative_nativeSystemInfo(JNIEnv* env, jclass) {
   try {
     std::string info = std::string("sd.cpp ") + sd_version() + " (" + sd_commit() + ") | " + sd_get_system_info();
+#ifdef SDCPP_GPU_ONLY
+    info += gpu_probe().ok ? " | backend=vulkan gpu=" + gpu_probe().device
+                           : " | backend=vulkan UNAVAILABLE: " + gpu_probe().error;
+#endif
     return env->NewStringUTF(info.c_str());
   } catch (...) {
     throw_from_current(env, "nativeSystemInfo");

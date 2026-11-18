@@ -64,3 +64,32 @@ describe('checkMemoryForModel uses live free RAM', () => {
     expect((await check()).severity).toBe('safe');
   });
 });
+
+// The pre-load estimate must size the KV cache at the SAME clamped context the loader uses
+// (buildModelParams min(requested, trained)), not the raw global setting.
+describe('estimateTextModelMemoryMB uses the clamped context', () => {
+  const { loadLlamaModelInfo } = require('llama.rn');
+  const memEstimate = require('../../../src/services/llamaMemoryEstimate');
+  const { estimateTextModelMemoryMB } = require('../../../src/services/activeModelService/memory');
+  const { useAppStore } = require('../../../src/stores');
+  const { createDownloadedModel } = require('../../utils/factories');
+  let spy: jest.SpyInstance;
+  beforeEach(() => {
+    spy = jest.spyOn(memEstimate, 'estimateLlamaMemory').mockReturnValue({ totalBytes: 1024 * 1024 * 1024, kvBytes: 0, computeBytes: 0, context: 0 });
+    useAppStore.setState({ settings: { ...useAppStore.getState().settings, contextLength: 32768 } });
+  });
+  afterEach(() => spy.mockRestore());
+
+  it('clamps to the trained context from the header', async () => {
+    (loadLlamaModelInfo as jest.Mock).mockResolvedValueOnce({ 'general.architecture': 'gemma3', 'gemma3.context_length': 8192 });
+    const mb = await estimateTextModelMemoryMB(createDownloadedModel({ engine: 'llama', filePath: '/m.gguf', fileSize: GB }));
+    expect(spy.mock.calls[0][1].ctxLen).toBe(8192);
+    expect(mb).toBe(1024);
+  });
+
+  it('keeps the requested context when the header has no trained context', async () => {
+    (loadLlamaModelInfo as jest.Mock).mockResolvedValueOnce({});
+    await estimateTextModelMemoryMB(createDownloadedModel({ engine: 'llama', filePath: '/m.gguf', fileSize: GB }));
+    expect(spy.mock.calls[0][1].ctxLen).toBe(32768);
+  });
+});

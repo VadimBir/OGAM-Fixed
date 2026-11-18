@@ -5,6 +5,9 @@ export interface ToolDefinition {
   description: string;
   icon: string;
   parameters: Record<string, ToolParameter>;
+  /** One minimal, valid argument object. Shown to the model as the example call (schema
+   *  description: "Example arguments: {...}"; text hint: a full <tool_call> line). */
+  example?: Record<string, unknown>;
   requiresNetwork?: boolean;
 }
 

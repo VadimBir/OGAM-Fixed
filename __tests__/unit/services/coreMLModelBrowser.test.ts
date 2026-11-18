@@ -268,15 +268,21 @@ describe('CoreMLModelBrowser', () => {
   });
 
   describe('error handling', () => {
-    it('handles API errors gracefully via Promise.allSettled', async () => {
+    it('rejects when every repo fails so the screen shows an error with Retry', async () => {
       setupFailingFetch();
 
-      // Should not throw
-      const models = await fetchCoreMLModels(true);
+      // All repos failing (offline / HF down) is an error, not an empty catalog: an empty list
+      // rendered a blank tab with no Retry and was cached for the whole TTL.
+      await expect(fetchCoreMLModels(true)).rejects.toThrow('HTTP 500');
+    });
 
-      // Returns empty array when all repos fail
-      expect(Array.isArray(models)).toBe(true);
-      expect(models.length).toBe(0);
+    it('does not cache an all-failed fetch, so the next open retries', async () => {
+      setupFailingFetch();
+      await expect(fetchCoreMLModels(true)).rejects.toThrow('HTTP 500');
+
+      setupSuccessfulFetch();
+      const models = await fetchCoreMLModels(false);
+      expect(models.length).toBeGreaterThan(0);
     });
 
     it('returns partial results when one repo fails', async () => {
@@ -362,7 +368,7 @@ describe('CoreMLModelBrowser', () => {
       setupFailingFetch();
       const warnSpy = jest.spyOn(console, 'warn').mockImplementation();
 
-      await fetchCoreMLModels(true);
+      await expect(fetchCoreMLModels(true)).rejects.toThrow('HTTP 500');
 
       expect(warnSpy).toHaveBeenCalled();
       const warnCalls = warnSpy.mock.calls.map(c => c[0]);

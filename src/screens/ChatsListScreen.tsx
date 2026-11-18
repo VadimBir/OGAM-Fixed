@@ -107,7 +107,7 @@ export const ChatsListScreen: React.FC = () => {
   const handleUnloadImageModel = async () => {
     setIsModelLoading(true);
     try {
-      await activeModelService.unloadImageModel();
+      await activeModelService.unloadImageModel(true); // free RAM, keep the selection (lazy reload)
     } finally {
       setIsModelLoading(false);
     }

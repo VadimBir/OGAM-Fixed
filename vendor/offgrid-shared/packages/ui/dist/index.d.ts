@@ -16,9 +16,8 @@ export interface ProgressPresentation {
   terminal: boolean;
 }
 export interface ProgressRateSample {
-  bytes: number;
-  atMs: number;
-  bytesPerSecond?: number;
+  currentBytes: number;
+  sampledAtMs: number;
 }
 export declare function projectProgress(input: ProgressLike): ProgressPresentation;
 export declare function sampleProgressRate(

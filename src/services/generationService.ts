@@ -27,6 +27,11 @@ import {
 } from './generationRemoteHelpers';
 
 const SHARE_PROMPT_DELAY_MS = 1500;
+/** Lazy: imageGenerationService's import graph (native engines, residency) must not load with this
+ *  module; same cycle-safe pattern as tools/imageTool.ts. */
+function imageService(): typeof import('./imageGenerationService').imageGenerationService {
+  return require('./imageGenerationService').imageGenerationService; // NOSONAR (cycle-safe lazy import)
+}
 type StreamChunk = string | { content?: string; reasoningContent?: string };
 
 /**
@@ -73,7 +78,12 @@ export interface GenerationState {
 }
 
 type GenerationListener = (state: GenerationState) => void;
-type QueueProcessor = (item: QueuedMessage) => Promise<void>;
+/** A queue processor returns this when it cannot dispatch yet (chat screen deps not wired). The
+ *  service puts the batch back at the queue head instead of losing the user's message, and does not
+ *  re-drain on its own (that would spin); the next drain trigger (processor re-registration,
+ *  resetState, image end, drainQueue) retries it. */
+export const QUEUE_PROCESSOR_NOT_READY = 'not-ready' as const;
+type QueueProcessor = (item: QueuedMessage) => Promise<void | typeof QUEUE_PROCESSOR_NOT_READY>;
 
 class GenerationService {
   private state: GenerationState = {
@@ -92,6 +102,13 @@ class GenerationService {
   private queueProcessor: QueueProcessor | null = null;
   /** A queued batch has been handed to the processor and its promise has not settled yet. */
   private queueDispatchInFlight: boolean = false;
+  /** Conversation of the queued batch whose processor promise is pending (setup before isGenerating). */
+  private dispatchingConversationId: string | null = null;
+  /** Conversation of the turn inside withModelFallback (set on entry, cleared on exit). Covers a
+   *  Stop that lands between fallback attempts, while state.conversationId is already null. */
+  private turnConversationId: string | null = null;
+  /** Unsubscribe of the one pending "drain when the image generation ends" wait, if any. */
+  private imageWaitUnsubscribe: (() => void) | null = null;
   private currentRemoteAbortController: AbortController | null = null;
   private remoteTimeToFirstToken: number | undefined;
   private contextUsage: Pick<GenerationMeta, 'contextPromptTokens' | 'contextWindowTokens' | 'contextEstimate'> | undefined;
@@ -238,6 +255,21 @@ class GenerationService {
     messages: Message[],
     run: (route: FallbackRoute, prepared: boolean) => Promise<T>,
     canRetry: () => boolean = () => true,
+  ): Promise<T | void> {
+    this.turnConversationId = conversationId;
+    try {
+      return await this.runModelFallbackRoutes(conversationId, messages, run, canRetry);
+    } finally {
+      if (this.turnConversationId === conversationId) this.turnConversationId = null;
+    }
+  }
+
+  // eslint-disable-next-line max-params
+  private async runModelFallbackRoutes<T>(
+    conversationId: string,
+    messages: Message[],
+    run: (route: FallbackRoute, prepared: boolean) => Promise<T>,
+    canRetry: () => boolean,
   ): Promise<T | void> {
     const routes = this.fallbackRoutes(messages);
     let failedName = routes[0].name;
@@ -412,6 +444,10 @@ class GenerationService {
     // failed completion has reset `isGenerating`; Stop/Eject must still prevent its retry.
     this.abortRequested = true;
     this.generationAttempt += 1;
+    // "I CANNOT STOP IT": a user Stop ends the stopped conversation's queued sends too. Before this, they
+    // auto-dispatched ~100 ms later (resetState's timer, the image path's drainQueue, the batch's settle).
+    // Cleared BEFORE resetState so its timer finds nothing of this conversation to dispatch.
+    this.clearQueueForStoppedConversations();
     if (!this.state.isGenerating) {
       // Settle the visible reply before native stop callbacks can finalize it as a normal completion.
       this.keepShownPartialOrClear();
@@ -520,6 +556,13 @@ class GenerationService {
   private processNextInQueue(): void {
     if (this.state.queuedMessages.length === 0 || !this.queueProcessor) return;
     if (this.queueDispatchInFlight) return;
+    // Never start a queued turn while an image generation holds the RAM (text model load + diffusion on a
+    // 12 GB phone = OOM). Wait for it to end, then drain. drainQueue/resetState's timer/the batch settle
+    // all funnel here, so this is the one gate.
+    if (imageService().getState().isGenerating) {
+      this.drainWhenImageIdle();
+      return;
+    }
     const queued = this.state.queuedMessages;
     const headConversationId = queued[0].conversationId;
     const all = queued.filter(m => m.conversationId === headConversationId);
@@ -537,14 +580,69 @@ class GenerationService {
       assistantEnabled: all.some(m => m.assistantEnabled),
     };
     this.queueDispatchInFlight = true;
+    this.dispatchingConversationId = headConversationId;
+    let requeued = false;
     this.queueProcessor(combined)
+      .then(result => {
+        if (result !== QUEUE_PROCESSOR_NOT_READY) return;
+        // Not dispatched: restore the original items at the head (still visible in the queue UI).
+        requeued = true;
+        this.state = { ...this.state, queuedMessages: [...all, ...this.state.queuedMessages] };
+        this.notifyListeners();
+        logger.warn(`[GenerationService] queue processor not ready; kept ${all.length} queued message(s) for ${headConversationId}`);
+      })
       .catch(e => { logger.error('[GenerationService] Queue processor error:', e); })
       .finally(() => {
         this.queueDispatchInFlight = false;
+        this.dispatchingConversationId = null;
         // Items left for other conversations (or queued during this batch) must not wait for an
         // unrelated future turn: a batch that ended without a text turn never reaches resetState.
-        if (this.state.queuedMessages.length > 0) this.drainQueue();
+        // A not-ready batch does NOT re-drain here: the same processor would refuse again at once.
+        if (!requeued && this.state.queuedMessages.length > 0) this.drainQueue();
       });
+  }
+
+  /** Subscribe once; drain on the first image state that is no longer in flight. */
+  private drainWhenImageIdle(): void {
+    if (this.imageWaitUnsubscribe) return;
+    let settled = false;
+    let unsubscribe: (() => void) | null = null;
+    const release = () => {
+      settled = true;
+      unsubscribe?.();
+      this.imageWaitUnsubscribe = null;
+    };
+    unsubscribe = imageService().subscribe(state => {
+      if (settled || state.isGenerating) return;
+      release();
+      this.drainQueue();
+    });
+    // subscribe() reports the current state synchronously; the image may have ended in between.
+    if (settled) unsubscribe();
+    else this.imageWaitUnsubscribe = release;
+  }
+
+  /** Drop queued sends of every conversation this Stop ends: the text turn, the queued batch being
+   *  dispatched, the turn between fallback attempts, and the in-flight image generation. */
+  private clearQueueForStoppedConversations(): void {
+    if (this.state.queuedMessages.length === 0) return;
+    const image = imageService().getState();
+    const stopped = new Set(
+      [
+        this.state.conversationId,
+        this.dispatchingConversationId,
+        this.turnConversationId,
+        image.isGenerating ? image.conversationId : null,
+      ].filter((id): id is string => !!id),
+    );
+    if (stopped.size === 0) return;
+    const kept = this.state.queuedMessages.filter(m => !stopped.has(m.conversationId));
+    if (kept.length === this.state.queuedMessages.length) return;
+    logger.log(
+      `[GenerationService] stop: dropped ${this.state.queuedMessages.length - kept.length} queued message(s) for [${[...stopped].join(',')}]`,
+    );
+    this.state = { ...this.state, queuedMessages: kept };
+    this.notifyListeners();
   }
 
   private resetState(): void {

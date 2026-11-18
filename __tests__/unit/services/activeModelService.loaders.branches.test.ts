@@ -8,6 +8,9 @@
 jest.mock('react-native', () => ({
   Platform: { OS: 'android' },
   ToastAndroid: { showWithGravity: jest.fn(), LONG: 1, BOTTOM: 2 },
+  // loaders -> imageEngineRouter -> sdCppGenerator reads NativeModules.SdCppImageModule at module load.
+  NativeModules: {},
+  NativeEventEmitter: jest.fn(),
 }));
 jest.mock('../../../src/stores', () => ({
   useAppStore: { getState: jest.fn() },
@@ -123,7 +126,9 @@ describe('doLoadTextModel — mmproj clear branch', () => {
     expect(ctx.onLoaded).toHaveBeenCalledWith('model-1');
   });
 
-  it('uses OPENCL cache-type override branch when inferenceBackend is opencl', async () => {
+  // OpenCL honors the chosen (quantized) KV cache: effectiveCacheType no longer coerces it to f16
+  // (llmHelpers.backendForcesF16Cache returns false), so the loaded settings carry the user's choice.
+  it('keeps the chosen cache type when inferenceBackend is opencl (no f16 override)', async () => {
     mockedLlm.loadModel.mockResolvedValue(undefined);
     (mockedLlm.getMultimodalSupport as jest.Mock).mockReturnValue({ vision: true });
     mockedRNFS.exists.mockResolvedValue(false);
@@ -134,7 +139,7 @@ describe('doLoadTextModel — mmproj clear branch', () => {
     await doLoadTextModel(ctx);
 
     const loaded = (ctx.store.setLoadedSettings as jest.Mock).mock.calls[0][0];
-    expect(loaded.cacheType).toBe('f16');
+    expect(loaded.cacheType).toBe(ctx.store.settings.cacheType);
   });
 
   it('logs a warning but continues when unloading the previous llama model fails', async () => {

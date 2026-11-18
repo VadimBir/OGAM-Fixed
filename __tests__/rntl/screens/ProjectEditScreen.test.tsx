@@ -168,20 +168,21 @@ describe('ProjectEditScreen', () => {
       const { getByText } = render(<ProjectEditScreen />);
       expect(getByText('Name *')).toBeTruthy();
       expect(getByText('Description')).toBeTruthy();
-      expect(getByText('System Prompt *')).toBeTruthy();
+      expect(getByText('Character instruction *')).toBeTruthy();
+      expect(getByText('Caveats')).toBeTruthy();
     });
 
-    it('shows hint text for system prompt', () => {
+    it('shows hint text for the character instruction', () => {
       const { getByText } = render(<ProjectEditScreen />);
       expect(
-        getByText(/This context is sent to the AI at the start of every chat/),
+        getByText(/Who this character is and how it behaves/),
       ).toBeTruthy();
     });
 
-    it('shows tip text', () => {
+    it('shows hint text for the caveats box', () => {
       const { getByText } = render(<ProjectEditScreen />);
       expect(
-        getByText(/Tip: Be specific about what you want the AI to do/),
+        getByText(/Hard rules and what \{char\} must NOT do/),
       ).toBeTruthy();
     });
 

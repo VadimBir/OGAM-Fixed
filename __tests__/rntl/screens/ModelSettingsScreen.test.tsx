@@ -237,7 +237,8 @@ describe('ModelSettingsScreen', () => {
     });
 
     it('updates store to false when Flash Attention is turned off', () => {
-      useAppStore.getState().updateSettings({ flashAttn: true });
+      // f16 cache: a quantized KV cache (store default q8_0) locks Flash Attention on.
+      useAppStore.getState().updateSettings({ flashAttn: true, cacheType: 'f16' });
       const { getByTestId } = renderWithSections('text');
 
       fireEvent.press(getByTestId('flash-attn-off-button'));
@@ -926,6 +927,7 @@ describe('ModelSettingsScreen', () => {
           imageWidth: undefined as any,
           imageHeight: undefined as any,
           imageUseOpenCL: undefined as any,
+          imageDenoiseStrength: undefined as any,
           enableGpu: undefined as any,
           inferenceBackend: undefined as any,
           gpuLayers: undefined as any,
@@ -1029,12 +1031,15 @@ describe('ModelSettingsScreen', () => {
     });
 
     // HTP is currently disabled via HTP_UI_ENABLED feature flag
-    it('locks KV cache display to f16 on HTP backend', () => {
+    it('honors the chosen quantized KV cache on HTP backend (no f16 coercion)', () => {
+      // backendForcesF16Cache (llmHelpers) returns false for every backend: the q4_0 the user
+      // picked is what the loader sends, so the UI must show q4_0, not a forced f16.
       useAppStore
         .getState()
         .updateSettings({ inferenceBackend: 'htp', cacheType: 'q4_0' });
-      const { getByText } = renderWithSections('text');
-      expect(getByText(/Full precision/)).toBeTruthy();
+      const { getByText, queryByText } = renderWithSections('text');
+      expect(getByText(/4-bit quantized/)).toBeTruthy();
+      expect(queryByText(/Full precision/)).toBeNull();
     });
   });
 
@@ -1108,7 +1113,7 @@ describe('ModelSettingsScreen', () => {
 
       const s = useAppStore.getState().settings;
       expect(s.temperature).toBe(0.7);
-      expect(s.maxTokens).toBe(1024);
+      expect(s.maxTokens).toBe(2048);
       expect(s.nThreads).toBe(0);
       expect(s.nBatch).toBe(512);
       expect(s.cacheType).toBe('q8_0');

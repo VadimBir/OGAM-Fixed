@@ -248,13 +248,15 @@ describe('runToolLoop — Gemma text parsing branches', () => {
   });
 
   it('parseGemmaToolCallBody: body with no name match is ignored (line 91)', async () => {
-    // Body cannot match /^(?:call:)?(\w+)/ -> early return, no tool call produced.
-    mockedGenerateResponseWithTools.mockResolvedValueOnce({
+    // Body cannot match /^(?:call:)?(\w+)/ -> early return, no tool call produced. The unparsed markup
+    // triggers the one repair round (a second completion), so the mock answers every call.
+    mockedGenerateResponseWithTools.mockResolvedValue({
       fullResponse: '<|tool_call>   {"query":"x"}<tool_call|>',
       toolCalls: [],
     });
     await runToolLoop(createContext());
     expect(mockExecuteToolCall).not.toHaveBeenCalled();
+    expect(mockedGenerateResponseWithTools).toHaveBeenCalledTimes(2);
   });
 
   it('web_search queries[] is normalised into query (line 107)', async () => {

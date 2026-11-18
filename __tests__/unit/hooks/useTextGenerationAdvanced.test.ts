@@ -8,17 +8,18 @@ describe('useTextGenerationAdvanced', () => {
     resetStores();
   });
 
-  // HTP is currently disabled via HTP_ENABLED feature flag
-  it('locks KV cache to f16 when HTP backend is selected', () => {
+  // No backend coerces the KV cache to f16 any more (llmHelpers.backendForcesF16Cache returns false):
+  // the user's cacheType is honored on HTP too, so the picker stays enabled and shows their choice.
+  it('keeps the chosen KV cache type when HTP backend is selected', () => {
     act(() => {
       useAppStore.getState().updateSettings({ inferenceBackend: 'htp', cacheType: 'q4_0' });
     });
 
     const { result } = renderHook(() => useTextGenerationAdvanced());
 
-    expect(result.current.gpuForcesF16).toBe(true);
-    expect(result.current.cacheDisabled).toBe(true);
-    expect(result.current.displayCacheType).toBe('f16');
+    expect(result.current.gpuForcesF16).toBe(false);
+    expect(result.current.cacheDisabled).toBe(false);
+    expect(result.current.displayCacheType).toBe('q4_0');
   });
 
   it('shows Auto (N) for cpu threads when nThreads uses the auto sentinel', async () => {

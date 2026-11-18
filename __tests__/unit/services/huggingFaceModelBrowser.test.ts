@@ -300,13 +300,45 @@ describe('huggingFaceModelBrowser', () => {
       expect(models).toHaveLength(2);
     });
 
-    it('throws when fetch returns a non-ok response', async () => {
+    it('one failing repo: returns the other repo\'s models and does not cache the partial list', async () => {
       mockFetchResponses(
         { ok: false, body: null },
+        { ok: true, body: [treeEntry('ModelB_qnn2.28_8gen1.zip', 10, 'file', 2000)] },
+      );
+
+      // Fresh module = empty cache (earlier tests cached full lists in the shared instance).
+      let fresh!: typeof import('../../../src/services/huggingFaceModelBrowser');
+      jest.isolateModules(() => { fresh = require('../../../src/services/huggingFaceModelBrowser'); });
+
+      const models = await fresh.fetchAvailableModels(false);
+      expect(models).toHaveLength(1);
+      expect(models[0].backend).toBe('qnn');
+
+      // Not cached: the next (non-forced) open fetches again.
+      mockFetchResponses(
+        { ok: true, body: [treeEntry('ModelA.zip', 10, 'file', 1000)] },
         { ok: true, body: [] },
+      );
+      const retry = await fresh.fetchAvailableModels(false);
+      expect(mockFetch).toHaveBeenCalledTimes(4);
+      expect(retry.map(m => m.name)).toEqual(['ModelA']);
+    });
+
+    it('throws when every requested repo fails', async () => {
+      mockFetchResponses(
+        { ok: false, body: null },
+        { ok: false, body: null },
       );
 
       await expect(fetchAvailableModels(true)).rejects.toThrow(
+        /Failed to fetch.*HTTP 500/,
+      );
+    });
+
+    it('throws when the only requested repo fails (skipQnn)', async () => {
+      mockFetchResponses({ ok: false, body: null });
+
+      await expect(fetchAvailableModels(true, { skipQnn: true })).rejects.toThrow(
         /Failed to fetch.*HTTP 500/,
       );
     });

@@ -377,7 +377,9 @@ describe('generateWithToolsImpl', () => {
       expect(result.toolCalls[1].name).toBe('get_current_datetime');
     });
 
-    it('accumulates tool calls across multiple streaming callbacks', async () => {
+    // llama.rn re-parses the whole output per token (RNLlamaJSI.cpp parseChatOutput(true)): each
+    // callback's tool_calls is the CUMULATIVE list, so the latest list replaces the previous one.
+    it('treats streamed tool_calls as the cumulative list (latest replaces previous)', async () => {
       const completion = jest.fn(async (_params: any, cb: any) => {
         cb({
           tool_calls: [
@@ -386,6 +388,7 @@ describe('generateWithToolsImpl', () => {
         });
         cb({
           tool_calls: [
+            { id: 'call_1', function: { name: 'calculator', arguments: '{"a":1}' } },
             { id: 'call_2', function: { name: 'get_current_datetime', arguments: '{}' } },
           ],
         });
@@ -397,7 +400,23 @@ describe('generateWithToolsImpl', () => {
         tools: SAMPLE_TOOLS,
       });
 
-      expect(result.toolCalls).toHaveLength(2);
+      expect(result.toolCalls.map(t => t.id)).toEqual(['call_1', 'call_2']);
+    });
+
+    it('does not duplicate a partial call re-sent on every token when the final parse fails', async () => {
+      // Final result carries no tool_calls (native final parse threw, JSICompletion.h ignores it).
+      const completion = jest.fn(async (_params: any, cb: any) => {
+        cb({ token: '<tool_call>', tool_calls: [{ id: 'c', function: { name: 'generate_image', arguments: '' } }] });
+        cb({ token: '{"name"', tool_calls: [{ id: 'c', function: { name: 'generate_image', arguments: '' } }] });
+        cb({ token: ':"generate_image"', tool_calls: [{ id: 'c', function: { name: 'generate_image', arguments: '{"prompt":"cat"}' } }] });
+        return { text: '<tool_call>{"name":"generate_image"' };
+      });
+      const deps = createMockDeps({ context: { completion } });
+
+      const result = await generateWithToolsImpl(deps, [createUserMessage('Hi')], { tools: SAMPLE_TOOLS });
+
+      expect(result.toolCalls).toHaveLength(1);
+      expect(result.toolCalls[0]).toMatchObject({ name: 'generate_image', arguments: { prompt: 'cat' } });
     });
 
     it('handles tool call with arguments as object (not string)', async () => {
@@ -702,6 +721,72 @@ describe('generateWithToolsImpl', () => {
       expect(result.toolCalls).toHaveLength(1);
       expect(result.toolCalls[0].name).toBe('calculator');
     });
+
+    // H2-2: no data.content (partial parse failed) -> data.token carries the raw Qwen/Hermes call markup.
+    it('filters <tool_call> markup from stream and reply for a non-Gemma model when the call is structured', async () => {
+      const call = { id: 'c1', function: { name: 'generate_image', arguments: '{"prompt":"cat"}' } };
+      const completion = jest.fn(async (_params: any, cb: any) => {
+        cb({ token: 'Sure. ' });
+        cb({ token: '<tool_' });
+        cb({ token: 'call>\n{"name":"generate_image","arguments":{"prompt":"cat"}}\n</tool_call>', tool_calls: [call] });
+        return { tool_calls: [call] };
+      });
+      const onStream = jest.fn();
+      const deps = createMockDeps({ context: { completion }, isGemma4Model: false });
+
+      const result = await generateWithToolsImpl(deps, [createUserMessage('draw a cat')], { tools: SAMPLE_TOOLS, onStream });
+
+      expect(result.fullResponse).toBe('Sure. ');
+      const streamed = onStream.mock.calls.map(c => c[0].content ?? '').join('');
+      expect(streamed).toBe('Sure. ');
+      expect(result.toolCalls).toHaveLength(1);
+    });
+
+    it('returns the RAW markup when no structured call was parsed, so the loop text fallback can parse it', async () => {
+      const raw = '<tool_call>\n{"name":"generate_image","arguments":{"prompt":"cat"}}\n</tool_call>';
+      const completion = jest.fn(async (_params: any, cb: any) => {
+        cb({ token: raw });
+        return {};
+      });
+      const onStream = jest.fn();
+      const deps = createMockDeps({ context: { completion } });
+
+      const result = await generateWithToolsImpl(deps, [createUserMessage('draw a cat')], { tools: SAMPLE_TOOLS, onStream });
+
+      expect(result.toolCalls).toHaveLength(0);
+      expect(result.fullResponse).toBe(raw);
+      // The user never sees the markup stream by.
+      expect(onStream.mock.calls.map(c => c[0].content ?? '').join('')).toBe('');
+    });
+
+    it('does not refill an all-markup stream from cr.text when the call is structured', async () => {
+      const call = { id: 'c1', function: { name: 'generate_image', arguments: '{"prompt":"cat"}' } };
+      const completion = jest.fn(async (_params: any, cb: any) => {
+        cb({ token: '<tool_call>{"name":"generate_image"}</tool_call>', tool_calls: [call] });
+        return { text: '<tool_call>{"name":"generate_image"}</tool_call>' }; // no content: final parse threw
+      });
+      const deps = createMockDeps({ context: { completion } });
+
+      const result = await generateWithToolsImpl(deps, [createUserMessage('draw')], { tools: SAMPLE_TOOLS });
+
+      expect(result.fullResponse).toBe('');
+      expect(result.toolCalls).toHaveLength(1);
+    });
+  });
+
+  // H2-4: Auto budget must still build llama.rn's reasoning-budget sampler (thinking_budget_tokens >= 0).
+  describe('thinking budget on the tool path', () => {
+    it('Auto budget + thinking on sends a finite thinking_budget_tokens below n_predict', async () => {
+      useAppStore.getState().updateSettings({ maxTokens: 2048, reasoningBudget: -1 });
+      const completion = jest.fn(async (_params: any, _cb: any) => ({}));
+      const deps = createMockDeps({ context: { completion }, isThinkingEnabled: true });
+
+      await generateWithToolsImpl(deps, [createUserMessage('Hi')], { tools: SAMPLE_TOOLS });
+
+      const p = completion.mock.calls[0][0];
+      expect(p.n_predict).toBe(2048);
+      expect(p.thinking_budget_tokens).toBe(1536);
+    });
   });
 
   // ========================================================================
@@ -722,5 +807,26 @@ describe('generateWithToolsImpl', () => {
 
       expect(result.fullResponse).toBe('Hi');
     });
+  });
+});
+
+// Drift guard: the [WIRE-TEMPLATED-PROMPT] survivor check must recognise the LIVE text tool hints.
+// Fails if registry.ts hint wording changes in a way the check no longer matches (it matched
+// "Tools available" after the hint became "# Tools").
+describe('systemInstructionSurvived tracks the live tool hints', () => {
+  const { systemInstructionSurvived } = require('../../../src/services/llmToolGeneration');
+  const { buildToolSystemPromptHint, buildTextToolCallFormatHint } = require('../../../src/services/tools/registry');
+
+  it.each([['buildToolSystemPromptHint', buildToolSystemPromptHint], ['buildTextToolCallFormatHint', buildTextToolCallFormatHint]])(
+    'detects the %s output inside a templated prompt',
+    (_name: string, build: (ids: string[]) => string) => {
+      const hint = build(['generate_image']);
+      expect(hint).not.toBe('');
+      expect(systemInstructionSurvived(`<|im_start|>system\nYou are helpful.${hint}<|im_end|>`)).toBe(true);
+    },
+  );
+
+  it('is false when no system instruction or hint survived', () => {
+    expect(systemInstructionSurvived('<|im_start|>user\nhi<|im_end|>')).toBe(false);
   });
 });

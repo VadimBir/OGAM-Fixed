@@ -38,6 +38,7 @@ import {
 import { migratePersistedState } from './appStoreMigrations';
 import { defaultImageSteps, SWEET_SPOT_SIZE } from '../utils/imageGenAdvice';
 import type { SdWeightType } from '../services/sdCppMemory';
+import { SAMPLING_DEFAULTS } from '../services/samplingParams';
 
 type OnboardingChecklist = {
   downloadedModel: boolean;
@@ -68,9 +69,43 @@ export type AppSettings = {
   maxToolCalls: number;
   topP: number;
   repeatPenalty: number;
+  /** Advanced sampling (local llama.rn + remote servers). Defaults = llama.cpp's own; see
+   *  services/samplingParams.ts SAMPLING_DEFAULTS for the source lines. These and the other
+   *  Advanced fields below are optional: DEFAULT_SETTINGS + migrateAdvancedSettings fill them,
+   *  and every reader resolves an absent value to the same default. */
+  topK?: number;
+  minP?: number;
+  typicalP?: number;
+  /** Tokens the repeat / presence / frequency penalties look back over (0 = off). */
+  penaltyLastN?: number;
+  presencePenalty?: number;
+  frequencyPenalty?: number;
+  /** DRY repetition penalty; multiplier 0 = off. */
+  dryMultiplier?: number;
+  dryBase?: number;
+  dryAllowedLength?: number;
+  dryPenaltyLastN?: number;
+  /** XTC sampler; probability 0 = off. */
+  xtcProbability?: number;
+  xtcThreshold?: number;
+  /** 0 = off, 1 = Mirostat, 2 = Mirostat 2.0 */
+  mirostat?: number;
+  mirostatTau?: number;
+  mirostatEta?: number;
+  /** Text sampling seed; -1 = random each reply. */
+  seed?: number;
+  /** Extra stop strings, added to the model's own stops. */
+  customStopStrings?: string[];
+  /** LiteRT top-k (its sampler takes temperature / top-k / top-p only). */
+  liteRTTopK?: number;
   contextLength: number;
   nThreads: number;
   nBatch: number;
+  /** Physical micro-batch (n_ubatch). 0 = follow nBatch (the old behaviour); capped at nBatch. */
+  nUbatch?: number;
+  /** mmap of the model file: 'auto' = shouldDisableMmap (mmap on unless a small repackable quant
+   *  fits easily), 'on' = always mmap (file-backed, reclaimable), 'off' = read into RAM. */
+  mmapMode?: 'auto' | 'on' | 'off';
   imageGenerationMode: ImageGenerationMode;
   autoDetectMethod: AutoDetectMethod;
   classifierModelId: string | null;
@@ -88,12 +123,21 @@ export type AppSettings = {
   imageScheduler?: string;
   /** LoRA adapters for stable-diffusion.cpp models (enabled ones apply to every generation). */
   imageLoras?: ImageLora[];
+  /** Civitai search: include NSFW models and previews. Unset = off (store-safe default). */
+  civitaiShowNsfw?: boolean;
   /** sd.cpp: weight type converted to at load (the file is not rewritten); 'auto' keeps the file's. */
   imageSdWeightType?: SdWeightType;
   /** sd.cpp: flash attention in the UNet (streams attention scores instead of materialising them). */
   imageSdFlashAttn?: boolean;
   /** sd.cpp: decode the VAE in 256 px tiles — caps the largest compute buffer at any resolution. */
   imageSdVaeTiling?: boolean;
+  /** Negative prompt used when a request names none (local engines + the user's image server). */
+  imageNegativePrompt?: string;
+  /** Image seed used when a request names none; -1 = random each image. */
+  imageSeed?: number;
+  /** CLIP skip; 0 = model default. Reaches stable-diffusion.cpp (SdCppNative.nativeGenerate) and
+   *  the user's own image server; the LocalDream (QNN/MNN) engine has no such input. */
+  imageClipSkip?: number;
   enhanceImagePrompts: boolean;
   enableGpu: boolean;
   gpuLayers: number;
@@ -115,7 +159,11 @@ export type AppSettings = {
   keepModelsAlive?: boolean;
   /** Show the Pro Tools entry (Tools page + chat quick settings). Hidden when false. */
   showProTools?: boolean;
+  /** K cache type, and the V cache type too while cacheTypeV is 'same'. */
   cacheType: CacheType;
+  /** V cache type; 'same' = follow cacheType (the old single-type behaviour). A quantized V
+   *  cache needs flash attention (llama.cpp refuses it otherwise). */
+  cacheTypeV?: CacheType | 'same';
   showGenerationDetails: boolean;
   /**
    * How a voice turn begins and ends.
@@ -140,6 +188,10 @@ export type AppSettings = {
   /** Set once the persisted reasoningBudget uses the "0 = no thinking" scale (older builds stored
    *  0 for Auto; the migration maps that 0 to Auto exactly once). */
   reasoningBudgetZeroIsOff?: boolean;
+  /** Set once the old default maxTokens 1024 was raised to 2048 (1024 is n_predict on the local path;
+   *  a 3B model with thinking on spent it before emitting the tool call). The migration raises a
+   *  persisted 1024 exactly once, so a user who later picks 1024 keeps it. */
+  maxTokensDefault2048?: boolean;
   inferenceBackend: InferenceBackend;
   /** True once the user has explicitly picked an inference backend in Settings.
    *  While false, the boot-time backendSync may upgrade the default to the GPU
@@ -266,13 +318,18 @@ export const DEFAULT_SETTINGS: AppSettings = {
   // model setting, so whichever copy a device happens to hold is the one that travels to its peers.
   systemPrompt: APP_CONFIG.defaultSystemPrompt,
   temperature: 0.7,
-  maxTokens: 1024,
+  maxTokens: 2048,
   maxToolCalls: DEFAULT_MAX_TOOL_CALLS,
   topP: 0.9,
   repeatPenalty: 1.1,
+  ...SAMPLING_DEFAULTS,
+  customStopStrings: [],
+  liteRTTopK: 40,
   contextLength: 4096,
   nThreads: 0,
   nBatch: 512,
+  nUbatch: 0,
+  mmapMode: 'auto',
   speculativeDecoding: false,
   imageGenerationMode: 'auto' as ImageGenerationMode,
   autoDetectMethod: 'pattern' as AutoDetectMethod,
@@ -287,6 +344,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
   imageSdWeightType: 'auto' as SdWeightType,
   imageSdFlashAttn: true,
   imageSdVaeTiling: true,
+  imageNegativePrompt: '',
+  imageSeed: -1,
+  imageClipSkip: 0,
   enhanceImagePrompts: false,
   enableGpu: Platform.OS === 'ios',
   inferenceBackend:
@@ -297,6 +357,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   modelLoadingMode: 'balanced',
   keepModelsAlive: true,
   cacheType: 'q8_0' as CacheType,
+  cacheTypeV: 'same',
   showGenerationDetails: false,
   // Ends on silence by default: a turn that waits for a tap is the thing people ask us to fix.
   // 'tap' is for anyone who pauses mid-thought and wants the recorder to keep waiting.
@@ -307,6 +368,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   thinkingEnabled: false,
   reasoningBudget: REASONING_BUDGET_AUTO,
   reasoningBudgetZeroIsOff: true,
+  maxTokensDefault2048: true,
   liteRTBackend: 'gpu',
   liteRTTemperature: 0.7,
   liteRTTopP: 0.9,

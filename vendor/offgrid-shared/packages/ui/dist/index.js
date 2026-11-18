@@ -43,26 +43,26 @@ function projectProgress(input) {
 /**
  * sampleProgressRate(previousSample | undefined, { currentBytes, sampledAtMs })
  *   -> { sample, bytesPerSecond? }
- * Keeps the previous sample until RATE_MIN_INTERVAL_MS has elapsed so bursty progress events do
- * not produce a noisy rate; the last measured rate is carried meanwhile.
+ * The sample IS the last valid byte observation ({ currentBytes, sampledAtMs }; consumer contract
+ * src/utils/downloadStatus.ts rateSample + __tests__/unit/stores/downloadStore.test.ts). A reading
+ * closer than RATE_MIN_INTERVAL_MS to the previous one keeps the previous sample (no noisy rate).
  */
 function sampleProgressRate(previous, reading) {
   var bytes = _finiteNonNegative(reading && reading.currentBytes);
   var at = _finiteNonNegative(reading && reading.sampledAtMs);
+  var sample = { currentBytes: bytes, sampledAtMs: at };
   if (bytes === undefined || at === undefined) {
-    return { sample: previous, bytesPerSecond: previous ? previous.bytesPerSecond : undefined };
+    return { sample: previous, bytesPerSecond: undefined };
   }
-  if (!previous || bytes < previous.bytes || at < previous.atMs) {
-    return { sample: { bytes: bytes, atMs: at }, bytesPerSecond: undefined };
+  if (!previous || bytes < previous.currentBytes || at < previous.sampledAtMs) {
+    return { sample: sample, bytesPerSecond: undefined };
   }
-  var dt = at - previous.atMs;
+  var dt = at - previous.sampledAtMs;
   if (dt < RATE_MIN_INTERVAL_MS) {
-    return { sample: previous, bytesPerSecond: previous.bytesPerSecond };
+    return { sample: previous, bytesPerSecond: undefined };
   }
-  var rate = ((bytes - previous.bytes) * 1000) / dt;
+  var rate = ((bytes - previous.currentBytes) * 1000) / dt;
   if (!Number.isFinite(rate) || rate < 0) rate = undefined;
-  var sample = { bytes: bytes, atMs: at };
-  if (rate !== undefined) sample.bytesPerSecond = rate;
   return { sample: sample, bytesPerSecond: rate };
 }
 

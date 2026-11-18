@@ -13,7 +13,10 @@ interface SyncCompletedImageDownloadsOpts {
 }
 
 function isRecoverableImageDownload(metadata: PersistedDownloadInfo | undefined): metadata is PersistedDownloadInfo {
-  return !!metadata && metadata.modelId.startsWith('image:') && !!metadata.imageDownloadType;
+  // Only the two layouts recovered below. Any other type (e.g. a Civitai 'sdcpp-file', finalized by
+  // imageDownloadResume) would otherwise fall into the multifile branch and register a missing dir.
+  return !!metadata && metadata.modelId.startsWith('image:')
+    && (metadata.imageDownloadType === 'zip' || metadata.imageDownloadType === 'multifile');
 }
 
 function buildRecoveredImageModel(

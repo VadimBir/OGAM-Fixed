@@ -90,6 +90,16 @@ export async function unloadAllTextEngines(): Promise<void> {
 }
 
 /**
+ * The text engines that hold a model RIGHT NOW (normally at most one). Unload must ask this, not
+ * getActiveEngineService(): that resolves the SELECTED model's engine, so after selecting a model of
+ * the other engine (or a selection that no longer resolves) it named an engine with nothing loaded and
+ * the loaded model's native memory was never released.
+ */
+export function loadedTextEngines(): Array<(typeof TEXT_ENGINES)[number]> {
+  return TEXT_ENGINES.filter(engine => engine.isModelLoaded());
+}
+
+/**
  * Stop generation on every text engine. The engine SET is owned here (TEXT_ENGINES), so callers never
  * enumerate llmService/liteRTService themselves — adding an engine changes only this file (OCP). Used by the
  * defensive stop path; llama's stopCompletion and litert's stopGeneration differ at the native layer but are
@@ -307,7 +317,7 @@ export async function generateStandalone(
     const userText = typeof lastUser?.content === 'string' ? lastUser.content : '';
     const { settings } = useAppStore.getState();
     await liteRTService.prepareConversation('__standalone__', systemPrompt, {
-      samplerConfig: { temperature: settings.liteRTTemperature, topP: settings.liteRTTopP },
+      samplerConfig: { temperature: settings.liteRTTemperature, topK: settings.liteRTTopK ?? 40, topP: settings.liteRTTopP },
       history: [],
     });
     try {

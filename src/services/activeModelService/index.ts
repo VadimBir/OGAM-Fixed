@@ -1,10 +1,10 @@
 // ActiveModelService — THE ONLY PLACE models should be loaded/unloaded from.
 import { llmService } from '../llm';
 import { liteRTService } from '../litert';
-import { getActiveEngineService } from '../engines';
+import { loadedTextEngines } from '../engines';
 import { imageEngineRouter as onnxImageGeneratorService } from '../imageEngineRouter';
 import { sdCppLoadConfigFromSettings } from '../sdCppGenerator';
-import { estimateImageModelRamBytes } from '../imageModelMemory';
+import { estimateImageModelRamBytes, estimateSdCppModelMemory } from '../imageModelMemory';
 import { hardwareService } from '../hardware';
 import { modelResidencyManager } from '../modelResidency';
 import { OverridableMemoryError, ImageModelIncompleteError } from '../modelLoadErrors';
@@ -46,6 +46,10 @@ class ActiveModelService {
   private loadedTextModelId: string | null = null;
   private loadedImageModelId: string | null = null;
   private loadedImageModelThreads: number | null = null;
+  /** True once a local generation completed on the loaded image model: sd.cpp allocates its weights
+   *  on first use (no eager_load in sdcpp_jni.cpp), so after that only the compute part is still to
+   *  come. Reset on every image load/unload. */
+  private imageWeightsMaterialized = false;
   private textLoadPromise: Promise<void> | null = null;
   /** Resolves the selection against the downloaded list, tolerating a rebuilt id (see resolveModel). */
   private readonly selectedTextModel = createSelectedTextModelResolver({
@@ -251,15 +255,18 @@ class ActiveModelService {
       await this.textLoadPromise;
     }
     const storeActiveModelId = useAppStore.getState().activeModelId;
-    // Unload the ACTIVE engine (was llama-only → a LiteRT eviction never freed native memory).
-    const isNativeLoaded = getActiveEngineService()?.isModelLoaded() ?? false;
+    // Unload every engine that HOLDS a model, not the selected model's engine: the selection can name
+    // the other engine (a LiteRT model picked while a GGUF is loaded) or resolve to nothing, and the
+    // loaded model then stayed in RAM while residency forgot it.
+    const engines = loadedTextEngines();
+    const isNativeLoaded = engines.length > 0;
     if (!storeActiveModelId && !this.loadedTextModelId && !isNativeLoaded) {
       return;
     }
     this.loadingState.text = true;
     this.notifyListeners();
     try {
-      if (isNativeLoaded) await getActiveEngineService()?.unloadModel();
+      for (const engine of engines) await engine.unloadModel();
       this.setLoadedText(null);
       // Eviction (keepSelection) keeps the selection & flags "tap to continue"; user unload clears both.
       if (keepSelection) { if (isNativeLoaded) useAppStore.getState().setTextModelEvicted(true); }
@@ -337,6 +344,7 @@ class ActiveModelService {
       onLoaded: (id, threads) => {
         this.loadedImageModelId = id;
         this.loadedImageModelThreads = threads;
+        this.imageWeightsMaterialized = false;
         modelResidencyManager.register(
           // dirtyMemory: a resident CoreML/ONNX image model's working set can't be paged
           // out like clean mmap weights — its presence must gate other loads on live
@@ -391,6 +399,7 @@ class ActiveModelService {
       }
       this.loadedImageModelId = null;
       this.loadedImageModelThreads = null;
+      this.imageWeightsMaterialized = false;
       if (!keepSelection) {
         store.setActiveImageModelId(null);
       }
@@ -406,7 +415,7 @@ class ActiveModelService {
     const hasTextModel =
       !!store.activeModelId ||
       !!this.loadedTextModelId ||
-      !!getActiveEngineService()?.isModelLoaded();
+      loadedTextEngines().length > 0;
     const hasImageModel =
       !!store.activeImageModelId || !!this.loadedImageModelId;
     if (hasTextModel) {

@@ -36,6 +36,7 @@ export type VoiceSessionEvent =
   | 'userStart'
   | 'userStop'
   | 'cancel'
+  | 'speechHeard'
   | 'voiceDetected'
   | 'speechStarted'
   | 'turnCaptured'

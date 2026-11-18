@@ -382,14 +382,51 @@ describe('buildModelParams', () => {
     expect(params.nGpuLayers).toBe(16);
   });
 
-  // HTP is currently disabled via HTP_ENABLED feature flag
-  it('forces f16 KV cache for HTP backend', () => {
+  // backendForcesF16Cache is false for every backend (llmHelpers.ts): HTP gets the chosen cache.
+  it('passes the chosen KV cache through for the HTP backend (no f16 coercion)', () => {
     const params = buildModelParams('/model.gguf', {
       inferenceBackend: INFERENCE_BACKENDS.HTP,
       cacheType: 'q8_0',
     });
-    expect((params.baseParams as any).cache_type_k).toBe('f16');
-    expect((params.baseParams as any).cache_type_v).toBe('f16');
+    expect((params.baseParams as any).cache_type_k).toBe('q8_0');
+    expect((params.baseParams as any).cache_type_v).toBe('q8_0');
+    expect(params.usesF16Cache).toBe(false);
+  });
+
+  describe('context clamp to the trained context (modelMaxContext)', () => {
+    it('clamps a requested context above the trained context', () => {
+      expect(buildModelParams('/m.gguf', { contextLength: 32768, modelMaxContext: 8192 }).ctxLen).toBe(8192);
+    });
+    it('keeps a requested context below the trained context', () => {
+      expect(buildModelParams('/m.gguf', { contextLength: 4096, modelMaxContext: 8192 }).ctxLen).toBe(4096);
+    });
+    it('keeps the requested context when the trained context is null, 0 or negative', () => {
+      expect(buildModelParams('/m.gguf', { contextLength: 32768, modelMaxContext: null }).ctxLen).toBe(32768);
+      expect(buildModelParams('/m.gguf', { contextLength: 32768, modelMaxContext: 0 }).ctxLen).toBe(32768);
+      expect(buildModelParams('/m.gguf', { contextLength: 32768, modelMaxContext: -1 }).ctxLen).toBe(32768);
+      expect(buildModelParams('/m.gguf', { contextLength: 32768 }).ctxLen).toBe(32768);
+    });
+    it('clamps the APP_CONFIG default when no context is set', () => {
+      const { APP_CONFIG } = require('../../../src/constants');
+      const unclamped = buildModelParams('/m.gguf', {}).ctxLen;
+      expect(unclamped).toBe(APP_CONFIG.maxContextLength);
+      expect(buildModelParams('/m.gguf', { modelMaxContext: 512 }).ctxLen).toBe(Math.min(512, APP_CONFIG.maxContextLength));
+    });
+  });
+
+  describe('flash attention on Android', () => {
+    const origOS = Platform.OS;
+    beforeEach(() => { (Platform as any).OS = 'android'; });
+    afterEach(() => { (Platform as any).OS = origOS; });
+    it.each([INFERENCE_BACKENDS.CPU, INFERENCE_BACKENDS.OPENCL, INFERENCE_BACKENDS.HTP])(
+      'sends flash_attn_type on for %s even with the Flash-Attn setting off',
+      (backend) => {
+        const params = buildModelParams('/m.gguf', { inferenceBackend: backend, flashAttn: false });
+        expect((params.baseParams as any).flash_attn_type).toBe('on');
+        // An unset cache defaults to q8_0 because flash attention runs.
+        expect(params.cacheType).toBe('q8_0');
+      },
+    );
   });
 });
 
@@ -635,18 +672,17 @@ describe('initContextWithFallback — GPU timeout on Android', () => {
 // The single source of truth for the KV-cache coercion — the loader, the settings UI,
 // the reload diff, and the generation-details recorder all read these, so they agree.
 describe('backendForcesF16Cache / effectiveCacheType (single source)', () => {
-  it('OpenCL and HTP force f16; CPU and Metal do not', () => {
-    expect(backendForcesF16Cache(INFERENCE_BACKENDS.OPENCL)).toBe(true);
-    expect(backendForcesF16Cache(INFERENCE_BACKENDS.HTP)).toBe(true);
+  it('no backend forces f16 (the old OpenCL/HTP coercion was removed)', () => {
+    expect(backendForcesF16Cache(INFERENCE_BACKENDS.OPENCL)).toBe(false);
+    expect(backendForcesF16Cache(INFERENCE_BACKENDS.HTP)).toBe(false);
     expect(backendForcesF16Cache(INFERENCE_BACKENDS.CPU)).toBe(false);
     expect(backendForcesF16Cache(INFERENCE_BACKENDS.METAL)).toBe(false);
     expect(backendForcesF16Cache(undefined)).toBe(false);
   });
 
-  it('coerces the requested cache to f16 on HTP/OpenCL, else passes it through', () => {
-    // The exact mismatch from the bug: settings say q8_0 but HTP runs f16.
-    expect(effectiveCacheType(INFERENCE_BACKENDS.HTP, 'q8_0')).toBe('f16');
-    expect(effectiveCacheType(INFERENCE_BACKENDS.OPENCL, 'q4_0')).toBe('f16');
+  it('passes the requested cache through on every backend; unset -> q8_0', () => {
+    expect(effectiveCacheType(INFERENCE_BACKENDS.HTP, 'q8_0')).toBe('q8_0');
+    expect(effectiveCacheType(INFERENCE_BACKENDS.OPENCL, 'q4_0')).toBe('q4_0');
     expect(effectiveCacheType(INFERENCE_BACKENDS.CPU, 'q8_0')).toBe('q8_0');
     expect(effectiveCacheType(INFERENCE_BACKENDS.CPU, 'q4_0')).toBe('q4_0');
     expect(effectiveCacheType(INFERENCE_BACKENDS.CPU, undefined)).toBe('q8_0');
@@ -656,5 +692,94 @@ describe('backendForcesF16Cache / effectiveCacheType (single source)', () => {
     // Guards against the loader and the reporter drifting apart again.
     const params = buildModelParams('/m.gguf', { inferenceBackend: INFERENCE_BACKENDS.HTP, cacheType: 'q8_0' });
     expect((params.baseParams as any).cache_type_k).toBe(effectiveCacheType(INFERENCE_BACKENDS.HTP, 'q8_0'));
+  });
+});
+
+// Android sends flash_attn_type 'on' to every backend. When the GPU/NPU init with forced FA is
+// refused, one GPU retry runs with 'auto' + f16 KV (llama.cpp turns 'auto' back into ENABLED for a
+// quantized V cache, llama-context.cpp:3732-3735) before the CPU fallback.
+describe('initContextWithFallback — flash-attention GPU retry', () => {
+  const { initLlama } = require('llama.rn');
+  const mockedInitLlama = initLlama as jest.MockedFunction<typeof initLlama>;
+  const faOnParams = { model: '/m.gguf', flash_attn_type: 'on', cache_type_k: 'q8_0', cache_type_v: 'q8_0' };
+
+  it('retries on GPU with flash_attn auto + f16 KV and keeps the GPU when it succeeds', async () => {
+    const gpuCtx = { gpu: true, release: jest.fn() };
+    mockedInitLlama.mockRejectedValueOnce(new Error('FA kernel failed')).mockResolvedValueOnce(gpuCtx as any);
+
+    const result = await initContextWithFallback(faOnParams, 4096, 24);
+
+    expect(mockedInitLlama).toHaveBeenCalledTimes(2);
+    const retry = mockedInitLlama.mock.calls[1][0] as Record<string, unknown>;
+    expect(retry).toMatchObject({ flash_attn_type: 'auto', cache_type_k: 'f16', cache_type_v: 'f16', n_gpu_layers: 24, n_ctx: 4096 });
+    expect(result.context).toBe(gpuCtx);
+    expect(result.gpuAttemptFailed).toBe(false);
+    const logger = require('../../../src/utils/logger').default;
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('flash_attn_type auto (was on), KV cache f16 (was q8_0)'));
+  });
+
+  it('keeps HTP devices on the retry', async () => {
+    mockedInitLlama.mockRejectedValueOnce(new Error('HTP FA failed')).mockResolvedValueOnce({ gpu: true } as any);
+    await initContextWithFallback({ ...faOnParams, devices: ['HTP0'] }, 2048, 99);
+    expect((mockedInitLlama.mock.calls[1][0] as any).devices).toEqual(['HTP0']);
+  });
+
+  it('falls back to CPU with the ORIGINAL flash-attn/cache params when the retry also fails', async () => {
+    const cpuCtx = { gpu: false, release: jest.fn() };
+    mockedInitLlama
+      .mockRejectedValueOnce(new Error('first'))
+      .mockRejectedValueOnce(new Error('second'))
+      .mockResolvedValueOnce(cpuCtx as any);
+
+    const result = await initContextWithFallback(faOnParams, 4096, 24);
+
+    expect(mockedInitLlama).toHaveBeenCalledTimes(3);
+    const cpu = mockedInitLlama.mock.calls[2][0] as Record<string, unknown>;
+    expect(cpu).toMatchObject({ flash_attn_type: 'on', cache_type_k: 'q8_0', cache_type_v: 'q8_0', n_gpu_layers: 0 });
+    expect(result.context).toBe(cpuCtx);
+    expect(result.gpuAttemptFailed).toBe(true);
+  });
+
+  it('names all three failures when everything fails', async () => {
+    mockedInitLlama
+      .mockRejectedValueOnce(new Error('first'))
+      .mockRejectedValueOnce(new Error('second'))
+      .mockRejectedValueOnce(new Error('third'));
+    await expect(initContextWithFallback(faOnParams, 4096, 24))
+      .rejects.toThrow(/GPU: first \| GPU flash_attn auto \+ f16 KV: second \| CPU: third/);
+  });
+
+  it('does not retry when flash attention was not forced on', async () => {
+    mockedInitLlama.mockRejectedValueOnce(new Error('gpu')).mockResolvedValueOnce({ gpu: false } as any);
+    await initContextWithFallback({ ...faOnParams, flash_attn_type: 'auto' }, 4096, 24);
+    expect(mockedInitLlama).toHaveBeenCalledTimes(2);
+    expect((mockedInitLlama.mock.calls[1][0] as any).n_gpu_layers).toBe(0);
+  });
+
+  it('does not retry a pure-CPU init (no GPU layers requested)', async () => {
+    mockedInitLlama.mockRejectedValueOnce(new Error('cpu1')).mockResolvedValueOnce({ gpu: false } as any);
+    await initContextWithFallback(faOnParams, 4096, 0);
+    expect(mockedInitLlama).toHaveBeenCalledTimes(2);
+    expect((mockedInitLlama.mock.calls[1][0] as any).flash_attn_type).toBe('on');
+  });
+
+  describe('timeout', () => {
+    const origPlatform = Platform.OS;
+    beforeEach(() => { (Platform as any).OS = 'android'; jest.useFakeTimers(); });
+    afterEach(() => { (Platform as any).OS = origPlatform; jest.useRealTimers(); });
+
+    it('skips the flash-attn retry after a GPU init timeout and goes straight to CPU', async () => {
+      const hung = new Promise<any>(() => {});
+      const cpuCtx = { gpu: false, release: jest.fn() };
+      mockedInitLlama.mockReturnValueOnce(hung).mockResolvedValueOnce(cpuCtx as any);
+
+      const p = initContextWithFallback(faOnParams, 2048, 4);
+      jest.advanceTimersByTime(25001);
+      const result = await p;
+
+      expect(mockedInitLlama).toHaveBeenCalledTimes(2);
+      expect((mockedInitLlama.mock.calls[1][0] as any).n_gpu_layers).toBe(0);
+      expect(result.context).toBe(cpuCtx);
+    });
   });
 });

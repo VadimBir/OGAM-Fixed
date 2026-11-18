@@ -241,28 +241,8 @@ export async function setActiveRemoteImageModelImpl(
   }
   store.setActiveRemoteMediaServerId('image', serverId);
   store.setActiveRemoteImageModelId(modelId);
-
-  let provider = providerRegistry.getProvider(serverId);
-  if (!provider) {
-    const server = configuredServer;
-    if (server) {
-      logger.log(
-        '[RemoteServerManager] Creating provider for server:',
-        serverId,
-      );
-      await createProviderForServerImpl(server);
-      provider = providerRegistry.getProvider(serverId);
-    }
-  }
-
-  if (provider) {
-    await provider.loadModel(modelId);
-  } else {
-    logger.warn(
-      '[RemoteServerManager] Could not create provider for server:',
-      serverId,
-    );
-  }
+  // No provider.loadModel here: the provider registered for this server is the TEXT chat provider,
+  // and loadModel(imageId) would swap the chat model for the image model.
 
   logger.log(
     '[RemoteServerManager] Active remote image model set:',

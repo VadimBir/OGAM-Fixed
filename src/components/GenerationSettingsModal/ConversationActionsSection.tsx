@@ -50,7 +50,7 @@ export const ConversationActionsSection: React.FC<ConversationActionsSectionProp
         <TouchableOpacity style={styles.actionRow} onPress={handleOpenProject}>
           <Icon name="folder" size={16} color={colors.textSecondary} />
           <Text style={styles.actionText}>
-            Project: {activeProjectName || 'Default'}
+            Character: {activeProjectName || 'Default'}
           </Text>
           <Icon name="chevron-right" size={16} color={colors.textMuted} />
         </TouchableOpacity>

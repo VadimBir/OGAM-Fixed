@@ -233,9 +233,13 @@ export async function registerAndNotify(
   const { imageModel, modelName } = opts;
   await modelManager.addDownloadedImageModel(imageModel);
   deps.addDownloadedImageModel(imageModel);
-  // Auto-load the first image model unless onboarding is still active (Step 13 needs
-  // activeImageModelId null).
-  if (!deps.activeImageModelId && deps.triedImageGen) deps.setActiveImageModelId(imageModel.id);
+  // Select the first downloaded image model whenever none is selected. The old extra gate
+  // `&& triedImageGen` was circular: triedImageGen is set only AFTER a first image is generated
+  // (imageGenerationResult.ts completeChecklistStep), and without a selected image model
+  // generate_image is never offered (tools/availability.ts -> activeImageEngine()), so a fresh
+  // install could never generate its first image. No onboarding code reads activeImageModelId
+  // (the "Step 13" note was stale). Same rule as useModelsScreen.ts / importSdCheckpoint.ts.
+  if (!deps.activeImageModelId) deps.setActiveImageModelId(imageModel.id);
   removeStoreEntry(imageModel.id);
   deps.setAlertState(showAlert('Success', `${modelName} downloaded successfully!`));
 }

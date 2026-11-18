@@ -36,6 +36,9 @@ export const SIZE_OPTIONS: { key: SizeFilter; label: string; min: number; max: n
 
 export const QUANT_OPTIONS = [
   { key: 'all', label: 'All' },
+  // Files whose quant runs fully on the GPU (utils.ts GPU_QUANT_FILTER / acceleration.ts isAccelerableQuant).
+  { key: 'gpu', label: 'GPU' },
+  { key: 'Q4_0', label: 'Q4_0' },
   { key: 'Q4_K_M', label: 'Q4_K_M' },
   { key: 'Q4_K_S', label: 'Q4_K_S' },
   { key: 'Q5_K_M', label: 'Q5_K_M' },

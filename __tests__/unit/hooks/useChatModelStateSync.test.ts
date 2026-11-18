@@ -91,8 +91,22 @@ describe('useChatModelStateSync — capability derivation (characterization)', (
     expect(r).toEqual({ vision: true, tools: true, thinking: true });
   });
 
-  it('nothing loaded (local, no engine ready): all false', () => {
+  // H1-B1: a local llama model always offers tools - natively, or via the text-hint path when its
+  // GGUF template has no tool support. Gating on native support hid generate_image from such models.
+  it('local llama not loaded: tools offered (text-hint path), vision/thinking false', () => {
     const r = run({ activeModel: { engine: 'llama' } as any });
-    expect(r).toEqual({ vision: false, tools: false, thinking: false });
+    expect(r).toEqual({ vision: false, tools: true, thinking: false });
+  });
+
+  it('local llama LOADED whose template reports no tool support: tools still offered', () => {
+    llmService.isModelLoaded.mockReturnValue(true);
+    llmService.supportsToolCalling.mockReturnValue(false);
+    const r = run({ activeModel: { engine: 'llama' } as any });
+    expect(r.tools).toBe(true);
+  });
+
+  it('no local model and no remote: tools false', () => {
+    const r = run({ activeModel: undefined, activeModelId: null });
+    expect(r.tools).toBe(false);
   });
 });

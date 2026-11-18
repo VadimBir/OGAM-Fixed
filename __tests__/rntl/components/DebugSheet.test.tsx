@@ -219,11 +219,11 @@ describe('DebugSheet', () => {
   // Active Project
   // ============================================================================
   describe('active project', () => {
-    it('shows Active Project section title', () => {
+    it('shows Active Character section title', () => {
       const { getByText } = render(
         <DebugSheet {...defaultProps} />
       );
-      expect(getByText('Active Project')).toBeTruthy();
+      expect(getByText('Active Character')).toBeTruthy();
     });
 
     it('shows project name when project is active', () => {

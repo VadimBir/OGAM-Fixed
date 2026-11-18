@@ -42,6 +42,11 @@ export function computePendingSettings(
     changed(settings.gpuLayers, loadedSettings.gpuLayers) ||
     changed(settings.flashAttn, loadedSettings.flashAttn) ||
     changed(settings.speculativeDecoding, loadedSettings.speculativeDecoding) ||
+    // Load-time fields; each counts only once the load snapshot (activeModelService/loaders.ts
+    // setLoadedSettings) captures it.
+    changed(settings.nUbatch, loadedSettings.nUbatch) ||
+    changed(settings.mmapMode, loadedSettings.mmapMode) ||
+    changed(settings.cacheTypeV, loadedSettings.cacheTypeV) ||
     (loadedSettings.cacheType !== undefined &&
       effectiveLiveCache !== effectiveLoadedCache)
   );

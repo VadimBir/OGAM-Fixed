@@ -64,6 +64,18 @@ export async function buildOpenAIMessagesImpl(
     openaiMessages.push({ role: 'system', content: [{ type: 'text', text: systemPrompt }] });
   }
 
+  // Strict OpenAI-compatible servers require every assistant tool_calls message to be followed
+  // DIRECTLY by its tool results. The store writes the image record (app caption) between the call and
+  // its result (generationToolLoop tool-call record -> imageGenerationResult caption -> tool result), so
+  // assistant text arriving while results are still owed is deferred until they are in, and the app's
+  // image caption (not model speech) is dropped.
+  let owedToolResults = 0;
+  let deferred: Message[] = [];
+  const flushDeferred = () => {
+    for (const d of deferred) openaiMessages.push({ role: 'assistant', content: d.content });
+    deferred = [];
+  };
+
   for (const msg of messages) {
     if (msg.role === 'system') {
       openaiMessages.push({ role: 'system', content: [{ type: 'text', text: msg.content }] });
@@ -78,8 +90,21 @@ export async function buildOpenAIMessagesImpl(
         content: [{ type: 'text', text: msg.content }],
         tool_call_id: msg.toolCallId || '',
       });
+      if (owedToolResults > 0) owedToolResults -= 1;
+      if (owedToolResults === 0) flushDeferred();
       continue;
     }
+
+    if (owedToolResults > 0 && msg.role === 'assistant' && !msg.toolCalls?.length) {
+      if (!isAppImageCaption(msg)) deferred.push(msg);
+      continue;
+    }
+    if (owedToolResults > 0) {
+      // A user turn / new tool-call record before all results arrived: results are missing for good.
+      owedToolResults = 0;
+      flushDeferred();
+    }
+    if (msg.role === 'assistant' && msg.toolCalls?.length) owedToolResults = msg.toolCalls.length;
 
     const hasImages = msg.attachments?.some(a => a.type === 'image');
 
@@ -97,6 +122,12 @@ export async function buildOpenAIMessagesImpl(
       openaiMessages.push({ role: 'assistant', content: msg.content });
     }
   }
+  flushDeferred();
 
   return openaiMessages;
+}
+
+/** App-written caption under a generated image (imageGenerationResult.ts), not model speech. */
+function isAppImageCaption(msg: Message): boolean {
+  return Boolean(msg.generationMeta?.resolution) || /^Generated image for:\s*["“]/i.test(msg.content.trim());
 }

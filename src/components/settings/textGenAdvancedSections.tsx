@@ -128,15 +128,17 @@ export const LiteRTBackendSelector: React.FC = () => {
 /** Lives in its own module for the file-size budget; re-exported so every surface keeps ONE
  *  import path for the advanced text-generation controls. */
 export { SpeculativeDecodingToggle } from './SpeculativeDecodingToggle';
+export { UbatchSlider, VCacheTypeToggle, MmapModeSelector, MemoryReadout } from './advancedLoadSections';
+export { AdvancedSamplingSection } from './advancedSamplingSection';
 
 export const FlashAttentionToggle: React.FC = () => {
   const { updateSettings } = useAppStore();
   const { isFlashAttnOn, isQuantizedCache, isAndroid, handleFlashAttnToggle } = useTextGenerationAdvanced();
-  let description = 'Faster inference and lower memory. Required for quantized KV cache (q8_0/q4_0). Requires model reload.';
+  let description = 'Faster inference and lower memory. Required for a quantized V cache (q8_0/q4_0). Requires model reload.';
   if (isAndroid) {
     description = 'Always on (Android): text models always run with flash attention.';
   } else if (isQuantizedCache) {
-    description = 'Locked on: the quantized KV cache (q8_0/q4_0) requires it. Set KV Cache Type to f16 to turn it off.';
+    description = 'Locked on: the quantized V cache (q8_0/q4_0) requires it. Set the V cache to f16 to turn it off.';
   }
   return (
     <SegmentedRow<'off' | 'on'>
@@ -166,6 +168,7 @@ export const KvCacheTypeToggle: React.FC = () => {
       testIdFor={(ct) => `cache-type-${ct}-button`}
       isDisabled={(ct) => cacheDisabled && ct !== 'f16'}
     >
+      <Text style={styles.desc}>K half of the KV cache, and the V half too while V Cache Type is Same as K.</Text>
       {!isFlashAttnOn && (
         <Text style={styles.warning}>
           Quantized cache (q8_0/q4_0) will auto-enable flash attention.

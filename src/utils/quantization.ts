@@ -25,6 +25,9 @@ const QUANT_TOKEN = [
   'Q4_?0_?[48]_?[48]',
   'Q[2-8]_?K(?:_?(?:XXL|XL|L|M|S))?',
   'Q[4-8]_?[01]',
+  // Bare `Q4` / `q8` (e.g. `model-q4.gguf`): label `Q4`, as the pre-refactor extractor's
+  // /[QqFf]\d+[_]?[KkMmSs]*/ produced. No llama.cpp type, so no table entry (callers' fallback).
+  'Q[2-8]',
 ].join('|');
 
 const QUANT_TOKEN_RE = new RegExp(

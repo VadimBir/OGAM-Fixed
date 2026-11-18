@@ -9,6 +9,8 @@ import { normalizeToolResult } from '../../../../src/services/tools/toolResult';
 import {
   resolveImageToolRequest,
   imageToolFailureMessage,
+  imagePromptFromArgs,
+  IMAGE_TOOL_NEXT_STEP,
 } from '../../../../src/services/tools/imageTool';
 import { availableToolIds } from '../../../../src/services/tools/availability';
 import type { ToolCall } from '../../../../src/services/tools/types';
@@ -33,7 +35,8 @@ jest.mock('../../../../src/services/imageGenerationService', () => ({
 const SDCPP = { kind: 'local', model: { id: 'sd', backend: 'sdcpp', sdFamily: 'sd1' } };
 const LOCALDREAM = { kind: 'local', model: { id: 'ld', backend: 'mnn' } };
 
-function call(args: Record<string, any>, conversationId: string | undefined = 'conv-1'): ToolCall {
+// null = no conversation (a default parameter would turn an explicit undefined back into 'conv-1').
+function call(args: Record<string, any>, conversationId: string | null = 'conv-1'): ToolCall {
   return {
     id: 'tc-1',
     name: 'generate_image',
@@ -42,7 +45,7 @@ function call(args: Record<string, any>, conversationId: string | undefined = 'c
   };
 }
 
-async function run(args: Record<string, any>, conversationId?: string) {
+async function run(args: Record<string, any>, conversationId?: string | null) {
   const c = call(args, conversationId);
   return normalizeToolResult(c, await executeToolCall(c));
 }
@@ -82,6 +85,14 @@ describe('resolveImageToolRequest', () => {
     expect(r.notes).toEqual(['steps "many" ignored (not a number)']);
   });
 
+  // The description promises "multiple of 64"; 500 used to reach a non-snapping engine as 500.
+  it('rounds a size that is not a multiple of 64 and says so', () => {
+    const r = resolveImageToolRequest({ width: 500, height: 100, steps: 20 }, LOCALDREAM as any);
+    expect(r.params).toMatchObject({ width: 512, height: 128 });
+    expect(r.notes).toEqual(['width 500 rounded to 512', 'height 100 rounded to 128']);
+    expect(resolveImageToolRequest({ width: 90 }, LOCALDREAM as any).params.width).toBe(64);
+  });
+
   it('drops a sampler the engine does not accept so the user default stays', () => {
     const r = resolveImageToolRequest({ sampler: 'dpm++2m' }, LOCALDREAM as any);
     expect(r.params.sampler).toBeUndefined();
@@ -108,15 +119,55 @@ describe('generate_image handler', () => {
       status: 'ok', shown_in_chat: true, width: 512, height: 512, steps: 20, guidance: 7.5, seed: 9, sampler: 'dpm',
     });
     expect(body.notes).toEqual(['width 256 -> 512 (engine limit)', 'height 256 -> 512 (engine limit)']);
+    // The model is told what to do next: one short reply, no description, no re-call.
+    expect(body.next).toBe(IMAGE_TOOL_NEXT_STEP);
+    expect(body.next).toContain('one short sentence');
+    expect(body.next).toContain('Do not describe the image');
+    expect(body.next).toContain('Do not call generate_image again');
   });
 
-  it('reports which arguments the remote engine is not sent', async () => {
+  // Hunter H4: a small model puts the description under another key or as a list.
+  it.each([
+    [{ description: 'a red fox' }, 'a red fox'],
+    [{ image_prompt: 'a red fox' }, 'a red fox'],
+    [{ text: 'a red fox' }, 'a red fox'],
+    [{ query: 'a red fox' }, 'a red fox'],
+    [{ input: 'a red fox' }, 'a red fox'],
+    [{ prompt: ['red fox', 'snow'] }, 'red fox, snow'],
+    [{ prompt: '  ', description: 'a red fox' }, 'a red fox'],
+  ])('accepts the prompt from %j', async (args, expected) => {
+    mockGenerate.mockResolvedValue({ ok: true, image: {}, used: { engine: 'local', width: 512, height: 512 } });
+    const result = await run(args);
+    expect(result.status).toBe('ok');
+    expect(mockGenerate.mock.calls[0][0].prompt).toBe(expected);
+  });
+
+  it('still fails with a missing-prompt error when no key holds a prompt', async () => {
+    const result = await run({ width: 512 });
+    expect(result.status).toBe('error');
+    expect(result.error).toContain('prompt');
+    expect(imagePromptFromArgs({ prompt: { a: 1 } })).toBeNull();
+  });
+
+  it('reports which arguments a remote server was not sent', async () => {
     mockEngine = { kind: 'remote', server: {} };
     mockGenerate.mockResolvedValue({ ok: true, image: {}, used: { engine: 'remote', width: 512, height: 512 } });
     const body = JSON.parse((await run({ prompt: 'x', steps: 10, seed: 3 })).content);
     expect(body.steps).toBeUndefined();
     expect(body.sampler).toBeUndefined();
-    expect(body.notes).toEqual(['steps, seed not sent: the remote engine takes prompt and size only']);
+    expect(body.notes).toEqual(['steps, seed not sent: this remote server does not take them']);
+  });
+
+  // Falsify: keep the old "remote takes prompt and size only" branch -> the sent values vanish.
+  it('reports the steps / seed / guidance / sampler a remote server was sent', async () => {
+    mockEngine = { kind: 'remote', server: {} };
+    mockGenerate.mockResolvedValue({
+      ok: true, image: {},
+      used: { engine: 'remote', width: 384, height: 256, steps: 12, seed: 5, guidance: 6, sampler: 'euler' },
+    });
+    const body = JSON.parse((await run({ prompt: 'x', width: 384, height: 256, steps: 10, seed: 5, sampler: 'euler' })).content);
+    expect(body).toMatchObject({ width: 384, height: 256, steps: 12, seed: 5, guidance: 6, sampler: 'euler' });
+    expect(body.notes).toEqual(['steps 10 -> 12 (engine limit)']);
   });
 
   it.each([
@@ -142,7 +193,7 @@ describe('generate_image handler', () => {
   });
 
   it('fails (not succeeds) outside a conversation', async () => {
-    const result = await run({ prompt: 'x' }, undefined);
+    const result = await run({ prompt: 'x' }, null);
     expect(result.status).toBe('error');
     expect(mockGenerate).not.toHaveBeenCalled();
   });

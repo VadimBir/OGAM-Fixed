@@ -275,3 +275,36 @@ describe('getDisplayMessages', () => {
     expect(out.at(-1)).toBe(durableMessage);
   });
 });
+
+// H4-1: store order of a generate_image turn = tool-call record, image record (imageGenerationResult),
+// tool result, final text. The visible item is built from the final text; the image must ride along.
+describe('getDisplayMessages - generated image inside a tool turn', () => {
+  const image = { id: 'img-1', type: 'image', uri: 'file:///img-1.png', width: 512, height: 512 };
+  const turn = (finalText: string): Message[] => [
+    { id: 'u1', role: 'user', content: 'draw a cat', timestamp: 1 } as Message,
+    { id: 'a1', role: 'assistant', content: '', timestamp: 2,
+      toolCalls: [{ id: 'call-1', name: 'generate_image', arguments: { prompt: 'a cat' } }] } as Message,
+    { id: 'a2', role: 'assistant', content: 'Generated image for: "a cat"', timestamp: 3,
+      attachments: [image] } as Message,
+    { id: 't1', role: 'tool', content: 'Image generated.', toolCallId: 'call-1', toolName: 'generate_image', timestamp: 4 } as Message,
+    { id: 'a3', role: 'assistant', content: finalText, timestamp: 5 } as Message,
+  ];
+
+  it.each([
+    ['model text answer', 'Here is your cat.'],
+    ['evicted text model ("Here is the image.")', 'Here is the image.'],
+  ])('keeps the image on the visible answer after the %s', (_label, finalText) => {
+    const out = getDisplayMessages(turn(finalText), base());
+    expect(out).toHaveLength(2);
+    const answer = out[1] as any;
+    expect(answer.content).toBe(finalText);
+    expect(answer.attachments).toEqual([image]);
+    expect(answer.toolArtifacts).toEqual([expect.objectContaining({ name: 'generate_image' })]);
+  });
+
+  it('does not duplicate the image when the image record itself owns the turn (no text yet)', () => {
+    const out = getDisplayMessages(turn('').slice(0, 4), base());
+    const answer = out[1] as any;
+    expect(answer.attachments).toEqual([image]);
+  });
+});

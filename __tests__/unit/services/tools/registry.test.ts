@@ -70,13 +70,15 @@ describe('Tool Registry', () => {
         type: 'function',
         function: {
           name: 'calculator',
-          description: 'Evaluate math expressions',
+          description:
+            'Compute arithmetic exactly. Use instead of doing math in your head. Only numbers, + - * / ^ % and parentheses.' +
+            ' Example arguments: {"expression":"(12.5*3)/4"}',
           parameters: {
             type: 'object',
             properties: {
               expression: {
                 type: 'string',
-                description: 'Math expression',
+                description: 'Math expression, e.g. "(12.5*3)/4".',
               },
             },
             required: ['expression'],
@@ -109,21 +111,28 @@ describe('Tool Registry', () => {
       expect(datetimeSchema[0].function.parameters.required).toEqual([]);
     });
 
-    it('exposes generate_image with a required prompt and optional size/steps/guidance/seed/sampler', () => {
+    // Owner spec: required prompt only; optional width/height (64-512, x64), steps (1-50), guidance,
+    // seed, negative_prompt. sampler is engine-specific (a 3B model cannot know the valid names), so it
+    // is no longer advertised; the handler still accepts it.
+    it('exposes generate_image with a required prompt and optional size/steps/guidance/seed/negative_prompt', () => {
       const schema = getToolsAsOpenAISchema(['generate_image']);
       expect(schema).toHaveLength(1);
       expect(schema[0].function.name).toBe('generate_image');
       expect(schema[0].function.parameters.required).toEqual(['prompt']);
       const props = schema[0].function.parameters.properties;
+      expect(Object.keys(props).sort()).toEqual(
+        ['guidance', 'height', 'negative_prompt', 'prompt', 'seed', 'steps', 'width'],
+      );
       expect(props.prompt.type).toBe('string');
       expect(props.steps.type).toBe('integer');
+      expect(props.steps.description).toContain('1-50');
       expect(props.negative_prompt.type).toBe('string');
       expect(props.width.type).toBe('integer');
       expect(props.height.type).toBe('integer');
-      expect(props.width.description).toContain('64-512');
+      expect(props.width.description).toContain('64-512, multiple of 64');
       expect(props.guidance.type).toBe('number');
       expect(props.seed.type).toBe('integer');
-      expect(props.sampler.type).toBe('string');
+      expect(props).not.toHaveProperty('sampler');
     });
 
     it('writes the generate_image prompt description for the selected image model family', () => {
@@ -179,15 +188,15 @@ describe('Tool Registry', () => {
     it('includes tool names and descriptions for enabled tools', () => {
       const hint = buildToolSystemPromptHint(['calculator', 'web_search']);
 
-      expect(hint).toContain('- calculator: Evaluate math expressions');
-      expect(hint).toContain('- web_search: Search the live web');
-      expect(hint).toContain('Tools available');
+      expect(hint).toContain('- calculator: Compute arithmetic exactly');
+      expect(hint).toContain('- web_search: Search the web');
+      expect(hint).toContain('# Tools');
     });
 
     it('only includes enabled tools, not all tools', () => {
       const hint = buildToolSystemPromptHint(['calculator']);
 
-      expect(hint).toContain('calculator: Evaluate math expressions');
+      expect(hint).toContain('calculator: Compute arithmetic exactly');
       expect(hint).not.toContain('web_search');
       expect(hint).not.toContain('get_current_datetime');
       expect(hint).not.toContain('get_device_info');
@@ -196,7 +205,7 @@ describe('Tool Registry', () => {
     it('includes read_url when read_url is enabled', () => {
       const hint = buildToolSystemPromptHint(['read_url']);
       expect(hint).toContain('read_url');
-      expect(hint).toContain('result page');
+      expect(hint).toContain('full text of a web page');
     });
 
     it('includes get_current_datetime when enabled', () => {

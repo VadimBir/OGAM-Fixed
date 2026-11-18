@@ -391,7 +391,12 @@ describe('remoteServerManager', () => {
       expect(
         useRemoteServerStore.getState().setActiveRemoteImageModelId,
       ).toHaveBeenCalledWith('llava');
-      expect(mockLoadModel).toHaveBeenCalledWith('llava');
+      // The server's provider is the TEXT chat provider: picking an image model must not swap its model.
+      expect(mockLoadModel).not.toHaveBeenCalled();
+      expect(
+        useRemoteServerStore.getState().setActiveRemoteTextModelId,
+      ).not.toHaveBeenCalled();
+      expect(useRemoteServerStore.getState().setActiveServerId).not.toHaveBeenCalled();
     });
   });
 
@@ -824,8 +829,8 @@ describe('remoteServerManager', () => {
     });
   });
 
-  describe('setActiveRemoteImageModel - provider creation', () => {
-    it('should create provider when it does not exist', async () => {
+  describe('setActiveRemoteImageModel - text provider untouched', () => {
+    it('stores the image model on the server record without creating or loading a chat provider', async () => {
       const mockLoadModel = jest.fn().mockResolvedValue(undefined);
       const mockProvider = {
         loadModel: mockLoadModel,
@@ -845,22 +850,26 @@ describe('remoteServerManager', () => {
       (providerRegistry.registerProvider as jest.Mock).mockReturnValue(
         undefined,
       );
+      const updateServer = jest.fn();
       (useRemoteServerStore.getState as jest.Mock).mockReturnValue({
         setActiveServerId: jest.fn(),
         setActiveRemoteMediaServerId: jest.fn(),
         setActiveRemoteTextModelId: jest.fn(),
         setActiveRemoteImageModelId: jest.fn(),
         getServerById: jest.fn().mockReturnValue(mockServer),
+        updateServer,
       });
       (Keychain.getGenericPassword as jest.Mock).mockResolvedValue(null);
 
       await remoteServerManager.setActiveRemoteImageModel('server-1', 'llava');
 
-      expect(providerRegistry.registerProvider).toHaveBeenCalled();
-      expect(mockLoadModel).toHaveBeenCalledWith('llava');
+      // runRemoteImageGeneration reads server.mediaModels.image, so the selection is stored on the record.
+      expect(updateServer).toHaveBeenCalledWith('server-1', { mediaModels: { image: 'llava' } });
+      expect(providerRegistry.registerProvider).not.toHaveBeenCalled();
+      expect(mockLoadModel).not.toHaveBeenCalled();
     });
 
-    it('should warn when provider cannot be created', async () => {
+    it('does not create a provider when the server is unknown', async () => {
       const _mockServer = {
         id: 'server-1',
         name: 'Test',

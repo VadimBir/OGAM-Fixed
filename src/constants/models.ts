@@ -164,18 +164,36 @@ export const QUANTIZATION_INFO: Record<string, {
   description: string;
   recommended: boolean;
 }> = {
+  // bpw = sizeof(block)*8 / weights per block (ggml-common.h): block_q4_0 18 B/32 = 4.5 (:199),
+  // block_q8_0 34 B/32 = 8.5 (:256), block_q6_K 210 B/256 = 6.5625 (:368). The old 4 / 8 / 6.5
+  // ignored the per-block fp16 scale and under-estimated RAM (Q4_0 by ~11%) -> loads that OOM.
   'Q2_K': { bitsPerWeight: 2.625, quality: 'Low', description: 'Extreme compression, noticeable quality loss', recommended: false },
   'Q3_K_S': { bitsPerWeight: 3.4375, quality: 'Low-Medium', description: 'High compression, some quality loss', recommended: false },
   'Q3_K_M': { bitsPerWeight: 3.4375, quality: 'Medium', description: 'Good compression with acceptable quality', recommended: false },
-  'Q4_0': { bitsPerWeight: 4, quality: 'Medium', description: 'Basic 4-bit quantization', recommended: false },
+  'Q4_0': { bitsPerWeight: 4.5, quality: 'Medium', description: 'Basic 4-bit quantization', recommended: false },
   'Q4_K_S': { bitsPerWeight: 4.5, quality: 'Medium-Good', description: 'Good balance of size and quality', recommended: true },
   'Q4_K_M': { bitsPerWeight: 4.5, quality: 'Good', description: 'Optimal for mobile - best balance', recommended: true },
   'Q5_K_S': { bitsPerWeight: 5.5, quality: 'Good-High', description: 'Higher quality, larger size', recommended: false },
   'Q5_K_M': { bitsPerWeight: 5.5, quality: 'High', description: 'Near original quality', recommended: false },
-  'Q6_K': { bitsPerWeight: 6.5, quality: 'Very High', description: 'Minimal quality loss', recommended: false },
-  'Q8_0': { bitsPerWeight: 8, quality: 'Excellent', description: 'Best quality, largest size', recommended: false },
-  // Every label src/utils/quantization.ts can parse has an entry (bits are llama.cpp's effective
+  'Q6_K': { bitsPerWeight: 6.5625, quality: 'Very High', description: 'Minimal quality loss', recommended: false },
+  'Q8_0': { bitsPerWeight: 8.5, quality: 'Excellent', description: 'Best quality, largest size', recommended: false },
+  // Every llama.cpp quant name src/utils/quantization.ts parses has an entry (bits are llama.cpp's
   // bits per weight; *_K_L / *_K_XL keep embeddings/output at Q8, so they sit above their base).
+  // Parsed spellings that are NOT a llama.cpp type (bare Q4/Q5/Q8, IQ4_S, IQ4_M, Q7_K, Q4_0_8_4,
+  // ...; llama.h llama_ftype + ggml-common.h list none of them) have no entry on purpose:
+  // lookupQuantizationInfo returns undefined and each caller applies its own fallback.
+  // Block bpw below = sizeof(block)*8 / weights per block, from
+  // node_modules/llama.rn/vendor/llama.cpp/ggml/src/ggml-common.h (QK_K=256 :89, K_SCALE_SIZE=12 :90).
+  'Q2_K_S': { bitsPerWeight: 2.625, quality: 'Low', description: 'Smaller Q2_K mix', recommended: false }, // block_q2_K 84 B/256 (:309); ftype 21 (llama.h:138)
+  'Q3_K': { bitsPerWeight: 3.4375, quality: 'Low-Medium', description: '3-bit K-quant', recommended: false }, // block_q3_K 110 B/256 (:321)
+  'Q4_K': { bitsPerWeight: 4.5, quality: 'Medium-Good', description: '4-bit K-quant', recommended: false }, // block_q4_K 144 B/256 (:338)
+  'Q5_K': { bitsPerWeight: 5.5, quality: 'Good-High', description: '5-bit K-quant', recommended: false }, // block_q5_K 176 B/256 (:356)
+  'Q8_K': { bitsPerWeight: 9.125, quality: 'Excellent', description: '8-bit K-quant (llama.cpp intermediate type)', recommended: false }, // block_q8_K 292 B/256 (:376)
+  // Q4_0 interleaved for ARM repack; removed from GGUF (llama.h:151-153 "use Q4_0 and runtime
+  // repack"), old files remain. Same bytes as block_q4_0: 18 B/32 = 4.5 (:199).
+  'Q4_0_4_4': { bitsPerWeight: 4.5, quality: 'Medium', description: 'Q4_0 interleaved for ARM (legacy)', recommended: false },
+  'Q4_0_4_8': { bitsPerWeight: 4.5, quality: 'Medium', description: 'Q4_0 interleaved for ARM (legacy)', recommended: false },
+  'Q4_0_8_8': { bitsPerWeight: 4.5, quality: 'Medium', description: 'Q4_0 interleaved for ARM (legacy)', recommended: false },
   'IQ1_S': { bitsPerWeight: 1.56, quality: 'Very Low', description: 'Importance-matrix 1-bit, extreme compression', recommended: false },
   'IQ1_M': { bitsPerWeight: 1.75, quality: 'Very Low', description: 'Importance-matrix 1-bit, extreme compression', recommended: false },
   'IQ2_XXS': { bitsPerWeight: 2.06, quality: 'Low', description: 'Importance-matrix 2-bit', recommended: false },

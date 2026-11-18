@@ -365,6 +365,7 @@ export function useModelsScreen() {
     downloadedImageModels: image.downloadedImageModels,
     hasActiveImageFilters: image.hasActiveImageFilters,
     filteredHFModels: image.filteredHFModels,
+    downloadedSearchMatches: image.downloadedSearchMatches,
     imageRecommendation: image.imageRecommendation,
     loadHFModels: image.loadHFModels,
     clearImageFilters: image.clearImageFilters,

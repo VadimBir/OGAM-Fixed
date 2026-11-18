@@ -202,6 +202,10 @@ export const useWhisperStore = create<WhisperState>()(
       unloadModel: async () => {
         try {
           await whisperService.unloadModel();
+          // Stop counting STT against the RAM budget once its native context is gone. A phantom
+          // 'whisper' resident inflated the live budget (liveBudgetMB credits resident MB as
+          // reclaimable) by memory that was already free.
+          modelResidencyManager.release('whisper');
           set({ isModelLoaded: false });
         } catch (error) {
           set({
@@ -217,6 +221,7 @@ export const useWhisperStore = create<WhisperState>()(
         try {
           // Unload first
           await whisperService.unloadModel();
+          modelResidencyManager.release('whisper');
           // Then delete
           await whisperService.deleteModel(downloadedModelId);
           set({
@@ -243,7 +248,10 @@ export const useWhisperStore = create<WhisperState>()(
 
       deleteModelById: async (modelId: string) => {
         try {
-          if (get().downloadedModelId === modelId) await whisperService.unloadModel();
+          if (get().downloadedModelId === modelId) {
+            await whisperService.unloadModel();
+            modelResidencyManager.release('whisper');
+          }
           await whisperService.deleteModel(modelId);
           set((s) => ({
             presentModelIds: s.presentModelIds.filter((id) => id !== modelId),
