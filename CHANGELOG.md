@@ -3,6 +3,12 @@
 Branch `app-refactor-fixes`. Newest first. Each entry gives the commit it ships in.
 State words: DONE = finished and unit tested; WIP = an agent is still editing, so the code is not checked; UNKNOWN = not verified.
 
+## 2026-11-21: plan: Image Studio, imgref, region edit, memory, newer models (no code change)
+- **Plan file:** `docs/plans/2026-11-21-image-studio-ref-memory-plan.md`, built from three read-only audits: sd.cpp GPU, local-dream NPU, memory gate.
+- **Found bug (PROVEN, not fixed yet):** NPU img2img sends `init_img`, but the core reads `image` (`LocalDreamModule.kt:1106`). Every img2img runs as txt2img.
+- **Found cause (PROVEN, not fixed yet):** text + image cannot coexist in Balanced. Stacked 10% factors and a temporary VAE buffer push the pair to 8,939 MB, over the 7,910 MB cap. A second, stricter text check then refuses the load after the image was already evicted.
+- **Status:** waiting for user decisions D1-D4 in the plan.
+
 ## 2026-11-19: user bug: Settings froze on opening Advanced
 
 ### Cause (DONE)
