@@ -9,7 +9,7 @@ import { generateRandomSeed } from '../utils/generateId';
 import logger from '../utils/logger';
 import { resolveOwnedDocumentPath } from '../utils/resolveDocumentPath';
 import { DEFAULT_IMAGE_STEPS } from '../utils/imageGenAdvice';
-import type { EffectiveImageSize } from './imageEngineParams';
+import { LOCALDREAM_SAMPLERS, type EffectiveImageSize } from './imageEngineParams';
 
 const { LocalDreamModule, CoreMLDiffusionModule } = NativeModules;
 const PROGRESS_LOG_SAMPLE_STEPS = 5;
@@ -199,8 +199,10 @@ class LocalDreamGeneratorService {
       // shears into a rainbow. Native sends use_opencl=true only at exactly 512x512 (see
       // LocalDreamModule.effectiveUseOpenCL); getEffectiveSize() reports that decision up front.
       useOpenCL: params.useOpenCL ?? false,
-      // Sampler: the core only knows 'dpm' (default) and 'euler_a'; anything else is not sent.
-      ...(params.sampler === 'dpm' || params.sampler === 'euler_a' ? { scheduler: params.sampler } : {}),
+      // Sampler: only a name the v2.8.1 core knows (LOCALDREAM_SAMPLERS) is sent; else its 'dpm' default.
+      ...(params.sampler && (LOCALDREAM_SAMPLERS as readonly string[]).includes(params.sampler)
+        ? { scheduler: params.sampler }
+        : {}),
       // img2img: only attach when a reference image is present, so a plain request stays txt2img.
       ...(params.initImage
         ? {
@@ -216,7 +218,8 @@ class LocalDreamGeneratorService {
 
   /**
    * What this request will REALLY render, computed natively before generating (no restart):
-   * NPU without a resolution patch -> 512x512, MNN -> square 128..512, OpenCL only at 512x512.
+   * NPU without a resolution patch -> 512x512, MNN -> square 128..512, OpenCL only at 512x512,
+   * SDXL NPU -> the 1024 canvas cropped to the requested aspect ratio.
    * Without a loaded model, on iOS, or on an older native build the request is echoed unadjusted.
    */
   async getEffectiveSize(

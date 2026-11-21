@@ -474,8 +474,8 @@ export interface ImageGenerationParams {
   /** Optional inpainting mask as base64 (same encoding as initImage). */
   maskImage?: string;
   /**
-   * Sampler. stable-diffusion.cpp: any sd.cpp name (euler_a, dpm++2m, ...). LocalDream (QNN/MNN):
-   * only 'dpm' | 'euler_a'. Empty/undefined = the engine's default.
+   * Sampler. stable-diffusion.cpp: any sd.cpp name (euler_a, dpm++2m, ...). LocalDream v2.8.1:
+   * LOCALDREAM_SAMPLERS (imageEngineParams.ts). Empty/undefined = the engine's default.
    */
   sampler?: string;
   /** Noise schedule (stable-diffusion.cpp only: discrete, karras, exponential, ays, ...). */

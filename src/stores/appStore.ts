@@ -38,6 +38,7 @@ import {
 import { migratePersistedState } from './appStoreMigrations';
 import { defaultImageSteps, SWEET_SPOT_SIZE } from '../utils/imageGenAdvice';
 import type { SdWeightType } from '../services/sdCppMemory';
+import type { FastModeState } from '../services/fastModePresets';
 import { SAMPLING_DEFAULTS } from '../services/samplingParams';
 import type { RemoteTextLoraScale, TextLora } from '../services/textLoraTypes';
 
@@ -116,9 +117,14 @@ export type AppSettings = {
   imageWidth: number;
   imageHeight: number;
   imageUseOpenCL: boolean;
-  /** img2img denoise strength 0..1: how much a reference image is changed (low = closer to ref). */
+  /** img2img denoise strength 0..1: how much a reference image is changed (low = closer to ref).
+   *  The Image Studio "Keep" slider shows 1 - this (keep 60% = 0.4, the default). */
   imageDenoiseStrength: number;
-  /** Sampler; '' = engine default. sd.cpp takes any sd.cpp name, LocalDream only dpm/euler_a. */
+  /** Image Studio: feed each finished result back as the next reference image (img2img chain). */
+  imageStudioChain?: boolean;
+  /** Image Studio: ids of the generatedImages the Studio produced, newest first (its gallery strip). */
+  imageStudioImageIds?: string[];
+  /** Sampler; '' = engine default. sd.cpp takes any sd.cpp name; LocalDream v2.8.1 takes LOCALDREAM_SAMPLERS (imageEngineParams.ts). */
   imageSampler?: string;
   /** Noise schedule for stable-diffusion.cpp models; '' = model default. */
   imageScheduler?: string;
@@ -134,6 +140,10 @@ export type AppSettings = {
   imageSdFlashAttn?: boolean;
   /** sd.cpp: decode the VAE in 256 px tiles — caps the largest compute buffer at any resolution. */
   imageSdVaeTiling?: boolean;
+  /** sd.cpp: decode with TAESD (tiny VAE, image_vae/ by checkpoint family) instead of the full VAE. Applies at load. */
+  imageSdTaesd?: boolean;
+  /** Fast mode (1/2/4 steps) and the values it replaced; null/unset = off (services/fastModePresets). */
+  imageFastMode?: FastModeState | null;
   /** Negative prompt used when a request names none (local engines + the user's image server). */
   imageNegativePrompt?: string;
   /** Image seed used when a request names none; -1 = random each image. */
@@ -195,6 +205,8 @@ export type AppSettings = {
    *  a 3B model with thinking on spent it before emitting the tool call). The migration raises a
    *  persisted 1024 exactly once, so a user who later picks 1024 keeps it. */
   maxTokensDefault2048?: boolean;
+  /** Migration flag: the old 0.6 imageDenoiseStrength default was moved to 0.4 once. */
+  imageKeepDefault60?: boolean;
   inferenceBackend: InferenceBackend;
   /** True once the user has explicitly picked an inference backend in Settings.
    *  While false, the boot-time backendSync may upgrade the default to the GPU
@@ -343,10 +355,14 @@ export const DEFAULT_SETTINGS: AppSettings = {
   imageWidth: Platform.OS === 'android' ? 512 : SWEET_SPOT_SIZE,
   imageHeight: Platform.OS === 'android' ? 512 : SWEET_SPOT_SIZE,
   imageUseOpenCL: false,
-  imageDenoiseStrength: 0.6,
+  imageDenoiseStrength: 0.4, // Image Studio Keep 60% (keep = 1 - denoise)
+  imageStudioChain: false,
+  imageStudioImageIds: [],
   imageSdWeightType: 'auto' as SdWeightType,
   imageSdFlashAttn: true,
   imageSdVaeTiling: true,
+  imageSdTaesd: false,
+  imageFastMode: null,
   imageNegativePrompt: '',
   imageSeed: -1,
   imageClipSkip: 0,
@@ -374,6 +390,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   reasoningBudget: REASONING_BUDGET_AUTO,
   reasoningBudgetZeroIsOff: true,
   maxTokensDefault2048: true,
+  imageKeepDefault60: true,
   liteRTBackend: 'gpu',
   liteRTTemperature: 0.7,
   liteRTTopP: 0.9,

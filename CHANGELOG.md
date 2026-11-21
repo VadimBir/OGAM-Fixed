@@ -3,6 +3,70 @@
 Branch `app-refactor-fixes`. Newest first. Each entry gives the commit it ships in.
 State words: DONE = finished and unit tested; WIP = an agent is still editing, so the code is not checked; UNKNOWN = not verified.
 
+## 2026-11-21: local-dream core v2.8.1 (SDXL on NPU), Image tab, Fast mode 1/2/4 steps
+
+### Core v2.8.1 (agent CB; DONE, unit tested; device UNKNOWN)
+- **Source:** upstream stable v2.8.1 APK without the filter, 56,669,009 B, sha256 `c8ba6176…31edb`, which matches the GitHub asset digest.
+- **Core file:** `libstable_diffusion_core.so`, 11,679,200 B, sha256 `6084236f…`. It replaces both copies: `jniLibs/arm64-v8a` and the `assets/qnnlibs` fallback.
+- **QNN libs:** the 19 v2.39 QNN libs are hash-identical, so they are unchanged.
+- **License:** CC BY-NC 4.0.
+- **`LocalDreamModule.kt` CLI:**
+  - New flags: `--type sd15cpu|sd15npu|sdxl --model_dir --lib_dir --port`.
+  - Conditional flags: `--patch`, `--no_img2img`, `--use_v_pred`.
+  - SDXL always gets `--lowram`; `--safety_checker` is never sent.
+  - The old CLI flags were removed (the new core exits on unknown flags).
+- **SDXL:**
+  - Detected by the `SDXL` marker or `clip_2.mnn`.
+  - The SoC gate follows upstream Model.kt:545 and includes SM8850.
+  - Fixed 1024 canvas; `aspect_ratio` is sent only when a VAE encoder is present.
+  - No MNN fallback.
+- **Request body:** `output_format: "jpeg"` and all 9 schedulers.
+- **SSE `error` event:** now raises the message (it was a silent "no result").
+- **Integrity (`imageModelIntegrity.ts`):**
+  - New SDXL kind.
+  - SD1.5 now needs `clip_v2.mnn`; older packages are flagged for re-download.
+- **Catalog (`huggingFaceModelBrowser.ts`):**
+  - Added xororz/sdxl-qnn plus YuuiKurata lustify, bigLove, bigLust, ponyRealism and cyberrealisticPony.
+  - All are `_8gen3`, shown only on SDXL-capable SoCs. Zips of 4 GB or more are cut.
+- **RAM (`imageModelMemory.ts`):** SDXL lowram peak = unet.bin + 0.09 + 0.2 GB + baseline. This is estimated, not measured.
+- **Download:** refused unless free space is at least 2 × zip + 256 MB.
+
+### Image tab (agent P1; DONE)
+- **Bottom tabs:** Home, Chats, **Image**, Projects, Models, Settings (`AppNavigator.tsx`).
+- **`ImageStudioScreen`:**
+  - Prompt and negative prompt, model picker, steps/size/seed, Generate/Cancel, gallery strip.
+  - No LLM is involved.
+- **Reference:**
+  - Sources: device or gallery.
+  - Keep slider, default 60% (denoise 0.4).
+  - Chain: each result becomes the next reference.
+  - Disabled for sd.cpp and remote engines.
+- **Migration:** a one-time `imageKeepDefault60` step moves the old saved 0.6 default to 0.4 (`appStoreMigrations.ts`).
+
+### Fast mode 1/2/4 steps + TAESD (agent FM; DONE)
+- **sd.cpp add-ons:** downloaded inside the app with one tap. Sizes and sha256 match the HF tree API exactly (re-checked).
+  - SD1.x: Hyper-SD15 1-step (`tcd`/`lcm`), and Hyper-SD15 2-step and 4-step (`ddim_trailing`/`simple`), all at cfg 1.
+  - SDXL: Hyper-SDXL 1-step; SDXL-Lightning 2-step and 4-step (`euler`/`simple`, cfg 1).
+- **TAESD toggle:** taesd/taesdxl (9.8 MB). `taesdPath` is passed from JS to the existing JNI field.
+- **NPU:** no LoRA; presets apply to DMD2/Hyper/LCM/Lightning/Turbo models by name.
+- **Step sliders:** minimum 1 (was 4).
+
+### Civitai
+- Too-big checkpoints are shown with a RAM warning instead of being hidden.
+
+### Gates + APK (this commit)
+- **jest:** 593 of 597 suites pass, 7025 tests pass. Only failure: the orphaned `imageGenerator.test.ts` (33 tests).
+- **tsc:** 0 errors in `src/` outside `sync/`.
+- **eslint:** 0 errors.
+- **Kotlin localdream tests:** pass.
+- **`assembleRelease`:** passes.
+- **APK:** `OGAM-core281-studio-fast-20261121.apk`, 194,755,248 bytes, SHA-256 `92a87c511844785deaad0f7bbbd0caadbff5eb80f9d706584a2257156c44a263`.
+
+### UNKNOWN until device test
+- SDXL starting on V81, its RAM peak and its generation time.
+- Hyper/Lightning LoRA key layouts passing the app's LoRA detector.
+- Fast-mode quality, and how six tabs fit on the bar.
+
 ## 2026-11-21: P0 fixes, memory gate, /img, LoRA import on all engines, no NSFW filter
 
 ### Fixes (DONE, unit tested; device UNKNOWN)

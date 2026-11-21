@@ -326,7 +326,7 @@ export const ImageEngineSettings: React.FC<{ compact?: boolean }> = ({ compact }
       <>
         <View style={styles.group}>
           <Text style={styles.label}>Sampler</Text>
-          <Text style={styles.desc}>The NPU/GPU engine supports DPM (default) and Euler A.</Text>
+          <Text style={styles.desc}>The NPU/GPU engine supports DPM++ 2M (dpm, default), Euler A, Euler and DPM++ 2M SDE, each also with Karras sigmas, plus LCM.</Text>
           <ChipRow
             testID="image-sampler"
             styles={styles}

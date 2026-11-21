@@ -3,12 +3,12 @@
  *
  * Tests for the main navigation setup including:
  * - Tab bar safe area inset handling
- * - Tab bar renders all tabs
+ * - Tab bar renders all tabs (Image sits after Chats and opens the Image Studio)
  * - Dynamic height based on device navigation mode
  */
 
 import React from 'react';
-import { render } from '@testing-library/react-native';
+import { render, fireEvent } from '@testing-library/react-native';
 import { NavigationContainer } from '@react-navigation/native';
 import { useAppStore } from '../../../src/stores/appStore';
 import { resetStores, setupWithActiveModel } from '../../utils/testHelpers';
@@ -184,11 +184,12 @@ describe('AppNavigator', () => {
   });
 
   describe('Tab bar rendering', () => {
-    it('renders all five tab labels', () => {
+    it('renders all six tab labels', () => {
       const { getAllByText } = renderAppNavigator();
 
       expect(getAllByText('Home').length).toBeGreaterThanOrEqual(1);
       expect(getAllByText('Chats').length).toBeGreaterThanOrEqual(1);
+      expect(getAllByText('Image').length).toBeGreaterThanOrEqual(1);
       expect(getAllByText('Projects').length).toBeGreaterThanOrEqual(1);
       expect(getAllByText('Models').length).toBeGreaterThanOrEqual(1);
       expect(getAllByText('Settings').length).toBeGreaterThanOrEqual(1);
@@ -199,9 +200,27 @@ describe('AppNavigator', () => {
 
       expect(getByTestId('home-tab')).toBeTruthy();
       expect(getByTestId('chats-tab')).toBeTruthy();
+      expect(getByTestId('image-tab')).toBeTruthy();
       expect(getByTestId('projects-tab')).toBeTruthy();
       expect(getByTestId('models-tab')).toBeTruthy();
       expect(getByTestId('settings-tab')).toBeTruthy();
+    });
+
+    it('orders the tabs Home, Chats, Image, Projects, Models, Settings', () => {
+      const { getAllByTestId } = renderAppNavigator();
+      const tabIds = ['home-tab', 'chats-tab', 'image-tab', 'projects-tab', 'models-tab', 'settings-tab'];
+      const order = getAllByTestId(/-tab$/)
+        .map(node => node.props.testID)
+        .filter((id: string) => tabIds.includes(id));
+      expect(order).toEqual(tabIds);
+    });
+
+    it('the Image tab opens the Image Studio', async () => {
+      const { getByTestId, findByTestId } = renderAppNavigator();
+      fireEvent.press(getByTestId('image-tab'));
+      // SafeAreaView is mocked to bare children above (its testID is dropped), so assert on Studio controls.
+      expect(await findByTestId('studio-prompt')).toBeTruthy();
+      expect(await findByTestId('studio-generate')).toBeTruthy();
     });
   });
 
@@ -282,6 +301,7 @@ describe('AppNavigator', () => {
       // All tab labels should be visible
       expect(getAllByText('Home').length).toBeGreaterThanOrEqual(1);
       expect(getAllByText('Chats').length).toBeGreaterThanOrEqual(1);
+      expect(getAllByText('Image').length).toBeGreaterThanOrEqual(1);
       expect(getAllByText('Projects').length).toBeGreaterThanOrEqual(1);
       expect(getAllByText('Models').length).toBeGreaterThanOrEqual(1);
       expect(getAllByText('Settings').length).toBeGreaterThanOrEqual(1);
@@ -289,6 +309,7 @@ describe('AppNavigator', () => {
       // All tab buttons should be pressable
       expect(getByTestId('home-tab')).toBeTruthy();
       expect(getByTestId('chats-tab')).toBeTruthy();
+      expect(getByTestId('image-tab')).toBeTruthy();
       expect(getByTestId('projects-tab')).toBeTruthy();
       expect(getByTestId('models-tab')).toBeTruthy();
       expect(getByTestId('settings-tab')).toBeTruthy();

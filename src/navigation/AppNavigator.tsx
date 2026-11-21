@@ -40,6 +40,7 @@ import {
   AboutScreen,
   ToolsScreen,
 } from '../screens';
+import { ImageStudioScreen } from '../screens/ImageStudioScreen';
 import {
   RootStackParamList,
   MainTabParamList,
@@ -53,6 +54,7 @@ const Tab = createBottomTabNavigator<MainTabParamList>();
 const TAB_ICON_MAP: Record<string, string> = {
   HomeTab: 'home',
   ChatsTab: 'message-circle',
+  ImageTab: 'image',
   ProjectsTab: 'folder',
   ModelsTab: 'cpu',
   SettingsTab: 'settings',
@@ -152,6 +154,14 @@ const MainTabs: React.FC = () => {
           name="ChatsTab"
           component={ChatsListScreen}
           options={{ tabBarLabel: 'Chats', tabBarButtonTestID: 'chats-tab' }}
+          listeners={() => ({
+            tabPress: () => { triggerHaptic('selection'); },
+          })}
+        />
+        <Tab.Screen
+          name="ImageTab"
+          component={ImageStudioScreen}
+          options={{ tabBarLabel: 'Image', tabBarButtonTestID: 'image-tab' }}
           listeners={() => ({
             tabPress: () => { triggerHaptic('selection'); },
           })}

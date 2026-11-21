@@ -27,6 +27,7 @@ jest.mock('../../../../src/services', () => ({
   modelManager: { getDownloadedImageModels: (...a: any[]) => mockGetDownloadedImageModels(...a) },
   hardwareService: {
     getSoCInfo: jest.fn().mockResolvedValue({ hasNPU: true }),
+    supportsSdxlNpu: jest.fn().mockResolvedValue(false),
     getImageModelRecommendation: jest.fn().mockResolvedValue({
       recommendedBackend: 'qnn', qnnVariant: '8gen2', bannerText: 'ok', compatibleBackends: ['qnn', 'mnn'],
     }),

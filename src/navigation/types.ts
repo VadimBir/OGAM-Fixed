@@ -34,6 +34,7 @@ export type RootStackParamList = {
 export type MainTabParamList = {
   HomeTab: undefined;
   ChatsTab: undefined;
+  ImageTab: undefined;
   ProjectsTab: undefined;
   ModelsTab:
     | {

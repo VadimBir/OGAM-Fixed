@@ -70,7 +70,9 @@ export function useImageModels(setAlertState: (s: AlertState) => void) {
         })));
       } else {
         const socInfo = await hardwareService.getSoCInfo();
-        const models = await fetchAvailableModels(forceRefresh, { skipQnn: !socInfo.hasNPU });
+        // SDXL NPU models are listed only on the SoCs their graphs are built for.
+        const includeSdxl = socInfo.hasNPU && await hardwareService.supportsSdxlNpu();
+        const models = await fetchAvailableModels(forceRefresh, { skipQnn: !socInfo.hasNPU, includeSdxl });
         if (!isLatest()) return;
         setAvailableHFModels(models);
       }
@@ -163,6 +165,8 @@ export function useImageModels(setAlertState: (s: AlertState) => void) {
   const isRecommendedModel = useCallback((model: HFImageModel): boolean => {
     if (!imageRec) return false;
     if (model.backend !== imageRec.recommendedBackend && imageRec.recommendedBackend !== 'all') return false;
+    // SDXL (variant 8gen3) is only fetched on an SDXL-capable SoC (loadHFModels), so it fits this device.
+    if (model.kind === 'sdxl') return true;
     if (imageRec.qnnVariant && model.variant) return model.variant.includes(imageRec.qnnVariant);
     if (imageRec.recommendedModels?.length) {
       const fields = [model.name, model.repo, model.id].map(s => s.toLowerCase());
@@ -183,7 +187,7 @@ export function useImageModels(setAlertState: (s: AlertState) => void) {
       if (!searching && showRecommendedOnly && imageRec && !isRecommendedModel(m)) return false;
       if (applyBackend && m.backend !== backendFilter) return false;
       if (styleFilter !== 'all' && guessStyle(m.name) !== styleFilter) return false;
-      if (!matchesSdVersionFilter(m.name, sdVersionFilter)) return false;
+      if (!matchesSdVersionFilter(m.name, sdVersionFilter, m.kind)) return false;
       if (downloadedImageModels.some(d => d.id === m.id)) return false;
       return !searching || m.displayName.toLowerCase().includes(query) || m.name.toLowerCase().includes(query);
     });

@@ -1,4 +1,5 @@
 import { NativeModules, NativeEventEmitter, Platform } from 'react-native';
+import RNFS from 'react-native-fs';
 import {
   ImageGenerationParams,
   ImageGenerationProgress,
@@ -8,6 +9,7 @@ import { generateRandomSeed } from '../utils/generateId';
 import logger from '../utils/logger';
 import { DEFAULT_IMAGE_STEPS } from '../utils/imageGenAdvice';
 import { snapSdCppDimension } from './imageEngineParams';
+import { taesdFamilyOf, taesdPathFor } from './fastModePresets';
 import type { SdWeightType } from './sdCppMemory';
 import {
   classifySafetensorsKeys,
@@ -78,6 +80,10 @@ export interface SdCppLoadConfig {
   loraApplyMode?: 'auto' | 'immediately' | 'at_runtime';
   /** Direct conv2d in the VAE (no im2col buffer; may be slower). Default false. */
   vaeConvDirect?: boolean;
+  /** Decode with TAESD (image_vae/, picked by the checkpoint's family) instead of the full VAE.
+   *  sd.cpp then builds the TAE as the VAE (tae_preview_only stays false: sdcpp_jni.cpp never sets
+   *  it, sd_ctx_params_init zero-fills it; model_builders.cpp "using TAE for encoding / decoding"). */
+  taesd?: boolean;
 }
 
 const DEFAULT_LORA_APPLY_MODE = 'auto';
@@ -90,14 +96,20 @@ function normalizedLoadConfig(c: SdCppLoadConfig) {
     paramsBackend: !c.paramsBackend || c.paramsBackend === 'ram' ? '' : c.paramsBackend,
     loraApplyMode: c.loraApplyMode ?? DEFAULT_LORA_APPLY_MODE,
     vaeConvDirect: c.vaeConvDirect ?? false,
+    taesd: c.taesd ?? false,
   };
 }
 
 export function sdCppLoadConfigFromSettings(settings: {
   imageSdWeightType?: SdWeightType;
   imageSdFlashAttn?: boolean;
+  imageSdTaesd?: boolean;
 }): SdCppLoadConfig {
-  return { weightType: settings.imageSdWeightType ?? 'auto', flashAttn: settings.imageSdFlashAttn ?? true };
+  return {
+    weightType: settings.imageSdWeightType ?? 'auto',
+    flashAttn: settings.imageSdFlashAttn ?? true,
+    taesd: settings.imageSdTaesd ?? false,
+  };
 }
 
 /** Sampler names stable-diffusion.cpp accepts ('' = the checkpoint's default). */
@@ -224,8 +236,28 @@ class SdCppGeneratorService {
       a.flashAttn !== b.flashAttn ||
       a.paramsBackend !== b.paramsBackend ||
       a.loraApplyMode !== b.loraApplyMode ||
-      a.vaeConvDirect !== b.vaeConvDirect
+      a.vaeConvDirect !== b.vaeConvDirect ||
+      a.taesd !== b.taesd
     );
+  }
+
+  /**
+   * TAESD file for the checkpoint's family (taesd for SD 1.x/2.x, taesdxl for SDXL), or '' when
+   * the family has none or the file is not downloaded: the full VAE is used then.
+   */
+  private async resolveTaesdPath(modelPath: string): Promise<string> {
+    const family = (await this.fileFamily(modelPath)).family;
+    const taesdFamily = taesdFamilyOf(family);
+    if (!taesdFamily) {
+      logger.log(`[SDCPP-LOAD] TAESD on, but no TAESD for family ${family}: full VAE`);
+      return '';
+    }
+    const path = taesdPathFor(taesdFamily);
+    if (!(await RNFS.exists(path))) {
+      logger.warn(`[SDCPP-LOAD] TAESD on, but ${path} is missing: full VAE`);
+      return '';
+    }
+    return path;
   }
 
   async loadModel(modelPath: string, threads?: number, config: SdCppLoadConfig = { weightType: 'auto', flashAttn: true }): Promise<boolean> {
@@ -234,7 +266,7 @@ class SdCppGeneratorService {
     }
     const params: {
       modelPath: string; threads?: number; mmap: boolean; weightType: string; flashAttn: boolean;
-      paramsBackend?: string; loraApplyMode: string; vaeConvDirect: boolean;
+      paramsBackend?: string; loraApplyMode: string; vaeConvDirect: boolean; taesdPath?: string;
     } = {
       modelPath, mmap: true, weightType: config.weightType, flashAttn: config.flashAttn,
       loraApplyMode: config.loraApplyMode ?? DEFAULT_LORA_APPLY_MODE,
@@ -243,6 +275,11 @@ class SdCppGeneratorService {
     // Unset / 'ram' = resident weights: the field is left out so native keeps upstream's default.
     if (config.paramsBackend && config.paramsBackend !== 'ram') params.paramsBackend = config.paramsBackend;
     if (typeof threads === 'number') params.threads = threads;
+    // Read by SdCppImageModule.loadModel (params.getString("taesdPath")) -> nativeLoadEx -> sd_ctx_params.taesd_path.
+    if (config.taesd) {
+      const taesdPath = await this.resolveTaesdPath(modelPath);
+      if (taesdPath) params.taesdPath = taesdPath;
+    }
     logger.log(`[SDCPP-LOAD] ${JSON.stringify(params)}`);
     const result = await SdCppImageModule.loadModel(params);
     this.loadedThreads = typeof threads === 'number' ? threads : this.loadedThreads;

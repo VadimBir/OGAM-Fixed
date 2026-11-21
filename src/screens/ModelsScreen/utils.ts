@@ -108,8 +108,14 @@ export function getTextModelCompatibility(
 
 // -- SD version filter helper --
 
-export function matchesSdVersionFilter(modelName: string, sdVersionFilter: string): boolean {
+export function matchesSdVersionFilter(
+  modelName: string,
+  sdVersionFilter: string,
+  kind?: 'sd15' | 'sdxl',
+): boolean {
   if (sdVersionFilter === 'all') return true;
+  // A catalog SDXL NPU model says so in its kind; its file name need not contain "xl".
+  if (kind === 'sdxl') return sdVersionFilter === 'sdxl';
   const nameLower = modelName.toLowerCase();
   if (sdVersionFilter === 'sdxl') return nameLower.includes('sdxl') || nameLower.includes('xl');
   if (sdVersionFilter === 'sd21') return nameLower.includes('2.1') || nameLower.includes('2-1');
@@ -166,6 +172,7 @@ export function hfModelToDescriptor(
     name: hfModel.displayName,
     description: (() => {
       if (hfModel._coreml) return `Core ML model from ${hfModel.repo}`;
+      if (hfModel.kind === 'sdxl') return `SDXL ${imageBackendLabel(hfModel.backend)} model (1024 px) from ${hfModel.repo}`;
       return `${imageBackendLabel(hfModel.backend, 'GPU')} model from ${hfModel.repo}`;
     })(),
     downloadUrl: hfModel.downloadUrl,

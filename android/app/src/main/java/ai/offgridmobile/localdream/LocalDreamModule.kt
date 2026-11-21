@@ -48,7 +48,9 @@ internal class GenerationCancelGate {
  * React Native native module that manages local-dream's inference server process.
  *
  * Architecture:
- * - Spawns libstable_diffusion_core.so as a subprocess
+ * - Spawns libstable_diffusion_core.so (local-dream v2.8.1 core) as a subprocess with
+ *   `--type sd15cpu | sd15npu | sdxl --model_dir <dir>`; the type fixes the file layout the core
+ *   loads from that dir (see buildCommand)
  * - The subprocess runs an HTTP server on 127.0.0.1:18081, or a free port when 18081 is taken
  * - This module POSTs /generate to that server and parses its SSE stream (TypeScript never talks HTTP)
  * - This module handles: process lifecycle, QNN lib extraction, image file management
@@ -71,6 +73,15 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
 
         private const val MNN_OPENCL_TUNING_MODE = "WIDE"
         private const val QNN_BASE_SIZE = 512
+        /** SDXL graphs are fixed at 1024x1024; the core forces this canvas (RequestParser.hpp:81-84). */
+        private const val SDXL_SIZE = 1024
+        /** Socs upstream offers SDXL on (local-dream v2.8.1 Model.kt:545 isSdxlCapableSoc). */
+        private val SDXL_SOCS = setOf("SM8650", "SM8750", "SM8750P", "SM8850", "SM8850P", "SM8845")
+        /** Scheduler names the v2.8.1 core knows (Pipeline.hpp:120-149, SchedulerNames.kt). */
+        internal val SUPPORTED_SCHEDULERS = listOf(
+            "dpm", "dpm_karras", "euler_a", "euler_a_karras", "euler", "euler_karras",
+            "lcm", "dpm_sde", "dpm_sde_karras",
+        )
         /** OpenCL (GPU VAE) is only sound at exactly 512x512 (see buildGenerationBody). */
         private const val OPENCL_SOUND_SIZE = 512
         /** The ONE native default step count: getConstants() and the request fallback both use it.
@@ -140,16 +151,19 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
         }
 
         /**
-         * Detect text_embedding_size from the model files.
-         * All SD1.5 models (which is everything in xororz/sd-mnn and sd-qnn) use
-         * CLIP ViT-L/14 with 768-dimensional text embeddings.
-         * Note: "clip_v2" refers to MNN model format v2 (separate weight files),
-         * NOT CLIP architecture v2. The embedding dimension is still 768.
+         * An NPU model dir holds SDXL when it carries upstream's 0-byte `SDXL` marker or the second
+         * CLIP graph `clip_2.mnn` (only the sdxl layout has it, main.cpp:328). [rawDir] is the
+         * downloaded root, checked too because the marker may sit above the resolved unet.bin dir.
+         * SD1.5 and SDXL share the unet.bin marker, so resolveModelDir alone cannot tell them apart.
          */
-        internal fun detectTextEmbeddingSize(modelDir: File, isCpu: Boolean): String {
-            // SD1.5 models always use 768
-            return "768"
-        }
+        internal fun isSdxlModelDir(resolvedDir: File, rawDir: File? = null): Boolean =
+            File(resolvedDir, "SDXL").exists() || File(resolvedDir, "clip_2.mnn").exists() ||
+                (rawDir != null && File(rawDir, "SDXL").exists())
+
+        /** SDXL NPU graphs are built for 8 Gen 3-class HTP and newer (upstream Model.kt:545). A
+         *  suffixed model string ("SM8850-AC") is compared on its SM part. */
+        internal fun isSdxlCapableSoc(soc: String): Boolean =
+            soc.substringBefore('-').uppercase() in SDXL_SOCS
 
         /** NPU (QNN) UNets are compiled for ONE latent shape (512x512 → 64x64). Any other size needs a
          *  zstd resolution patch applied at server start (`--patch`), named like upstream local-dream
@@ -209,11 +223,68 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
             )
         }
 
+        /**
+         * `aspect_ratio` for an SDXL request: "W:H" reduced, or null for a square request or a server
+         * started without a VAE encoder (the core needs it to encode the padded canvas and otherwise
+         * ignores the key, RequestParser.hpp:108).
+         */
+        internal fun sdxlAspectRatio(reqW: Int, reqH: Int, hasVaeEncoder: Boolean): String? {
+            if (reqW <= 0 || reqH <= 0 || reqW == reqH || !hasVaeEncoder) return null
+            tailrec fun gcd(a: Int, b: Int): Int = if (b == 0) a else gcd(b, a % b)
+            val g = gcd(reqW, reqH)
+            return "${reqW / g}:${reqH / g}"
+        }
+
+        /**
+         * SDXL renders on the fixed 1024 canvas; a non-square request is cropped from it by the core
+         * (RequestParser.hpp:116-131: long side 1024, short side floored to a multiple of 8). No
+         * resolution patches and no server restart.
+         */
+        internal fun planSdxlSize(reqW: Int, reqH: Int, hasVaeEncoder: Boolean): RenderPlan {
+            val ratio = sdxlAspectRatio(reqW, reqH, hasVaeEncoder)
+            val (w, h) = if (ratio == null) {
+                SDXL_SIZE to SDXL_SIZE
+            } else if (reqW >= reqH) {
+                SDXL_SIZE to (SDXL_SIZE * reqH / reqW / 8 * 8).coerceAtLeast(8)
+            } else {
+                (SDXL_SIZE * reqW / reqH / 8 * 8).coerceAtLeast(8) to SDXL_SIZE
+            }
+            val adjusted = w != reqW || h != reqH
+            val reason = when {
+                !adjusted -> null
+                reqW != reqH && !hasVaeEncoder -> "SDXL without a VAE encoder renders only 1024x1024"
+                else -> "SDXL renders on a fixed 1024 px canvas"
+            }
+            return RenderPlan(w, h, adjusted, reason)
+        }
+
+        /** The scheduler the core is sent: a known v2.8.1 name, else its default "dpm". */
+        internal fun normalizeScheduler(requested: String?): String =
+            if (requested != null && requested in SUPPORTED_SCHEDULERS) requested else "dpm"
+
         /** OpenCL is requested AND not force-disabled AND the render size is the proven-clean 512x512. */
         internal fun effectiveUseOpenCL(
             requested: Boolean, forceCpuCompute: Boolean, width: Int, height: Int,
         ): Boolean = requested && !forceCpuCompute && width == OPENCL_SOUND_SIZE && height == OPENCL_SOUND_SIZE
 
+        /** The core's `--type` for a start: sd15cpu (MNN), sdxl (QNN) or sd15npu (QNN). */
+        internal fun coreType(isCpu: Boolean, isSdxl: Boolean): String = when {
+            isCpu -> "sd15cpu"
+            isSdxl -> "sdxl"
+            else -> "sd15npu"
+        }
+
+        /**
+         * The v2.8.1 core CLI (main.cpp:141-159; an unknown flag makes it exit). `--type` fixes the
+         * file layout under `--model_dir` (main.cpp:326-350):
+         *  - sd15cpu: tokenizer.json clip_v2.mnn pos_emb.bin token_emb.bin unet.mnn vae_decoder.mnn
+         *  - sd15npu: same names with unet.bin / vae_decoder.bin (+ `--patch` for a non-512 size)
+         *  - sdxl:    + clip.mnn clip_2.mnn pos_emb_2.bin token_emb_2.bin, fixed 1024x1024
+         * The VAE encoder is required unless `--no_img2img`, so that flag is passed when the model has
+         * none. QNN types load the runtime from `--lib_dir`. SDXL always gets `--lowram` (per-stage
+         * load/release; upstream: required under 16 GB RAM, strings.xml:36). `--use_v_pred` follows
+         * a `V_PRED` file, as upstream BackendService.kt:489. `--safety_checker` is never passed.
+         */
         internal fun buildCommand(
             executable: File,
             modelDir: File,
@@ -221,60 +292,23 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
             isCpu: Boolean,
             patchFile: File? = null,
             port: Int = SERVER_PORT,
+            isSdxl: Boolean = false,
         ): List<String> {
-            val embeddingSize = detectTextEmbeddingSize(modelDir, isCpu)
-            Log.d(TAG, "Detected text_embedding_size: $embeddingSize")
-
-            return if (isCpu) {
-                // MNN backend — --cpu tells the binary to use MNN instead of QNN.
-                // OpenCL GPU acceleration is requested per-request via "use_opencl": true in the
-                // JSON body. Do NOT remove --cpu — without it the binary crashes on some devices.
-                // IMPORTANT: Always pass "clip.mnn" even if only clip_v2.mnn exists.
-                // The binary auto-detects clip_v2.mnn in the same directory when the
-                // --clip path ends with "clip.mnn", and loads pos_emb.bin + token_emb.bin.
-                // Passing clip_v2.mnn directly bypasses this and causes a segfault.
-                mutableListOf(
-                    executable.absolutePath,
-                    "--clip", File(modelDir, "clip.mnn").absolutePath,
-                    "--unet", File(modelDir, "unet.mnn").absolutePath,
-                    "--vae_decoder", File(modelDir, "vae_decoder.mnn").absolutePath,
-                    "--tokenizer", File(modelDir, "tokenizer.json").absolutePath,
-                    "--port", port.toString(),
-                    "--text_embedding_size", embeddingSize,
-                    "--cpu",
-                ).also { cmd ->
-                    val vaeEncoder = File(modelDir, "vae_encoder.mnn")
-                    if (vaeEncoder.exists()) {
-                        cmd.addAll(listOf("--vae_encoder", vaeEncoder.absolutePath))
-                    }
-                }
-            } else {
-                // QNN NPU backend
-                // Same clip.mnn rule applies for QNN — binary auto-detects clip_v2
-                val hasMnnClip = File(modelDir, "clip.mnn").exists() || File(modelDir, "clip_v2.mnn").exists()
-                val clipFile = if (hasMnnClip) "clip.mnn" else "clip.bin"
-
-                mutableListOf(
-                    executable.absolutePath,
-                    "--clip", File(modelDir, clipFile).absolutePath,
-                    "--unet", File(modelDir, "unet.bin").absolutePath,
-                    "--vae_decoder", File(modelDir, "vae_decoder.bin").absolutePath,
-                    "--tokenizer", File(modelDir, "tokenizer.json").absolutePath,
-                    "--backend", File(runtimeDir, "libQnnHtp.so").absolutePath,
-                    "--system_library", File(runtimeDir, "libQnnSystem.so").absolutePath,
-                    "--port", port.toString(),
-                    "--text_embedding_size", embeddingSize,
-                ).also { cmd ->
-                    if (patchFile != null) cmd.addAll(listOf("--patch", patchFile.absolutePath))
-                    if (hasMnnClip) {
-                        cmd.add("--use_cpu_clip")
-                    }
-                    val vaeEncoder = File(modelDir, "vae_encoder.bin")
-                    if (vaeEncoder.exists()) {
-                        cmd.addAll(listOf("--vae_encoder", vaeEncoder.absolutePath))
-                    }
-                }
-            }
+            val sdxl = isSdxl && !isCpu
+            val cmd = mutableListOf(
+                executable.absolutePath,
+                "--type", coreType(isCpu, sdxl),
+                "--model_dir", modelDir.absolutePath,
+            )
+            if (!isCpu) cmd.addAll(listOf("--lib_dir", runtimeDir.absolutePath))
+            cmd.addAll(listOf("--port", port.toString()))
+            // Resolution patches exist for the SD1.5 NPU UNet only (main.cpp help: --patch "(sd15npu)").
+            if (!isCpu && !sdxl && patchFile != null) cmd.addAll(listOf("--patch", patchFile.absolutePath))
+            val vaeEncoder = File(modelDir, if (isCpu) "vae_encoder.mnn" else "vae_encoder.bin")
+            if (!vaeEncoder.exists()) cmd.add("--no_img2img")
+            if (File(modelDir, "V_PRED").exists()) cmd.add("--use_v_pred")
+            if (sdxl) cmd.add("--lowram")
+            return cmd
         }
 
         /**
@@ -294,12 +328,13 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
         /**
          * The ONE decoder for every image this module writes (final + preview + the exported
          * saveRgbAsPng bridge). Order matters — ENCODED-IMAGE MAGIC BYTES ARE CHECKED FIRST:
-         *   1. JPEG (FF D8 FF) or PNG (89 50 4E 47) → BitmapFactory. CONFIRMED by `strings` on the
-         *      SD core (CP-01): the server JPEG-encodes the final `complete.image` AND previews
-         *      (preview_format=jpeg). Packing those compressed bytes as raw pixels is exactly the
-         *      reported rainbow noise, so encoded payloads must win regardless of their length.
-         *   2. length == w*h*3 → raw interleaved RGB24 (HWC), alpha forced opaque — only for a core
-         *      build that emits uncompressed buffers.
+         *   1. JPEG (FF D8 FF) or PNG (89 50 4E 47) → BitmapFactory. The v2.8.1 core encodes the
+         *      final `complete.image` and previews per the request's `output_format` /
+         *      `preview_format` (jpeg|png, default raw: main.cpp:370-382, RequestParser.hpp:87-91);
+         *      buildGenerationBody asks for jpeg for both. Packing compressed bytes as raw pixels is
+         *      the rainbow noise, so encoded payloads must win regardless of their length.
+         *   2. length == w*h*3 → raw interleaved RGB24 (HWC), alpha forced opaque — only when the
+         *      core sends its raw default (a request without output_format).
          *   3. length == w*h*4 → interleaved RGBA32.
          *   4. otherwise → BitmapFactory (last resort) or throw.
          * Every call logs `[IMG-DECODE] size/wh/first8` so the real payload format is never guessed.
@@ -320,12 +355,11 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
             // magic bytes → the true layout.
             val first = bytes.take(8).joinToString(" ") { "%02X".format(it.toInt() and 0xFF) }
             Log.d(TAG, "[IMG-DECODE] size=${bytes.size} wh=${width}x${height} wh3=${n * 3} wh4=${n * 4} first8=$first")
-            // CONFIRMED (CP-01, `strings` on the SD core): the server JPEG-encodes the final image
-            // and JPEG-encodes previews (preview_format=jpeg). So an ENCODED image must be detected
-            // FIRST by its magic bytes and decoded with BitmapFactory — packing those bytes as raw
-            // pixels is exactly the reported rainbow. Raw RGB/RGBA is only a last resort for a core
-            // build that emits uncompressed buffers, and even then must not shadow an encoded payload
-            // whose length happens to equal w*h*3/4.
+            // The request asks for JPEG final + preview images (output_format / preview_format), so
+            // an ENCODED image must be detected FIRST by its magic bytes and decoded with
+            // BitmapFactory — packing those bytes as raw pixels is exactly the reported rainbow. Raw
+            // RGB/RGBA is only a last resort for the core's raw default, and even then must not
+            // shadow an encoded payload whose length happens to equal w*h*3/4.
             val bitmap: Bitmap = when {
                 looksLikeJpeg(bytes) || looksLikePng(bytes) ->
                     BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
@@ -401,6 +435,74 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
 
             return env
         }
+
+        /** Clamp an image dimension to a safe SD range and snap to a multiple of 8. Guards against a
+         *  corrupt/NaN value (marshalled as a ~1e9 int) that would make the server OOM (std::bad_alloc). */
+        internal fun clampDimension(px: Int): Int {
+            val safe = if (px in 64..1024) px else 512
+            return (safe / 8) * 8
+        }
+
+        /**
+         * The /generate JSON body (keys per v2.8.1 RequestParser.hpp). [size] is the planned render
+         * size; [aspectRatio] (SDXL only, see sdxlAspectRatio) asks the core to crop a non-square
+         * image out of its fixed 1024 canvas.
+         */
+        internal fun buildGenerationBody(
+            params: ReadableMap,
+            forceCpuCompute: Boolean = false,
+            size: Pair<Int, Int>? = null,
+            aspectRatio: String? = null,
+        ): JSONObject = JSONObject().apply {
+            put("prompt", params.getString("prompt") ?: "")
+            put("negative_prompt", params.getString("negativePrompt") ?: "")
+            put("steps", (if (params.hasKey("steps")) params.getInt("steps") else DEFAULT_STEPS).coerceIn(1, 100))
+            put("cfg", if (params.hasKey("guidanceScale")) params.getDouble("guidanceScale") else 7.5)
+            put("seed", if (params.hasKey("seed")) params.getInt("seed") else (Math.random() * 2147483647).toInt())
+            // Clamp dimensions and steps to sane bounds. A corrupt/NaN value marshalled from JS (seen
+            // as a ~1e9 dimension) makes the server allocate gigabytes and crash with std::bad_alloc,
+            // so a bad value must never reach it. 64..1024 px, multiple of 8 (SD requirement).
+            val reqWidth = size?.first ?: clampDimension(if (params.hasKey("width")) params.getInt("width") else 512)
+            val reqHeight = size?.second ?: clampDimension(if (params.hasKey("height")) params.getInt("height") else 512)
+            put("width", reqWidth)
+            put("height", reqHeight)
+            // SDXL: the core renders 1024x1024 whatever width/height say (RequestParser.hpp:81-84);
+            // a non-square result is this crop request.
+            if (aspectRatio != null) put("aspect_ratio", aspectRatio)
+            // The v2.8.1 sampler set (SUPPORTED_SCHEDULERS); default stays dpm when JS sends nothing.
+            put("scheduler", normalizeScheduler(if (params.hasKey("scheduler")) params.getString("scheduler") else null))
+            // The core's image default is raw pixels (RequestParser.hpp:90-91): ask for JPEG for the
+            // final image and previews; saveServerImageToPng decodes them by their magic bytes.
+            put("output_format", "jpeg")
+            put("preview_format", "jpeg")
+            // OpenCL GPU acceleration is only SOUND at 512x512. The GPU VAE decode writes a
+            // tiled/strided raw RGB24 buffer whose rows line up with the decoder's width-stride read
+            // ONLY at 512x512; at any smaller size the rows shear into a diagonal rainbow
+            // (device-confirmed: 512x512 clean, sub-512 rainbow). The known-good build shipped
+            // use_opencl=false everywhere; commit 5e1c72b started forwarding the JS toggle and so
+            // reintroduced the shear for every non-512 request. Fix: keep the GPU fast path at exactly
+            // 512x512 (proven clean on device) and force the clean CPU VAE for every other size.
+            // `forceCpuCompute` still forces it off for the OpenCL-fault retry (see generateImage);
+            // the JS toggle also now defaults off (localDreamGenerator / appStore).
+            val requestedOpenCL = if (params.hasKey("useOpenCL")) params.getBoolean("useOpenCL") else false
+            val useOpenCL = effectiveUseOpenCL(requestedOpenCL, forceCpuCompute, reqWidth, reqHeight)
+            put("use_opencl", useOpenCL)
+            put("show_diffusion_process", true)
+            put("show_diffusion_stride", if (params.hasKey("previewInterval")) params.getInt("previewInterval") else 2)
+            // img2img: JS passes `initImage` (base64 PNG/JPG, no data-URL prefix) plus `denoiseStrength`
+            // in 0..1. The core reads `image`, `mask` and `denoise_strength` (RequestParser.hpp:85,
+            // 156, 201); the old key `init_img` made every img2img run as plain txt2img.
+            // denoise_strength is how MUCH the ref image is changed: 1.0 = ignore the ref, low = stay
+            // close to it. The JS side already resolved the user's "keep" as (1 - keep).
+            // The server needs the VAE encoder for img2img: a model without one is started with
+            // --no_img2img (buildCommand). When no init image is sent the body is plain txt2img.
+            putImg2ImgKeys(
+                this,
+                initImage = if (params.hasKey("initImage")) params.getString("initImage") else null,
+                denoise = if (params.hasKey("denoiseStrength")) params.getDouble("denoiseStrength") else null,
+                mask = if (params.hasKey("maskImage")) params.getString("maskImage") else null,
+            )
+        }
     }
 
     // Server state below is mutated only under serverMutex (load / unload / restart / generate);
@@ -412,6 +514,8 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
     /** Resolved model dir of the running server + the resolution patch it was started with. */
     @Volatile private var currentModelDir: File? = null
     @Volatile private var currentPatchFile: File? = null
+    /** The running server was started with `--type sdxl` (fixed 1024 canvas, no patches, no MNN fallback). */
+    @Volatile private var currentIsSdxl = false
     @Volatile private var isServerReady = false
     /** Port the running server listens on (SERVER_PORT unless it was already bound). */
     @Volatile private var serverPort = SERVER_PORT
@@ -442,7 +546,8 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
     /** Compact, human-readable diagnostics for a crash popup: backend, exit code, recent server log. */
     private fun crashDiagnostics(lastN: Int = 14): String {
         val recent = synchronized(serverLogRing) { serverLogRing.toList() }.takeLast(lastN)
-        val header = "backend=${currentBackend ?: "?"} port=$serverPort exit=${lastServerExitCode ?: "n/a"}"
+        val backend = currentBackend?.let { if (currentIsSdxl) "$it/sdxl" else it } ?: "?"
+        val header = "backend=$backend port=$serverPort exit=${lastServerExitCode ?: "n/a"}"
         return if (recent.isEmpty()) "[server] $header (no server output captured)"
         else "[server] $header\n" + recent.joinToString("\n")
     }
@@ -528,17 +633,22 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
         }
     }
 
+    /** A start target: backend ("mnn" | "qnn"), the dir holding the UNet, and whether it is SDXL. */
+    private data class ResolvedModel(val backend: String, val dir: File, val isSdxl: Boolean)
+
     private fun resolveBackendAndDir(
         normalizedBackend: String, rawModelDir: File,
-    ): Pair<String, File>? {
+    ): ResolvedModel? {
         val cpuModelDir = resolveModelDir(rawModelDir, true)
         val qnnModelDir = resolveModelDir(rawModelDir, false)
         val npuSupported = isNpuSupportedInternal()
-        return when (normalizedBackend) {
+        val picked = when (normalizedBackend) {
             "mnn" -> cpuModelDir?.let { "mnn" to it }
             "qnn" -> qnnModelDir?.let { "qnn" to it }
             else -> resolveAutoBackend(cpuModelDir, qnnModelDir, npuSupported)
-        }
+        } ?: return null
+        val (backend, dir) = picked
+        return ResolvedModel(backend, dir, backend == "qnn" && isSdxlModelDir(dir, rawModelDir))
     }
 
     private fun resolveAutoBackend(
@@ -551,12 +661,13 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
     }
 
     private suspend fun startWithFallback(
-        modelPath: String, backend: String, modelDir: File, cpuModelDir: File?,
+        modelPath: String, backend: String, modelDir: File, cpuModelDir: File?, isSdxl: Boolean,
     ): StartResult {
-        val result = tryStartServer(modelPath, modelDir, backend, backend == "mnn")
+        val result = tryStartServer(modelPath, modelDir, backend, backend == "mnn", isSdxl = isSdxl)
         if (result.success) return result
 
-        if (backend != "qnn" || cpuModelDir == null) return result
+        // SDXL ships NPU files only: there is no MNN build of it to fall back to.
+        if (backend != "qnn" || isSdxl || cpuModelDir == null) return result
 
         Log.w(TAG, "QNN backend failed (${result.error}), falling back to MNN/CPU")
         stopServer()
@@ -590,7 +701,7 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
             }
 
             val normalizedBackend = normalizeBackend(params)
-            val (backend, modelDir) = resolveBackendAndDir(normalizedBackend, rawModelDir) ?: run {
+            val (backend, modelDir, isSdxl) = resolveBackendAndDir(normalizedBackend, rawModelDir) ?: run {
                 val contents = rawModelDir.listFiles()?.map { it.name }?.joinToString(", ") ?: "empty"
                 safeReject(promise,
                     "MODEL_FILES_NOT_FOUND",
@@ -601,7 +712,17 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
             }
 
             Log.d(TAG, "Resolved model directory: ${modelDir.absolutePath}")
-            Log.d(TAG, "Backend selection: requested=$normalizedBackend, selected=$backend")
+            Log.d(TAG, "Backend selection: requested=$normalizedBackend, selected=$backend, sdxl=$isSdxl")
+
+            if (isSdxl) {
+                val soc = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) Build.SOC_MODEL else ""
+                if (!isSdxlCapableSoc(soc)) {
+                    safeReject(promise, "SDXL_UNSUPPORTED",
+                        "SDXL NPU models need a Snapdragon 8 Gen 3 or newer (SM8650/SM8750/SM8845/SM8850). " +
+                            "This device reports '$soc'.")
+                    return
+                }
+            }
 
             if (currentModelPath == modelPath && serverProcess?.isAlive == true && isServerReady) {
                 Log.d(TAG, "Model already loaded: $modelPath")
@@ -613,7 +734,7 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
             Log.d(TAG, "Loading model from: $modelPath, backend: $backend")
 
             val cpuModelDir = resolveModelDir(rawModelDir, true)
-            val result = startWithFallback(modelPath, backend, modelDir, cpuModelDir)
+            val result = startWithFallback(modelPath, backend, modelDir, cpuModelDir, isSdxl)
 
             if (result.success) {
                 safeResolve(promise, true)
@@ -637,6 +758,7 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
         backend: String,
         isCpu: Boolean,
         patchFile: File? = null,
+        isSdxl: Boolean = false,
     ): StartResult {
         // Look for executable in nativeLibraryDir first (has execute permission),
         // then fall back to runtime_libs (extracted from assets)
@@ -670,7 +792,10 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
         if (port != SERVER_PORT) Log.w(TAG, "Port $SERVER_PORT busy; starting the server on port $port")
 
         // Build command based on backend
-        val command = buildCommand(executableFile, modelDir, runtimeDir, isCpu, if (isCpu) null else patchFile, port)
+        val sdxl = isSdxl && !isCpu
+        val command = buildCommand(
+            executableFile, modelDir, runtimeDir, isCpu, if (isCpu || sdxl) null else patchFile, port, sdxl,
+        )
 
         // Build environment
         val env = buildEnvironment(runtimeDir)
@@ -693,7 +818,8 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
         currentModelPath = modelPath
         currentBackend = backend
         currentModelDir = modelDir
-        currentPatchFile = if (isCpu) null else patchFile
+        currentPatchFile = if (isCpu || sdxl) null else patchFile
+        currentIsSdxl = sdxl
         isServerReady = false
 
         // Start monitoring stdout
@@ -833,6 +959,7 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
         currentBackend = null
         currentModelDir = null
         currentPatchFile = null
+        currentIsSdxl = false
     }
 
     @ReactMethod
@@ -896,12 +1023,13 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
                 val dir = currentModelDir
                 val backend = currentBackend
                 val patch = currentPatchFile
+                val sdxl = currentIsSdxl
                 if (modelPath == null || dir == null || backend == null) return@withLock
-                Log.i(TAG, "Restarting server after cancel (backend=$backend)")
+                Log.i(TAG, "Restarting server after cancel (backend=$backend, sdxl=$sdxl)")
                 try {
                     emitStatus("restarting", "Stopping the cancelled generation")
                     stopServer()
-                    val r = tryStartServer(modelPath, dir, backend, backend == "mnn", patch)
+                    val r = tryStartServer(modelPath, dir, backend, backend == "mnn", patch, sdxl)
                     if (r.success) emitStatus("ready", null)
                     else emitStatus("failed", "Server restart after cancel failed: ${r.error}")
                 } catch (e: CancellationException) {
@@ -954,21 +1082,15 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    /** Clamp an image dimension to a safe SD range and snap to a multiple of 8. Guards against a
-     *  corrupt/NaN value (marshalled as a ~1e9 int) that would make the server OOM (std::bad_alloc). */
-    private fun clampDimension(px: Int): Int {
-        val safe = if (px in 64..1024) px else 512
-        return (safe / 8) * 8
-    }
-
     /**
-     * KNOWN ISSUE — sub-512 rainbow on MNN (CPU/GPU): OPEN, see docs/notes/native-image-sub512-rainbow.md.
-     * The bundled core (upstream local-dream c56cf6c) resizes MNN sessions per request, yet the
-     * device shows rainbow at every size < 512. NPU cause is known and guarded below.
+     * KNOWN ISSUE — sub-512 rainbow on MNN (CPU/GPU): observed with the previous core (upstream
+     * local-dream c56cf6c), see docs/notes/native-image-sub512-rainbow.md. Not yet re-checked on a
+     * device with the v2.8.1 core now bundled. NPU cause is known and guarded below.
      *
-     * The size the running backend can really render for this request, restarting an NPU server
-     * with the matching resolution patch when needed. NPU without a patch for the size → 512x512
-     * (a wrong-shaped latent into the fixed graph is the rainbow). MNN → upstream's 64 grid.
+     * The size the running backend can really render for this request, restarting an SD1.5 NPU
+     * server with the matching resolution patch when needed. NPU without a patch for the size →
+     * 512x512 (a wrong-shaped latent into the fixed graph is the rainbow). MNN → upstream's 64 grid.
+     * SDXL → the fixed 1024 canvas, cropped to the requested aspect ratio (planSdxlSize).
      */
     private fun requestedSize(params: ReadableMap): Pair<Int, Int> =
         clampDimension(if (params.hasKey("width")) params.getInt("width") else 512) to
@@ -978,11 +1100,22 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
     private fun planRenderSize(params: ReadableMap): RenderPlan {
         val (reqW, reqH) = requestedSize(params)
         val dir = currentModelDir
-        return if (currentBackend != "qnn" || dir == null || currentModelPath == null) {
-            planMnnSize(reqW, reqH)
-        } else {
-            planQnnSize(dir, reqW, reqH)
+        return when {
+            currentBackend != "qnn" || dir == null || currentModelPath == null -> planMnnSize(reqW, reqH)
+            currentIsSdxl -> planSdxlSize(reqW, reqH, sdxlHasVaeEncoder(dir))
+            else -> planQnnSize(dir, reqW, reqH)
         }
+    }
+
+    /** The SDXL server was started with its VAE encoder (buildCommand passes --no_img2img without one). */
+    private fun sdxlHasVaeEncoder(dir: File): Boolean = File(dir, "vae_encoder.bin").exists()
+
+    /** `aspect_ratio` for the running SDXL server, null for every other backend. */
+    private fun sdxlAspectRatioFor(params: ReadableMap): String? {
+        val dir = currentModelDir
+        if (!currentIsSdxl || currentBackend != "qnn" || dir == null) return null
+        val (reqW, reqH) = requestedSize(params)
+        return sdxlAspectRatio(reqW, reqH, sdxlHasVaeEncoder(dir))
     }
 
     private suspend fun resolveRenderSize(params: ReadableMap): Pair<Int, Int> {
@@ -991,7 +1124,10 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
         val dir = currentModelDir
         val modelPath = currentModelPath
         if (plan.adjusted) Log.w(TAG, "[IMG-SIZE] ${reqW}x$reqH -> ${plan.width}x${plan.height}: ${plan.reason}")
-        if (currentBackend != "qnn" || dir == null || modelPath == null) return plan.width to plan.height
+        // SDXL: one fixed 1024 graph, no resolution patches, so never a restart for a size.
+        if (currentBackend != "qnn" || dir == null || modelPath == null || currentIsSdxl) {
+            return plan.width to plan.height
+        }
         val w = plan.width
         val h = plan.height
         val patch = if (w == QNN_BASE_SIZE && h == QNN_BASE_SIZE) null else resolvePatchFile(dir, w, h)
@@ -1054,60 +1190,6 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
         } catch (e: Exception) {
             safeReject(promise, "SIZE_PLAN_ERROR", "Failed to plan image size: ${e.message}", e)
         }
-    }
-
-    private fun buildGenerationBody(
-        params: ReadableMap, forceCpuCompute: Boolean = false, size: Pair<Int, Int>? = null,
-    ): JSONObject = JSONObject().apply {
-        put("prompt", params.getString("prompt") ?: "")
-        put("negative_prompt", params.getString("negativePrompt") ?: "")
-        put("steps", (if (params.hasKey("steps")) params.getInt("steps") else DEFAULT_STEPS).coerceIn(1, 100))
-        put("cfg", if (params.hasKey("guidanceScale")) params.getDouble("guidanceScale") else 7.5)
-        put("seed", if (params.hasKey("seed")) params.getInt("seed") else (Math.random() * 2147483647).toInt())
-        // Clamp dimensions and steps to sane bounds. A corrupt/NaN value marshalled from JS (seen
-        // as a ~1e9 dimension) makes the server allocate gigabytes and crash with std::bad_alloc,
-        // so a bad value must never reach it. 64..1024 px, multiple of 8 (SD requirement).
-        val reqWidth = size?.first ?: clampDimension(if (params.hasKey("width")) params.getInt("width") else 512)
-        val reqHeight = size?.second ?: clampDimension(if (params.hasKey("height")) params.getInt("height") else 512)
-        put("width", reqWidth)
-        put("height", reqHeight)
-        // The SD core's sampler set is {dpm, euler_a}; default stays dpm when JS sends nothing.
-        val scheduler = if (params.hasKey("scheduler")) params.getString("scheduler") else null
-        put("scheduler", if (scheduler == "euler_a") "euler_a" else "dpm")
-        // Preview contract: the known-good build requests JPEG previews; the preview decoder reads
-        // them via BitmapFactory (carries its own dimensions, so it never shears). Restored here to
-        // match the known-good request contract.
-        put("preview_format", "jpeg")
-        // OpenCL GPU acceleration is only SOUND at 512x512. The GPU VAE decode writes a
-        // tiled/strided raw RGB24 buffer whose rows line up with the decoder's width-stride read
-        // ONLY at 512x512; at any smaller size the rows shear into a diagonal rainbow
-        // (device-confirmed: 512x512 clean, sub-512 rainbow). The known-good build shipped
-        // use_opencl=false everywhere; commit 5e1c72b started forwarding the JS toggle and so
-        // reintroduced the shear for every non-512 request. Fix: keep the GPU fast path at exactly
-        // 512x512 (proven clean on device) and force the clean CPU VAE for every other size.
-        // `forceCpuCompute` still forces it off for the OpenCL-fault retry (see generateImage);
-        // the JS toggle also now defaults off (localDreamGenerator / appStore).
-        val requestedOpenCL = if (params.hasKey("useOpenCL")) params.getBoolean("useOpenCL") else false
-        val useOpenCL = effectiveUseOpenCL(requestedOpenCL, forceCpuCompute, reqWidth, reqHeight)
-        put("use_opencl", useOpenCL)
-        put("show_diffusion_process", true)
-        put("show_diffusion_stride", if (params.hasKey("previewInterval")) params.getInt("previewInterval") else 2)
-        // img2img: JS passes `initImage` (base64 PNG/JPG, no data-URL prefix) plus `denoiseStrength`
-        // in 0..1. The SD core reads the keys `image`, `mask` and `denoise_strength`: its JSON key
-        // strings are width/height/image/mask (libstable_diffusion_core.so), and upstream c56cf6c
-        // sets request_img2img only `if (json.contains("image"))`. The old key `init_img` is not
-        // in the binary at all, so every img2img used to run as plain txt2img.
-        // denoise_strength is how MUCH the ref image is changed: 1.0 = ignore the ref, low = stay
-        // close to it. The JS side already resolved the user's "keep" as (1 - keep).
-        // The QNN path runs img2img on the NPU when the model has vae_encoder.bin (passed as
-        // --vae_encoder); without it the core warns "VAE Encoder path missing. img2img disabled
-        // unless --cpu". When no init image is sent the body is a plain txt2img request.
-        putImg2ImgKeys(
-            this,
-            initImage = if (params.hasKey("initImage")) params.getString("initImage") else null,
-            denoise = if (params.hasKey("denoiseStrength")) params.getDouble("denoiseStrength") else null,
-            mask = if (params.hasKey("maskImage")) params.getString("maskImage") else null,
-        )
     }
 
     private fun openGenerationConnection(): HttpURLConnection {
@@ -1173,6 +1255,7 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
         connection: HttpURLConnection, body: JSONObject,
     ): SseParseResult {
         var completeData: JSONObject? = null
+        var serverError: String? = null
         var currentEventType = ""
 
         BufferedReader(InputStreamReader(connection.inputStream)).use { reader ->
@@ -1188,19 +1271,25 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
                 if (!trimmed.startsWith("data: ")) continue
 
                 try {
-                    val data = JSONObject(trimmed.substring(6))
-                    when (data.optString("type", currentEventType)) {
-                        "progress" -> handleProgressEvent(data, body)
-                        "complete" -> completeData = data
+                    when (val event = parseSseData(trimmed.substring(6), currentEventType)) {
+                        is SseEvent.Progress -> handleProgressEvent(event.data, body)
+                        is SseEvent.Complete -> completeData = event.data
+                        is SseEvent.Error -> serverError = event.message
+                        SseEvent.Other -> Unit
                     }
                 } catch (e: Exception) {
                     Log.w(TAG, "Failed to parse SSE data: ${e.message}")
                 }
                 currentEventType = ""
+                // The core ends the stream right after an error event (main.cpp:465-470).
+                if (serverError != null) break
             }
         }
 
         if (isRunCancelled()) return SseParseResult.Cancelled
+        // A generation the core failed (bad request, QNN/MNN error) is reported as its own message,
+        // never as a silent "no complete event".
+        serverError?.let { throw IOException(it) }
         return if (completeData != null) SseParseResult.Complete(completeData!!, body) else SseParseResult.NoResult
     }
 
@@ -1312,7 +1401,8 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
     private suspend fun runOneGeneration(params: ReadableMap, forceCpuCompute: Boolean): SseParseResult {
         var connection: HttpURLConnection? = null
         try {
-            val body = buildGenerationBody(params, forceCpuCompute, resolveRenderSize(params))
+            val size = resolveRenderSize(params)
+            val body = buildGenerationBody(params, forceCpuCompute, size, sdxlAspectRatioFor(params))
             Log.d(TAG, "Starting generation (forceCpuCompute=$forceCpuCompute): ${body.toString().take(200)}...")
 
             connection = openGenerationConnection()
@@ -1535,6 +1625,29 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
         super.invalidate()
         coroutineScope.cancel()
         stopServer()
+    }
+}
+
+/** One `data:` payload of the core's /generate SSE stream (main.cpp:416-470). */
+internal sealed class SseEvent {
+    data class Progress(val data: JSONObject) : SseEvent()
+    data class Complete(val data: JSONObject) : SseEvent()
+    /** `event: error` / `{"type":"error","message":...}`: the core aborted the generation. */
+    data class Error(val message: String) : SseEvent()
+    object Other : SseEvent()
+}
+
+/** Classifies a `data:` JSON payload by its `type`, else by the preceding `event:` line. Throws
+ *  JSONException on a malformed payload (the caller logs and skips it). */
+internal fun parseSseData(json: String, eventType: String): SseEvent {
+    val data = JSONObject(json)
+    return when (data.optString("type", eventType)) {
+        "progress" -> SseEvent.Progress(data)
+        "complete" -> SseEvent.Complete(data)
+        "error" -> SseEvent.Error(
+            data.optString("message").ifBlank { "The image server reported an error without a message" },
+        )
+        else -> SseEvent.Other
     }
 }
 

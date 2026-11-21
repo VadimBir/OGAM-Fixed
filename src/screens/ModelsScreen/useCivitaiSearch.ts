@@ -69,14 +69,13 @@ export function useCivitaiSearch(setAlertState: (s: AlertState) => void) {
     try {
       const page = await searchCivitaiModels({ query, type, family, cursor, apiKey });
       if (seq !== seqRef.current) return;
-      const fitting = page.results.filter(r => civitaiResultFits(r, budgetMB));
-      const tooBig = page.results.length - fitting.length;
+      // Too-big checkpoints are shown with a RAM warning (fitsRam), never hidden: the user decides.
       setResults(prev => {
-        if (!append) return fitting;
+        if (!append) return page.results;
         const keys = new Set(prev.map(r => r.key));
-        return [...prev, ...fitting.filter(r => !keys.has(r.key))];
+        return [...prev, ...page.results.filter(r => !keys.has(r.key))];
       });
-      setHiddenCount(prev => (append ? prev : 0) + page.skipped + tooBig);
+      setHiddenCount(prev => (append ? prev : 0) + page.skipped);
       setNextCursor(page.nextCursor);
       setHasSearched(true);
     } catch (e: any) {
@@ -87,7 +86,7 @@ export function useCivitaiSearch(setAlertState: (s: AlertState) => void) {
     } finally {
       if (seq === seqRef.current) { setLoading(false); setLoadingMore(false); }
     }
-  }, [query, type, family, apiKey, budgetMB]);
+  }, [query, type, family, apiKey]);
 
   const search = useCallback(() => runSearch(null), [runSearch]);
   const loadMore = useCallback(() => {
@@ -113,6 +112,8 @@ export function useCivitaiSearch(setAlertState: (s: AlertState) => void) {
     await removeCivitaiApiKey();
     setApiKeyState(null);
   }, []);
+
+  const fitsRam = useCallback((result: CivitaiResult) => civitaiResultFits(result, budgetMB), [budgetMB]);
 
   const isOnPhone = useCallback((result: CivitaiResult): boolean => {
     if (result.type === 'LORA') {
@@ -141,7 +142,7 @@ export function useCivitaiSearch(setAlertState: (s: AlertState) => void) {
     query, setQuery, type, setType, family, setFamily,
     results, nextCursor, loading, loadingMore, error, hiddenCount, hasSearched,
     hasApiKey: !!apiKey, saveApiKey, clearApiKey,
-    search, loadMore, isOnPhone, downloadToPhone, cancelDownload,
+    search, loadMore, isOnPhone, fitsRam, downloadToPhone, cancelDownload,
   };
 }
 

@@ -12,7 +12,7 @@ import { ONNXImageModel } from '../types';
 import { useDownloadStore, isActiveStatus } from '../stores/downloadStore';
 import { makeImageModelKey } from '../utils/modelKey';
 import { ImageModelDescriptor, ImageDownloadDeps } from './imageModelDownloadTypes';
-import { getQnnWarningMessage, showQnnWarningAlert } from './imageDownloadQnn';
+import { getQnnWarningMessage, refuseZipWithoutExtractionSpace, showQnnWarningAlert } from './imageDownloadQnn';
 import { ensureImageExtractionComplete, validateImageModelDir } from '../utils/imageModelIntegrity';
 import logger from '../utils/logger';
 import { claimImageFinalization, releaseImageFinalization } from './imageFinalizationClaims';
@@ -546,6 +546,9 @@ export async function handleDownloadImageModel(
   modelInfo: ImageModelDescriptor,
   deps: ImageDownloadDeps,
 ): Promise<void> {
+  // A zip needs room for itself AND its extraction (a 3.8 GB SDXL zip: ~7.6 GB); the native worker
+  // only checks the zip, so the unzip would otherwise fail on a full disk after a long download.
+  if (Platform.OS === 'android' && await refuseZipWithoutExtractionSpace(modelInfo, deps)) return;
   if (modelInfo.backend === 'qnn' && Platform.OS === 'android') {
     const socInfo = await hardwareService.getSoCInfo();
     const warningMessage = getQnnWarningMessage(modelInfo, socInfo);

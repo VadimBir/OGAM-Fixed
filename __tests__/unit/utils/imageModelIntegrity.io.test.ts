@@ -120,7 +120,7 @@ describe('validateImageModelDir', () => {
   it('passes a complete extraction', async () => {
     existing.add('/m/unet.mnn');
     dirListings['/m'] = COMPLETE_MNN;
-    expect(await validateImageModelDir('/m', 'mnn')).toEqual({ complete: true, missing: [] });
+    expect(await validateImageModelDir('/m', 'mnn')).toEqual({ complete: true, missing: [], kind: 'sd15' });
   });
 
   it('flags the missing files of a partial extraction', async () => {

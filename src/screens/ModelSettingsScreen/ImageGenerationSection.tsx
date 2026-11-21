@@ -14,6 +14,7 @@ import {
 } from '../../utils/imageGenAdvice';
 import { ImageEngineSettings } from '../../components/ImageEngineSettings';
 import { ImageDefaultsSettings } from '../../components/ImageDefaultsSettings';
+import { FastModeSection } from '../../components/FastModeSection';
 import { createStyles } from './styles';
 
 // ─── Advanced Sub-Components ─────────────────────────────────────────────────
@@ -223,7 +224,7 @@ export const ImageGenerationSection: React.FC = () => {
         label="Image Steps"
         description="More steps = better quality but slower (4-8 fast, 20-50 high quality)"
         value={settings?.imageSteps || defaultImageSteps(Platform.OS)}
-        min={4} max={MAX_IMAGE_STEPS} step={1}
+        min={1} max={MAX_IMAGE_STEPS} step={1}
         onChange={(value) => updateSettings({ imageSteps: value })}
       />
 
@@ -241,6 +242,8 @@ export const ImageGenerationSection: React.FC = () => {
       />}
 
       <ImageEngineSettings />
+
+      <FastModeSection />
 
       <AdvancedToggle isExpanded={showAdvanced} onPress={() => setShowAdvanced(!showAdvanced)} testID="image-advanced-toggle" />
 

@@ -147,15 +147,17 @@ describe('CivitaiSection', () => {
     expect(getAllByText(SERVER_DOWNLOAD_UNAVAILABLE).length).toBe(1);
   });
 
-  it('hides checkpoints too large for the RAM budget and says how many were hidden', async () => {
+  it('shows checkpoints too large for the RAM budget with a warning instead of hiding them', async () => {
     mockSearch.mockResolvedValue(page([
       result(),
       result({ key: 'big', versionId: 9, family: 'sdxl', file: { ...result().file, id: 99, sizeBytes: 13.9 * 1024 ** 3 } }),
     ], { skipped: 2 }));
     const { getByTestId, queryByTestId, getByText } = render(<CivitaiSection setAlertState={jest.fn()} />);
     await waitFor(() => expect(getByTestId('civitai-result-0')).toBeTruthy());
-    expect(queryByTestId('civitai-result-1')).toBeNull();
-    expect(getByText(/^3 hidden/)).toBeTruthy();
+    expect(getByTestId('civitai-result-1')).toBeTruthy();
+    expect(getByTestId('civitai-ram-warning-1')).toBeTruthy();
+    expect(queryByTestId('civitai-ram-warning-0')).toBeNull();
+    expect(getByText(/^2 hidden/)).toBeTruthy();
   });
 
   it('shows an error with Retry, and Load more when there is a next page', async () => {

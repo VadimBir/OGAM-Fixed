@@ -107,6 +107,7 @@ export function migratePersistedState<TState>(
     merged.checklistDismissed = false;
   migrateReasoningBudgetScale(merged, persistedState);
   migrateMaxTokensDefault(merged, persistedState);
+  migrateImageKeepDefault(merged, persistedState);
   migrateEnabledTools(merged);
   migrateBoostedContext(merged, defaultSettings);
   migrateAdvancedSettings(merged, defaultSettings);
@@ -211,6 +212,20 @@ function migrateMaxTokensDefault(merged: any, persistedState: any): void {
     ...merged.settings,
     ...(persisted.maxTokens === OLD_DEFAULT_MAX_TOKENS ? { maxTokens: NEW_DEFAULT_MAX_TOKENS } : {}),
     maxTokensDefault2048: true,
+  };
+}
+
+const OLD_DEFAULT_DENOISE = 0.6;
+const NEW_DEFAULT_DENOISE = 0.4; // Image Studio / imgref "Keep 60%" (user decision 2026-11-21)
+
+/** One-time: the saved 0.6 denoise was the old default (no screen ever set it), so move it to 0.4. */
+function migrateImageKeepDefault(merged: any, persistedState: any): void {
+  const persisted = persistedState?.settings;
+  if (!persisted || persisted.imageKeepDefault60) return;
+  merged.settings = {
+    ...merged.settings,
+    ...(persisted.imageDenoiseStrength === OLD_DEFAULT_DENOISE ? { imageDenoiseStrength: NEW_DEFAULT_DENOISE } : {}),
+    imageKeepDefault60: true,
   };
 }
 

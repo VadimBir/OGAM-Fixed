@@ -181,142 +181,204 @@ class LocalDreamModuleTest {
         assertNotNull(LocalDreamModule.resolveModelDir(root, isCpu = false))
     }
 
-    // ── buildCommand — CPU (MNN) backend ─────────────────────────────────────
+    // ── buildCommand — v2.8.1 core CLI (main.cpp:141-159) ─────────────────────
 
-    private fun makeCpuModelDir(): java.io.File = tmp.newFolder("cpu_model").also { dir ->
-        dir.resolve("clip.mnn").createNewFile()
-        dir.resolve("unet.mnn").createNewFile()
-        dir.resolve("vae_decoder.mnn").createNewFile()
-        dir.resolve("tokenizer.json").createNewFile()
+    private fun makeCpuModelDir(withEncoder: Boolean = false): java.io.File = tmp.newFolder("cpu_model").also { dir ->
+        listOf("tokenizer.json", "clip_v2.mnn", "pos_emb.bin", "token_emb.bin", "unet.mnn", "vae_decoder.mnn")
+            .forEach { dir.resolve(it).createNewFile() }
+        if (withEncoder) dir.resolve("vae_encoder.mnn").createNewFile()
     }
 
-    private fun makeQnnModelDir(withMnnClip: Boolean = false): java.io.File =
+    private fun makeQnnModelDir(withEncoder: Boolean = false): java.io.File =
         tmp.newFolder("qnn_model").also { dir ->
-            if (withMnnClip) dir.resolve("clip.mnn").createNewFile()
-            dir.resolve("unet.bin").createNewFile()
-            dir.resolve("vae_decoder.bin").createNewFile()
-            dir.resolve("tokenizer.json").createNewFile()
+            listOf("tokenizer.json", "clip_v2.mnn", "pos_emb.bin", "token_emb.bin", "unet.bin", "vae_decoder.bin")
+                .forEach { dir.resolve(it).createNewFile() }
+            if (withEncoder) dir.resolve("vae_encoder.bin").createNewFile()
+        }
+
+    private fun makeSdxlModelDir(withEncoder: Boolean = true): java.io.File =
+        tmp.newFolder("sdxl_model").also { dir ->
+            listOf(
+                "tokenizer.json", "clip.mnn", "clip_2.mnn", "clip_2.mnn.weight", "pos_emb.bin", "token_emb.bin",
+                "pos_emb_2.bin", "token_emb_2.bin", "unet.bin", "vae_decoder.bin", "SDXL",
+            ).forEach { dir.resolve(it).createNewFile() }
+            if (withEncoder) dir.resolve("vae_encoder.bin").createNewFile()
         }
 
     private fun makeExecutable(): java.io.File = tmp.newFile("libstable_diffusion_core.so")
     private fun makeRuntimeDir(): java.io.File = tmp.newFolder("runtime")
 
+    /** Flags the v2.8.1 core rejects (main.cpp:226-227 exits on an unknown option). */
+    private val removedFlags = listOf(
+        "--clip", "--unet", "--vae_decoder", "--vae_encoder", "--tokenizer", "--backend", "--system_library",
+        "--text_embedding_size", "--use_cpu_clip", "--cpu",
+    )
+
+    private fun valueOf(cmd: List<String>, flag: String): String? =
+        cmd.indexOf(flag).takeIf { it >= 0 }?.let { cmd[it + 1] }
+
     @Test
-    fun `buildCommand CPU includes --cpu flag`() {
-        val cmd = LocalDreamModule.buildCommand(
-            makeExecutable(), makeCpuModelDir(), makeRuntimeDir(), isCpu = true,
+    fun `buildCommand sd15cpu passes type, model_dir and port, no lib_dir`() {
+        val dir = makeCpuModelDir(withEncoder = true)
+        val exe = makeExecutable()
+        val cmd = LocalDreamModule.buildCommand(exe, dir, makeRuntimeDir(), isCpu = true)
+        assertEquals(
+            listOf(exe.absolutePath, "--type", "sd15cpu", "--model_dir", dir.absolutePath, "--port", "18081"),
+            cmd,
         )
-        assertTrue(cmd.contains("--cpu"))
+        assertFalse(cmd.contains("--lib_dir"))
     }
 
     @Test
-    fun `buildCommand CPU uses clip mnn path`() {
-        val modelDir = makeCpuModelDir()
-        val cmd = LocalDreamModule.buildCommand(makeExecutable(), modelDir, makeRuntimeDir(), isCpu = true)
-
-        val clipIdx = cmd.indexOf("--clip")
-        assertTrue("--clip flag missing", clipIdx >= 0)
-        assertTrue("clip path should end with clip.mnn", cmd[clipIdx + 1].endsWith("clip.mnn"))
+    fun `buildCommand sd15cpu adds --no_img2img without vae_encoder mnn`() {
+        val cmd = LocalDreamModule.buildCommand(makeExecutable(), makeCpuModelDir(), makeRuntimeDir(), isCpu = true)
+        assertTrue(cmd.contains("--no_img2img"))
     }
 
     @Test
-    fun `buildCommand CPU sets correct port`() {
+    fun `buildCommand sd15npu passes type, model_dir, lib_dir and port`() {
+        val dir = makeQnnModelDir(withEncoder = true)
+        val rt = makeRuntimeDir()
+        val cmd = LocalDreamModule.buildCommand(makeExecutable(), dir, rt, isCpu = false)
+        assertEquals("sd15npu", valueOf(cmd, "--type"))
+        assertEquals(dir.absolutePath, valueOf(cmd, "--model_dir"))
+        assertEquals(rt.absolutePath, valueOf(cmd, "--lib_dir"))
+        assertEquals("18081", valueOf(cmd, "--port"))
+        assertFalse(cmd.contains("--no_img2img"))
+        assertFalse(cmd.contains("--lowram"))
+    }
+
+    @Test
+    fun `buildCommand sd15npu adds --no_img2img without vae_encoder bin`() {
+        val cmd = LocalDreamModule.buildCommand(makeExecutable(), makeQnnModelDir(), makeRuntimeDir(), isCpu = false)
+        assertTrue(cmd.contains("--no_img2img"))
+    }
+
+    @Test
+    fun `buildCommand adds --use_v_pred only when a V_PRED file exists`() {
+        val exe = makeExecutable()
+        val rt = makeRuntimeDir()
+        val dir = makeQnnModelDir(withEncoder = true)
+        assertFalse(LocalDreamModule.buildCommand(exe, dir, rt, isCpu = false).contains("--use_v_pred"))
+        dir.resolve("V_PRED").createNewFile()
+        assertTrue(LocalDreamModule.buildCommand(exe, dir, rt, isCpu = false).contains("--use_v_pred"))
+    }
+
+    @Test
+    fun `buildCommand sdxl passes type sdxl, lib_dir and --lowram, never --patch`() {
+        val dir = makeSdxlModelDir()
+        val rt = makeRuntimeDir()
+        val patch = File(dir, "768.patch").apply { writeText("x") }
         val cmd = LocalDreamModule.buildCommand(
-            makeExecutable(), makeCpuModelDir(), makeRuntimeDir(), isCpu = true,
+            makeExecutable(), dir, rt, isCpu = false, patchFile = patch, port = 40125, isSdxl = true,
         )
-        val portIdx = cmd.indexOf("--port")
-        assertTrue(portIdx >= 0)
-        assertEquals("18081", cmd[portIdx + 1])
+        assertEquals("sdxl", valueOf(cmd, "--type"))
+        assertEquals(dir.absolutePath, valueOf(cmd, "--model_dir"))
+        assertEquals(rt.absolutePath, valueOf(cmd, "--lib_dir"))
+        assertEquals("40125", valueOf(cmd, "--port"))
+        assertTrue(cmd.contains("--lowram"))
+        assertFalse(cmd.contains("--patch"))
+        assertFalse(cmd.contains("--no_img2img"))
     }
 
     @Test
-    fun `buildCommand CPU includes vae_encoder when present`() {
-        val modelDir = makeCpuModelDir()
-        modelDir.resolve("vae_encoder.mnn").createNewFile()
-
-        val cmd = LocalDreamModule.buildCommand(makeExecutable(), modelDir, makeRuntimeDir(), isCpu = true)
-
-        val encoderIdx = cmd.indexOf("--vae_encoder")
-        assertTrue("--vae_encoder flag missing", encoderIdx >= 0)
-        assertTrue(cmd[encoderIdx + 1].endsWith("vae_encoder.mnn"))
-    }
-
-    @Test
-    fun `buildCommand CPU omits vae_encoder when absent`() {
+    fun `buildCommand sdxl without vae_encoder adds --no_img2img`() {
         val cmd = LocalDreamModule.buildCommand(
-            makeExecutable(), makeCpuModelDir(), makeRuntimeDir(), isCpu = true,
+            makeExecutable(), makeSdxlModelDir(withEncoder = false), makeRuntimeDir(), isCpu = false, isSdxl = true,
         )
-        assertFalse(cmd.contains("--vae_encoder"))
+        assertTrue(cmd.contains("--no_img2img"))
+        assertTrue(cmd.contains("--lowram"))
     }
 
-    // ── buildCommand — QNN (NPU) backend ─────────────────────────────────────
-
     @Test
-    fun `buildCommand QNN does not include --cpu flag`() {
-        val cmd = LocalDreamModule.buildCommand(
-            makeExecutable(), makeQnnModelDir(), makeRuntimeDir(), isCpu = false,
+    fun `buildCommand never passes --safety_checker nor a removed pre-v2_8 flag, for any kind`() {
+        val exe = makeExecutable()
+        val rt = makeRuntimeDir()
+        val cmds = listOf(
+            LocalDreamModule.buildCommand(exe, makeCpuModelDir(), rt, isCpu = true),
+            LocalDreamModule.buildCommand(exe, makeQnnModelDir(), rt, isCpu = false),
+            LocalDreamModule.buildCommand(exe, makeSdxlModelDir(), rt, isCpu = false, isSdxl = true),
         )
-        assertFalse(cmd.contains("--cpu"))
-    }
-
-    @Test
-    fun `buildCommand QNN uses clip bin when no mnn clip present`() {
-        val modelDir = makeQnnModelDir(withMnnClip = false)
-        val cmd = LocalDreamModule.buildCommand(makeExecutable(), modelDir, makeRuntimeDir(), isCpu = false)
-
-        val clipIdx = cmd.indexOf("--clip")
-        assertTrue(clipIdx >= 0)
-        assertTrue("should use clip.bin", cmd[clipIdx + 1].endsWith("clip.bin"))
-        assertFalse("should not add --use_cpu_clip", cmd.contains("--use_cpu_clip"))
-    }
-
-    @Test
-    fun `buildCommand QNN uses clip mnn and adds use_cpu_clip when mnn clip present`() {
-        val modelDir = makeQnnModelDir(withMnnClip = true)
-        val cmd = LocalDreamModule.buildCommand(makeExecutable(), modelDir, makeRuntimeDir(), isCpu = false)
-
-        val clipIdx = cmd.indexOf("--clip")
-        assertTrue(clipIdx >= 0)
-        assertTrue("should use clip.mnn", cmd[clipIdx + 1].endsWith("clip.mnn"))
-        assertTrue("should add --use_cpu_clip", cmd.contains("--use_cpu_clip"))
-    }
-
-    @Test
-    fun `buildCommand QNN uses clip mnn when only clip_v2 mnn present`() {
-        val modelDir = makeQnnModelDir(withMnnClip = false).also {
-            it.resolve("clip_v2.mnn").createNewFile()
+        for (cmd in cmds) {
+            assertFalse(cmd.toString(), cmd.any { it.startsWith("--safety_checker") })
+            for (flag in removedFlags) assertFalse("$flag in $cmd", cmd.contains(flag))
         }
-        val cmd = LocalDreamModule.buildCommand(makeExecutable(), modelDir, makeRuntimeDir(), isCpu = false)
-
-        assertTrue("should add --use_cpu_clip for clip_v2", cmd.contains("--use_cpu_clip"))
     }
 
     @Test
-    fun `buildCommand QNN includes vae_encoder bin when present`() {
-        val modelDir = makeQnnModelDir().also {
-            it.resolve("vae_encoder.bin").createNewFile()
-        }
-        val cmd = LocalDreamModule.buildCommand(makeExecutable(), modelDir, makeRuntimeDir(), isCpu = false)
-
-        val encoderIdx = cmd.indexOf("--vae_encoder")
-        assertTrue(encoderIdx >= 0)
-        assertTrue(cmd[encoderIdx + 1].endsWith("vae_encoder.bin"))
-    }
-
-    @Test
-    fun `buildCommand QNN includes backend and system_library paths`() {
-        val runtimeDir = makeRuntimeDir()
+    fun `buildCommand isSdxl is ignored on the CPU backend`() {
         val cmd = LocalDreamModule.buildCommand(
-            makeExecutable(), makeQnnModelDir(), runtimeDir, isCpu = false,
+            makeExecutable(), makeCpuModelDir(), makeRuntimeDir(), isCpu = true, isSdxl = true,
         )
+        assertEquals("sd15cpu", valueOf(cmd, "--type"))
+        assertFalse(cmd.contains("--lowram"))
+    }
 
-        val backendIdx = cmd.indexOf("--backend")
-        assertTrue(backendIdx >= 0)
-        assertTrue(cmd[backendIdx + 1].endsWith("libQnnHtp.so"))
+    // ── SDXL detection / SoC gate ────────────────────────────────────────────
 
-        val sysLibIdx = cmd.indexOf("--system_library")
-        assertTrue(sysLibIdx >= 0)
-        assertTrue(cmd[sysLibIdx + 1].endsWith("libQnnSystem.so"))
+    @Test
+    fun `resolveModelDir finds the SDXL unet under output qnn_models_sdxl_8gen3 and isSdxlModelDir tells it apart`() {
+        val root = tmp.newFolder("sdxl_root")
+        val inner = root.resolve("output/qnn_models_sdxl_8gen3").also { it.mkdirs() }
+        listOf("unet.bin", "clip.mnn", "clip_2.mnn", "SDXL").forEach { inner.resolve(it).createNewFile() }
+
+        val resolved = LocalDreamModule.resolveModelDir(root, isCpu = false)
+        assertEquals(inner, resolved)
+        assertTrue(LocalDreamModule.isSdxlModelDir(requireNotNull(resolved), root))
+    }
+
+    @Test
+    fun `isSdxlModelDir accepts the SDXL marker, clip_2 mnn or a root marker, rejects SD1_5`() {
+        val sd15 = makeQnnModelDir()
+        assertFalse(LocalDreamModule.isSdxlModelDir(sd15))
+
+        val markerOnly = tmp.newFolder("marker_only").also { it.resolve("SDXL").createNewFile() }
+        assertTrue(LocalDreamModule.isSdxlModelDir(markerOnly))
+
+        val clip2Only = tmp.newFolder("clip2_only").also { it.resolve("clip_2.mnn").createNewFile() }
+        assertTrue(LocalDreamModule.isSdxlModelDir(clip2Only))
+
+        val root = tmp.newFolder("root_marker").also { it.resolve("SDXL").createNewFile() }
+        val inner = root.resolve("inner").also { it.mkdirs() }
+        assertTrue(LocalDreamModule.isSdxlModelDir(inner, root))
+    }
+
+    @Test
+    fun `isSdxlCapableSoc matches upstream's set, including a suffixed SM8850`() {
+        listOf("SM8650", "SM8750", "SM8750P", "SM8850", "SM8850P", "SM8845", "SM8850-AC").forEach {
+            assertTrue(it, LocalDreamModule.isSdxlCapableSoc(it))
+        }
+        listOf("SM8550", "SM8475", "SM7675", "", "Tensor G4").forEach {
+            assertFalse(it, LocalDreamModule.isSdxlCapableSoc(it))
+        }
+    }
+
+    // ── SDXL size plan / aspect ratio ────────────────────────────────────────
+
+    @Test
+    fun `sdxlAspectRatio reduces a non-square request and is null when square or without encoder`() {
+        assertEquals("4:3", LocalDreamModule.sdxlAspectRatio(1024, 768, hasVaeEncoder = true))
+        assertEquals("9:16", LocalDreamModule.sdxlAspectRatio(576, 1024, hasVaeEncoder = true))
+        assertNull(LocalDreamModule.sdxlAspectRatio(512, 512, hasVaeEncoder = true))
+        assertNull(LocalDreamModule.sdxlAspectRatio(1024, 768, hasVaeEncoder = false))
+    }
+
+    @Test
+    fun `planSdxlSize mirrors the core crop of the 1024 canvas`() {
+        assertEquals(
+            LocalDreamModule.Companion.RenderPlan(1024, 1024, true, "SDXL renders on a fixed 1024 px canvas"),
+            LocalDreamModule.planSdxlSize(512, 512, hasVaeEncoder = true),
+        )
+        assertEquals(
+            LocalDreamModule.Companion.RenderPlan(1024, 1024, false, null),
+            LocalDreamModule.planSdxlSize(1024, 1024, hasVaeEncoder = true),
+        )
+        // RequestParser.hpp:118-127: short side = floor(1024 * short / long), floored to a multiple of 8.
+        assertEquals(1024 to 728, LocalDreamModule.planSdxlSize(700, 500, true).let { it.width to it.height })
+        assertEquals(576 to 1024, LocalDreamModule.planSdxlSize(576, 1024, true).let { it.width to it.height })
+        val noEncoder = LocalDreamModule.planSdxlSize(1024, 768, hasVaeEncoder = false)
+        assertEquals(1024 to 1024, noEncoder.width to noEncoder.height)
+        assertEquals("SDXL without a VAE encoder renders only 1024x1024", noEncoder.reason)
     }
 
     // ── buildEnvironment ──────────────────────────────────────────────────────
@@ -534,15 +596,17 @@ class LocalDreamModuleTest {
     }
 
     @Test
-    fun `buildCommand QNN passes --patch only when given, CPU never`() {
-        val npu = tmp.newFolder("npu4")
+    fun `buildCommand sd15npu passes --patch only when given, CPU never`() {
+        val npu = makeQnnModelDir()
         val patch = File(npu, "384.patch").apply { writeText("x") }
         val exe = makeExecutable()
         val rt = makeRuntimeDir()
         val withPatch = LocalDreamModule.buildCommand(exe, npu, rt, isCpu = false, patchFile = patch)
         assertEquals(patch.absolutePath, withPatch[withPatch.indexOf("--patch") + 1])
         assertFalse(LocalDreamModule.buildCommand(exe, npu, rt, isCpu = false).contains("--patch"))
-        assertFalse(LocalDreamModule.buildCommand(exe, makeCpuModelDir(), rt, isCpu = true, patchFile = patch).contains("--patch"))
+        assertFalse(
+            LocalDreamModule.buildCommand(exe, makeCpuModelDir(), rt, isCpu = true, patchFile = patch).contains("--patch"),
+        )
     }
 
     @Test
@@ -563,6 +627,8 @@ class LocalDreamModuleTest {
         assertEquals("40123", cpu[cpu.indexOf("--port") + 1])
         val npu = LocalDreamModule.buildCommand(exe, makeQnnModelDir(), rt, isCpu = false, port = 40124)
         assertEquals("40124", npu[npu.indexOf("--port") + 1])
+        val sdxl = LocalDreamModule.buildCommand(exe, makeSdxlModelDir(), rt, isCpu = false, port = 40126, isSdxl = true)
+        assertEquals("40126", sdxl[sdxl.indexOf("--port") + 1])
     }
 
     @Test

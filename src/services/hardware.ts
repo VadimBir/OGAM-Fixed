@@ -26,6 +26,16 @@ import { quantizationBitsPerWeight } from '../utils/quantization';
  */
 const FLAGSHIP_8GEN2 = new Set([8550, 8650, 8735, 8750, 8845, 8850]);
 const FLAGSHIP_8GEN1 = new Set([8450, 8475]);
+/**
+ * SoCs the SDXL NPU graphs (`*_qnn2.28_8gen3.zip`) run on: local-dream v2.8.1 Model.kt:545
+ * isSdxlCapableSoc, mirrored natively by LocalDreamModule.isSdxlCapableSoc.
+ */
+export const SDXL_NPU_SOCS = new Set(['SM8650', 'SM8750', 'SM8750P', 'SM8850', 'SM8850P', 'SM8845']);
+
+/** `socModel` (Build.SOC_MODEL, e.g. "SM8850" or "SM8850-AC") is in SDXL_NPU_SOCS. */
+export function isSdxlNpuSoc(socModel: string): boolean {
+  return SDXL_NPU_SOCS.has(socModel.split('-')[0].toUpperCase());
+}
 class HardwareService {
   private cachedDeviceInfo: DeviceInfoType | null = null;
   private cachedSoCInfo: SoCInfo | null = null;
@@ -341,6 +351,11 @@ class HardwareService {
     };
     logger.log(`[WIRE-DEVICE-SOC] ${JSON.stringify({ hardware, model, ...this.cachedSoCInfo })}`); // [WIRE] real SoC/NPU detection (drives qnn image-backend gate)
     return this.cachedSoCInfo;
+  }
+  /** The device can run SDXL NPU models (Android Snapdragon in SDXL_NPU_SOCS). */
+  async supportsSdxlNpu(): Promise<boolean> {
+    if (Platform.OS !== 'android') return false;
+    return isSdxlNpuSoc(await this.fetchSoCModel());
   }
   private async getQnnVariantFromSoC(): Promise<
     '8gen2' | '8gen1' | 'min' | undefined

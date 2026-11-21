@@ -1,8 +1,11 @@
 import type { ImageLora } from '../types';
 import type { EngineImageOptions, GenerateImageParams } from './imageGenerationTypes';
 
-/** Samplers the LocalDream core (QNN/MNN) accepts in its `scheduler` field; default 'dpm'. */
-export const LOCALDREAM_SAMPLERS = ['dpm', 'euler_a'] as const;
+/** Samplers the LocalDream v2.8.1 core (QNN/MNN) accepts in its `scheduler` field; default 'dpm'.
+ *  Same list as LocalDreamModule.SUPPORTED_SCHEDULERS (Pipeline.hpp createScheduler). */
+export const LOCALDREAM_SAMPLERS = [
+  'dpm', 'dpm_karras', 'euler_a', 'euler_a_karras', 'euler', 'euler_karras', 'lcm', 'dpm_sde', 'dpm_sde_karras',
+] as const;
 
 export const SDCPP_SIZE_MULTIPLE = 64;
 export const SDCPP_MIN_SIZE = 64;

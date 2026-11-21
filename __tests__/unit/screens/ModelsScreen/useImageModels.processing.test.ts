@@ -23,6 +23,7 @@ jest.mock('../../../../src/services', () => ({
   },
   hardwareService: {
     getSoCInfo: jest.fn().mockResolvedValue({ hasNPU: true }),
+    supportsSdxlNpu: jest.fn().mockResolvedValue(false),
     getImageModelRecommendation: jest.fn().mockResolvedValue({
       recommendedBackend: 'all',
       bannerText: 'ok',

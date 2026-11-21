@@ -6,7 +6,12 @@
  * Reproduces the EXACT on-device defect: the mnn model extracted missing `pos_emb.bin`
  * AND `clip_v2.mnn.weight` while every other file was present, yet nothing flagged it.
  */
-import { checkImageModelFiles, type ImageDirEntry } from '../../../src/utils/imageModelIntegrity';
+import {
+  checkImageModelFiles,
+  detectImageModelKind,
+  LEGACY_SD15_CLIP_MISSING,
+  type ImageDirEntry,
+} from '../../../src/utils/imageModelIntegrity';
 
 // The complete, correct mnn model file set (from the verified xororz/sd-mnn zip).
 const COMPLETE_MNN: ImageDirEntry[] = [
@@ -25,7 +30,7 @@ const COMPLETE_MNN: ImageDirEntry[] = [
 
 describe('checkImageModelFiles — mnn', () => {
   it('passes a complete extraction', () => {
-    expect(checkImageModelFiles(COMPLETE_MNN, 'mnn')).toEqual({ complete: true, missing: [] });
+    expect(checkImageModelFiles(COMPLETE_MNN, 'mnn')).toEqual({ complete: true, missing: [], kind: 'sd15' });
   });
 
   it('FAILS the exact on-device bug: pos_emb.bin + clip_v2.mnn.weight dropped', () => {
@@ -60,11 +65,13 @@ describe('checkImageModelFiles — mnn', () => {
     expect(res.missing).toContain('clip_v2.mnn');
   });
 
-  it('accepts clip.mnn as the clip graph when clip_v2.mnn is absent (base vs upgraded)', () => {
+  it('marks an older folder with only clip.mnn as needing a re-download (v2.8.1 sd15cpu loads clip_v2.mnn)', () => {
     const withBaseClip = COMPLETE_MNN
       .filter(f => f.name !== 'clip_v2.mnn' && f.name !== 'clip_v2.mnn.weight')
       .concat([{ name: 'clip.mnn', size: 147192, isFile: true }, { name: 'clip.mnn.weight', size: 156158976, isFile: true }]);
-    expect(checkImageModelFiles(withBaseClip, 'mnn').complete).toBe(true);
+    const res = checkImageModelFiles(withBaseClip, 'mnn');
+    expect(res.complete).toBe(false);
+    expect(res.missing).toEqual([LEGACY_SD15_CLIP_MISSING]);
   });
 
   it('requires the vae_decoder.mnn graph (always loaded by the native server)', () => {
@@ -103,7 +110,9 @@ describe('checkImageModelFiles — qnn (NPU)', () => {
   // and every fresh Android NPU image download failed with a bogus "download corrupted /
   // connection dropped" alert. The download and extraction were always perfect.
   it('passes the exact on-device NPU model that has clip_v2.mnn but NO clip_v2.mnn.weight', () => {
-    expect(checkImageModelFiles(COMPLETE_QNN, 'qnn')).toEqual({ complete: true, missing: [] });
+    expect(checkImageModelFiles(COMPLETE_QNN, 'qnn')).toEqual({
+      complete: true, missing: [], kind: 'sd15', unetBytes: 892820832,
+    });
   });
 
   it('does NOT demand any *.mnn.weight for qnn (monolithic graph, weights baked in)', () => {
@@ -125,11 +134,16 @@ describe('checkImageModelFiles — qnn (NPU)', () => {
     expect(checkImageModelFiles(partial, 'qnn').missing).toContain('clip_v2.mnn');
   });
 
-  it('accepts a self-contained clip.bin as the clip graph (native qnn fallback)', () => {
-    const withBinClip = COMPLETE_QNN
-      .filter(f => f.name !== 'clip_v2.mnn')
-      .concat([{ name: 'clip.bin', size: 160000000, isFile: true }]);
-    expect(checkImageModelFiles(withBinClip, 'qnn').complete).toBe(true);
+  it('marks an older clip.bin / clip.mnn NPU folder as needing a re-download (sd15npu requires clip_v2.mnn)', () => {
+    for (const legacyClip of ['clip.bin', 'clip.mnn']) {
+      const legacy = COMPLETE_QNN
+        .filter(f => f.name !== 'clip_v2.mnn')
+        .concat([{ name: legacyClip, size: 160000000, isFile: true }]);
+      const res = checkImageModelFiles(legacy, 'qnn');
+      expect(res.complete).toBe(false);
+      expect(res.missing).toEqual([LEGACY_SD15_CLIP_MISSING]);
+      expect(res.kind).toBe('sd15');
+    }
   });
 
   it('does NOT require vae_encoder.bin (optional — native adds --vae_encoder only if present)', () => {
@@ -140,6 +154,63 @@ describe('checkImageModelFiles — qnn (NPU)', () => {
   it('treats a zero-byte unet.bin as missing (truncated write)', () => {
     const truncated = COMPLETE_QNN.map(f => (f.name === 'unet.bin' ? { ...f, size: 0 } : f));
     expect(checkImageModelFiles(truncated, 'qnn').missing).toContain('unet.bin');
+  });
+});
+
+describe('checkImageModelFiles — qnn SDXL (local-dream v2.8.1 --type sdxl)', () => {
+  // main.cpp:334-347 required set for sdxl, plus upstream's 0-byte SDXL marker.
+  const COMPLETE_SDXL: ImageDirEntry[] = [
+    { name: 'SDXL', size: 0, isFile: true },
+    { name: 'tokenizer.json', size: 3642034, isFile: true },
+    { name: 'clip.mnn', size: 246000000, isFile: true },
+    { name: 'clip_2.mnn', size: 400000, isFile: true },
+    { name: 'clip_2.mnn.weight', size: 1390000000, isFile: true },
+    { name: 'pos_emb.bin', size: 236544, isFile: true },
+    { name: 'token_emb.bin', size: 75890688, isFile: true },
+    { name: 'pos_emb_2.bin', size: 315392, isFile: true },
+    { name: 'token_emb_2.bin', size: 101187584, isFile: true },
+    { name: 'unet.bin', size: 2600000000, isFile: true },
+    { name: 'vae_decoder.bin', size: 100000000, isFile: true },
+    { name: 'vae_encoder.bin', size: 70000000, isFile: true },
+  ];
+
+  it('passes a complete SDXL folder, the 0-byte SDXL marker does not count as missing', () => {
+    expect(checkImageModelFiles(COMPLETE_SDXL, 'qnn')).toEqual({
+      complete: true, missing: [], kind: 'sdxl', unetBytes: 2600000000,
+    });
+  });
+
+  it('does not require clip_v2.mnn for SDXL', () => {
+    expect(checkImageModelFiles(COMPLETE_SDXL, 'qnn').missing).not.toContain('clip_v2.mnn');
+  });
+
+  it('requires every file the core checks for sdxl', () => {
+    for (const name of ['clip.mnn', 'clip_2.mnn.weight', 'pos_emb_2.bin', 'token_emb_2.bin', 'vae_decoder.bin', 'unet.bin']) {
+      const partial = COMPLETE_SDXL.filter(f => f.name !== name);
+      const res = checkImageModelFiles(partial, 'qnn');
+      expect(res.complete).toBe(false);
+      expect(res.missing).toContain(name);
+      expect(res.kind).toBe('sdxl');
+    }
+  });
+
+  it('detects SDXL by clip_2.mnn without the marker, and by a root marker hint', () => {
+    const noMarker = COMPLETE_SDXL.filter(f => f.name !== 'SDXL');
+    expect(detectImageModelKind(noMarker)).toBe('sdxl');
+    expect(checkImageModelFiles(noMarker, 'qnn').kind).toBe('sdxl');
+    const partial = noMarker.filter(f => f.name !== 'clip_2.mnn');
+    const res = checkImageModelFiles(partial, 'qnn', 'sdxl');
+    expect(res.kind).toBe('sdxl');
+    expect(res.missing).toContain('clip_2.mnn');
+  });
+
+  it('does not require vae_encoder.bin (native passes --no_img2img without it)', () => {
+    const noEncoder = COMPLETE_SDXL.filter(f => f.name !== 'vae_encoder.bin');
+    expect(checkImageModelFiles(noEncoder, 'qnn').complete).toBe(true);
+  });
+
+  it('never reads SDXL from an mnn listing (SDXL is NPU only)', () => {
+    expect(checkImageModelFiles(COMPLETE_MNN.concat([{ name: 'SDXL', size: 0, isFile: true }]), 'mnn').kind).toBe('sd15');
   });
 });
 

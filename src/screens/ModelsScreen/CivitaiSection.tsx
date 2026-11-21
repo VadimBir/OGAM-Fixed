@@ -128,6 +128,11 @@ const ResultCard: React.FC<{ result: CivitaiResult; index: number; vm: CivitaiSe
         <Text style={local.title} numberOfLines={2}>{result.name}{result.versionName ? ` · ${result.versionName}` : ''}</Text>
         <Text style={local.meta}>{result.baseModel} {'·'} {formatBytes(result.file.sizeBytes)} {'·'} {kind}{fp}</Text>
         {result.creator ? <Text style={local.meta}>by {result.creator}</Text> : null}
+        {vm.fitsRam(result) ? null : (
+          <Text style={[local.meta, { color: colors.warning }]} testID={`civitai-ram-warning-${index}`}>
+            May not fit this phone's RAM on the GPU engine (sd.cpp). You can still download and try it.
+          </Text>
+        )}
         <View style={local.actions}>
           <PhoneAction result={result} index={index} vm={vm} local={local} />
           <View
@@ -286,7 +291,7 @@ export const CivitaiSection: React.FC<{ setAlertState: (s: AlertState) => void }
         )}
         {!vm.loading && vm.hiddenCount > 0 && (
           <Text style={local.note} testID="civitai-hidden-count">
-            {vm.hiddenCount} hidden: no SafeTensor file, another base model, or too large for this phone's RAM.
+            {vm.hiddenCount} hidden: no SafeTensor file or another base model.
           </Text>
         )}
         {!vm.loading && vm.nextCursor && (

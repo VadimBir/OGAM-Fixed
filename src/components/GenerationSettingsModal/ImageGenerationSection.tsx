@@ -8,6 +8,7 @@ import { hardwareService } from '../../services';
 import { isRemoteTextModelActive } from '../../services/engines';
 import { createStyles } from './styles';
 import { ImageQualityBasicSliders, ImageQualityAdvancedSliders } from './ImageQualitySliders';
+import { FastModeSection } from '../FastModeSection';
 
 // ─── Auto-Detect Method Toggle ────────────────────────────────────────────────
 
@@ -209,6 +210,8 @@ export const ImageGenerationSection: React.FC = () => {
       </View>
 
       <ImageQualityBasicSliders />
+
+      <FastModeSection />
 
       <View style={[styles.modeToggleContainer, !hasTextModel && styles.dimmed]}>
         <View style={styles.modeToggleInfo}>

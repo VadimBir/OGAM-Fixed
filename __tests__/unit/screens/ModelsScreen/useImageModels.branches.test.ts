@@ -47,6 +47,7 @@ jest.mock('../../../../src/services', () => ({
   },
   hardwareService: {
     getSoCInfo: (...a: any[]) => mockGetSoCInfo(...a),
+    supportsSdxlNpu: jest.fn().mockResolvedValue(false),
     getImageModelRecommendation: (...a: any[]) => mockGetImageModelRecommendation(...a),
   },
   backgroundDownloadService: {
@@ -152,7 +153,7 @@ describe('loadHFModels', () => {
     const { result } = renderHook(() => useImageModels(setAlertState));
     await act(async () => { await result.current.loadHFModels(true); });
 
-    expect(mockFetchAvailableModels).toHaveBeenCalledWith(true, { skipQnn: true });
+    expect(mockFetchAvailableModels).toHaveBeenCalledWith(true, { skipQnn: true, includeSdxl: false });
     expect(result.current.hfModelsError).toBeNull();
   });
 
