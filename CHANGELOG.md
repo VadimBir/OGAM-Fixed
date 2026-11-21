@@ -3,6 +3,48 @@
 Branch `app-refactor-fixes`. Newest first. Each entry gives the commit it ships in.
 State words: DONE = finished and unit tested; WIP = an agent is still editing, so the code is not checked; UNKNOWN = not verified.
 
+## 2026-11-21: P0 fixes, memory gate, /img, LoRA import on all engines, no NSFW filter
+
+### Fixes (DONE, unit tested; device UNKNOWN)
+- **NPU img2img key:**
+  - Was: the app sent `init_img`, which the SD core never reads, so every img2img ran as txt2img.
+  - Now: `image` + `denoise_strength` + `mask` via `putImg2ImgKeys` (`LocalDreamModule.kt`).
+  - Test: `LocalDreamImg2ImgBodyTest` (3).
+  - Stale comments fixed: they said "img2img only on CPU" (`types/index.ts`, `imageGenerationService.ts`).
+- **Memory gate (agent MG): text + image now coexist in Balanced.**
+  - Resident models are charged at resident bytes. The ×1.1 factor applies once, to the incoming load peak (`memoryBudget.ts` `INCOMING_PEAK_FACTOR`, `sdCppMemory.ts` `residentMB`/`loadPeakMB`).
+  - The free-RAM decision happens before any eviction. `llm.ts` never refuses after the gate approved (`memoryGateApproved`).
+  - Free RAM is no longer capped at the 70% budget.
+  - mmapped weights are checked against the physical cap only.
+  - "Load Anyway" covers one load only.
+  - Leaks:
+    - a local-dream server that is alive but not ready is now stopped;
+    - the llama context is released when a load fails after init;
+    - image unload waits for memory.
+  - Dead check code removed (`activeModelService/memory.ts`).
+  - Example, Balanced cap 7,910 MB: was 8,940 MB, so text was evicted; now 7,840 MB, nothing evicted.
+- **Image tool:** about 331 tokens per tool turn, now about 226. Only `prompt` is required; passed params are used.
+  - Minimum context setting: 512 (default 4096).
+- **`/img <prompt>` (alias `/image`):** draws without the LLM. Flags: `--w --h --steps --cfg --seed --neg`.
+  - Parser: `src/utils/imageSlashCommand.ts`.
+  - Tests: 18.
+  - Gap: a resend drops the flags.
+- **Image LoRA:** an "Import LoRA (.safetensors)" button on every engine, NPU included (`ImageEngineSettings.tsx`).
+- **No content filter:**
+  - Civitai: the NSFW toggle is removed and `nsfw=false` is never sent. NSFW models and previews are shown (`civitaiBrowser.ts`, `useCivitaiSearch.ts`, `CivitaiSection.tsx`).
+  - The app never passes `--safety_checker`.
+
+### Not done
+- Renaming `footprintBytes` to `systemUsedBytes`: blocked, because on iOS the same key is the real process footprint (`ios/DeviceMemoryModule.swift:38`).
+
+### Gates + APK (this commit)
+- **jest:** 584 of 588 suites pass, 6929 tests pass. Only failure: the orphaned `imageGenerator.test.ts` (33 tests).
+- **tsc:** 0 errors in `src/` outside `sync/`.
+- **eslint:** 0 errors.
+- **Kotlin localdream tests:** 62 of 62 pass.
+- **`assembleRelease`:** passes.
+- **APK:** `OGAM-p0-memory-img-20261121.apk`, 194,721,620 bytes, SHA-256 `64e689c93dc9e8fdd7b1c86c82544aa13cd967373716108d8f05ae40a5a35dba`.
+
 ## 2026-11-21: plan: Image Studio, imgref, region edit, memory, newer models (no code change)
 - **Plan file:** `docs/plans/2026-11-21-image-studio-ref-memory-plan.md`, built from three read-only audits: sd.cpp GPU, local-dream NPU, memory gate.
 - **Found bug (PROVEN, not fixed yet):** NPU img2img sends `init_img`, but the core reads `image` (`LocalDreamModule.kt:1106`). Every img2img runs as txt2img.

@@ -50,10 +50,9 @@ export function useCivitaiSearch(setAlertState: (s: AlertState) => void) {
   const seqRef = useRef(0);
 
   const {
-    settings, updateSettings, downloadedImageModels,
+    settings, downloadedImageModels,
     addDownloadedImageModel, activeImageModelId, setActiveImageModelId,
   } = useAppStore();
-  const showNsfw = settings?.civitaiShowNsfw === true;
   const imageLoras = settings?.imageLoras;
   const budgetMB = useMemo(deviceBudgetMB, []);
 
@@ -68,7 +67,7 @@ export function useCivitaiSearch(setAlertState: (s: AlertState) => void) {
     const append = cursor !== null;
     if (append) setLoadingMore(true); else { setLoading(true); setError(null); }
     try {
-      const page = await searchCivitaiModels({ query, type, family, showNsfw, cursor, apiKey });
+      const page = await searchCivitaiModels({ query, type, family, cursor, apiKey });
       if (seq !== seqRef.current) return;
       const fitting = page.results.filter(r => civitaiResultFits(r, budgetMB));
       const tooBig = page.results.length - fitting.length;
@@ -88,22 +87,18 @@ export function useCivitaiSearch(setAlertState: (s: AlertState) => void) {
     } finally {
       if (seq === seqRef.current) { setLoading(false); setLoadingMore(false); }
     }
-  }, [query, type, family, showNsfw, apiKey, budgetMB]);
+  }, [query, type, family, apiKey, budgetMB]);
 
   const search = useCallback(() => runSearch(null), [runSearch]);
   const loadMore = useCallback(() => {
     if (nextCursor && !loading && !loadingMore) runSearch(nextCursor);
   }, [nextCursor, loading, loadingMore, runSearch]);
 
-  // A filter change (type / family / NSFW) re-runs the current search; the first run happens on open.
+  // A filter change (type / family) re-runs the current search; the first run happens on open.
   useEffect(() => {
     runSearch(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [type, family, showNsfw]);
-
-  const setShowNsfw = useCallback((value: boolean) => {
-    updateSettings({ civitaiShowNsfw: value });
-  }, [updateSettings]);
+  }, [type, family]);
 
   const saveApiKey = useCallback(async (key: string) => {
     try {
@@ -145,7 +140,6 @@ export function useCivitaiSearch(setAlertState: (s: AlertState) => void) {
   return {
     query, setQuery, type, setType, family, setFamily,
     results, nextCursor, loading, loadingMore, error, hiddenCount, hasSearched,
-    showNsfw, setShowNsfw,
     hasApiKey: !!apiKey, saveApiKey, clearApiKey,
     search, loadMore, isOnPhone, downloadToPhone, cancelDownload,
   };

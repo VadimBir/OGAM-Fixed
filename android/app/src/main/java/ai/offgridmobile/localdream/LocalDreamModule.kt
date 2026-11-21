@@ -1092,25 +1092,22 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
         put("use_opencl", useOpenCL)
         put("show_diffusion_process", true)
         put("show_diffusion_stride", if (params.hasKey("previewInterval")) params.getInt("previewInterval") else 2)
-        // img2img: JS passes `initImage` (base64 RGB/PNG, no data-URL prefix) plus `denoiseStrength`
-        // in 0..1. Server keys are `init_img` + `denoise_strength` (confirmed in the SD core string
-        // table). denoise_strength is how MUCH the ref image is changed: 1.0 = ignore the ref
-        // (pure txt2img), low = stay close to the ref. We forward the user's "closeness" as
-        // (1 - closeness) already resolved on the JS side, so here it is the raw denoise value.
-        // NOTE: the SD core disables img2img unless the VAE *encoder* is present AND the server
-        // runs the MNN/CPU path ("VAE Encoder path missing. img2img disabled unless --cpu"). The
-        // JS/native only sends these keys; whether they take effect is gated by the loaded model's
-        // files and backend. When no init image is sent the body is a plain txt2img request.
-        val initImage = params.getString("initImage")
-        if (!initImage.isNullOrBlank()) {
-            put("init_img", initImage)
-            val denoise = if (params.hasKey("denoiseStrength")) params.getDouble("denoiseStrength") else 0.6
-            put("denoise_strength", denoise.coerceIn(0.0, 1.0))
-            if (params.hasKey("maskImage")) {
-                val mask = params.getString("maskImage")
-                if (!mask.isNullOrBlank()) put("mask", mask)
-            }
-        }
+        // img2img: JS passes `initImage` (base64 PNG/JPG, no data-URL prefix) plus `denoiseStrength`
+        // in 0..1. The SD core reads the keys `image`, `mask` and `denoise_strength`: its JSON key
+        // strings are width/height/image/mask (libstable_diffusion_core.so), and upstream c56cf6c
+        // sets request_img2img only `if (json.contains("image"))`. The old key `init_img` is not
+        // in the binary at all, so every img2img used to run as plain txt2img.
+        // denoise_strength is how MUCH the ref image is changed: 1.0 = ignore the ref, low = stay
+        // close to it. The JS side already resolved the user's "keep" as (1 - keep).
+        // The QNN path runs img2img on the NPU when the model has vae_encoder.bin (passed as
+        // --vae_encoder); without it the core warns "VAE Encoder path missing. img2img disabled
+        // unless --cpu". When no init image is sent the body is a plain txt2img request.
+        putImg2ImgKeys(
+            this,
+            initImage = if (params.hasKey("initImage")) params.getString("initImage") else null,
+            denoise = if (params.hasKey("denoiseStrength")) params.getDouble("denoiseStrength") else null,
+            mask = if (params.hasKey("maskImage")) params.getString("maskImage") else null,
+        )
     }
 
     private fun openGenerationConnection(): HttpURLConnection {
@@ -1539,4 +1536,15 @@ class LocalDreamModule(reactContext: ReactApplicationContext) :
         coroutineScope.cancel()
         stopServer()
     }
+}
+
+/**
+ * The img2img keys the bundled SD core reads: `image` (base64 PNG/JPG), `denoise_strength` (0..1,
+ * default 0.6) and `mask`. Nothing is added without an init image, so the body stays txt2img.
+ */
+internal fun putImg2ImgKeys(body: JSONObject, initImage: String?, denoise: Double?, mask: String?) {
+    if (initImage.isNullOrBlank()) return
+    body.put("image", initImage)
+    body.put("denoise_strength", (denoise ?: 0.6).coerceIn(0.0, 1.0))
+    if (!mask.isNullOrBlank()) body.put("mask", mask)
 }

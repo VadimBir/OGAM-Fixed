@@ -90,7 +90,15 @@ export interface SdCppMemoryEstimate {
   loadBufferMB: number;
   unetComputeMB: number;
   vaeComputeMB: number;
+  /** Peak of a generation: (weights + LoRA + load buffers + max(UNet, VAE compute) + overhead) x 1.1. */
   totalMB: number;
+  /** Held while the model stays loaded between generations: weights + LoRA + overhead. No factor,
+   *  no load buffers, no compute (sd.cpp frees each graph's compute buffer after its stage). */
+  residentMB: number;
+  /** Charged when the model is loaded: (weights + LoRA + load buffers + overhead) x 1.1. The
+   *  compute buffers are allocated only while generating; the generation gate
+   *  (modelResidency canKeepOthersDuringGeneration) checks them against live free RAM. */
+  loadPeakMB: number;
   /** File bytes per parameter inferred from size (auto keeps the file's own types). */
   sourceBytesPerParam: number;
 }
@@ -139,6 +147,8 @@ export function estimateSdCppMemory(input: SdCppMemoryInput): SdCppMemoryEstimat
   const totalMB = Math.ceil(
     (weightsMB + loraMB + loadBufferMB + Math.max(unetComputeMB, vaeComputeMB) + RUNTIME_OVERHEAD_MB) * SAFETY_FACTOR,
   );
+  const residentMB = Math.round(weightsMB + loraMB + RUNTIME_OVERHEAD_MB);
+  const loadPeakMB = Math.ceil((weightsMB + loraMB + loadBufferMB + RUNTIME_OVERHEAD_MB) * SAFETY_FACTOR);
   return {
     weightsMB: Math.round(weightsMB),
     loraMB: Math.round(loraMB),
@@ -146,6 +156,8 @@ export function estimateSdCppMemory(input: SdCppMemoryInput): SdCppMemoryEstimat
     unetComputeMB: Math.round(unetComputeMB),
     vaeComputeMB: Math.round(vaeComputeMB),
     totalMB,
+    residentMB,
+    loadPeakMB,
     sourceBytesPerParam,
   };
 }

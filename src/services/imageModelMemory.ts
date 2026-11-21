@@ -33,3 +33,18 @@ export function estimateImageModelRamBytes(model: ONNXImageModel): number {
   if (model.backend === 'sdcpp') return estimateSdCppModelMemory(model).totalMB * 1024 * 1024;
   return hardwareService.estimateImageModelRam(model) || 0;
 }
+
+/**
+ * MB the residency gate charges for an image model: `peakMB` when it is loaded, `residentMB` once it
+ * is resident. sd.cpp: the load peak (x1.1, no compute) and the resident bytes (no factor, no
+ * compute) from estimateSdCppMemory. Other backends have no weights/working-set split here, so both
+ * are the file-size estimate.
+ */
+export function imageModelResidencyMB(model: ONNXImageModel): { peakMB: number; residentMB: number } {
+  if (model.backend === 'sdcpp') {
+    const est = estimateSdCppModelMemory(model);
+    return { peakMB: est.loadPeakMB, residentMB: est.residentMB };
+  }
+  const mb = Math.round((hardwareService.estimateImageModelRam(model) || 0) / (1024 * 1024));
+  return { peakMB: mb, residentMB: mb };
+}

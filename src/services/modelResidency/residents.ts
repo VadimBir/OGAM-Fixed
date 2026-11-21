@@ -36,10 +36,15 @@ export interface RegisteredResident extends Resident {
 export interface ResidentSpec {
   key: string;
   type: ResidentType;
-  /** The specific downloaded-model id - keys the per-model session override memory.
-   *  (`key` is only the slot/type, e.g. 'text', so it can't distinguish models.) */
+  /** The specific downloaded-model id. `key` is only the slot/type (e.g. 'text'), so this tells a
+   *  reload of the same model (charged 0) from a different model replacing it (charged in full). */
   modelId?: string;
+  /** makeRoomFor: the load peak (the one place the peak factor applies). register: the resident
+   *  bytes (no factor, no transient compute). */
   sizeMB: number;
+  /** Part of sizeMB that consumes live free RAM; absent = all of it. A text model whose mmapped
+   *  weights are reclaimable passes only its anonymous bytes (memoryBudget.textMemoryFootprint). */
+  liveMB?: number;
   pinned?: boolean;
   /** Owner's veto: returns false while the model is in use (e.g. TTS playing) so
    *  residency never evicts it mid-use. Absent → always evictable. */

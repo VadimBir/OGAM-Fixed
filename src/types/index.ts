@@ -461,9 +461,9 @@ export interface ImageGenerationParams {
   seed?: number;
   useOpenCL?: boolean;
   /**
-   * img2img reference image as base64 (raw RGB or PNG bytes, no data-URL prefix). When set,
-   * the request becomes img2img. Only takes effect on the MNN/CPU backend with a VAE encoder
-   * present (the SD core disables img2img otherwise).
+   * img2img reference image as base64 (PNG/JPG bytes, no data-URL prefix). When set, the request
+   * becomes img2img: local-dream sends it as `image` (LocalDreamModule.kt) and runs it on the NPU
+   * when the model ships vae_encoder.bin; stable-diffusion.cpp does not take it yet.
    */
   initImage?: string;
   /**

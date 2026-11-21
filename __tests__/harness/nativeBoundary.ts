@@ -688,6 +688,7 @@ export interface DiffusionFake {
 
 function makeDiffusionFake(
   fs?: NativeFileSystemBoundary,
+  freeModelMemory?: () => void,
 ): DiffusionFake {
   const calls: DiffusionFake['calls'] = { generateImage: [] };
   let seedCounter = 0;
@@ -699,7 +700,12 @@ function makeDiffusionFake(
     isModelLoaded: jest.fn().mockResolvedValue(true),
     getLoadedModelPath: jest.fn().mockResolvedValue(null),
     loadModel: jest.fn().mockResolvedValue(true),
-    unloadModel: jest.fn().mockResolvedValue(true),
+    // Faithful to native: stopping the server / releasing the context frees its memory, so the
+    // image unload's reclaim barrier (awaitMemoryReclaim) observes the drop.
+    unloadModel: jest.fn(async () => {
+      freeModelMemory?.();
+      return true;
+    }),
     // Faithful to native: cancel RELEASES an in-flight generation rather than rejecting it. The held
     // promise then settles, which is how the app's own cancel path unwinds on a device.
     cancelGeneration: jest.fn(() => {
@@ -1081,7 +1087,7 @@ export function installNativeBoundary(opts: InstallOpts = {}): NativeBoundary {
   if (fsFake) jest.doMock('react-native-fs', () => fsFake.module);
 
   // Diffusion writes its rendered PNG to the (memfs) disk when fs is present, like the native module.
-  const diffusion = makeDiffusionFake(fsFake);
+  const diffusion = makeDiffusionFake(fsFake, freeModelMemory);
 
   // Scriptable llama.rn: override the global stub so completion output is under test control.
   const llamaFake = opts.llama

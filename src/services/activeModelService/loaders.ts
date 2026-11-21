@@ -12,7 +12,7 @@ import { liteRTService } from '../litert';
 import { unloadAllTextEngines } from '../engines';
 import { imageEngineRouter as onnxImageGeneratorService } from '../imageEngineRouter';
 import { sdCppLoadConfigFromSettings } from '../sdCppGenerator';
-import { estimateImageModelRamBytes } from '../imageModelMemory';
+import { imageModelResidencyMB } from '../imageModelMemory';
 import { modelManager } from '../modelManager';
 import { hardwareService } from '../hardware';
 import { modelResidencyManager } from '../modelResidency';
@@ -229,7 +229,9 @@ export async function doLoadTextModel(ctx: TextLoadContext): Promise<void> {
     const mmProjPath = await resolveMmProjPath(ctx.model, ctx.modelId);
 
     await raceNativeLoad(
-      llmService.loadModel(ctx.model.filePath, mmProjPath, { override: ctx.override }),
+      // memoryGateApproved: this load runs only after ActiveModelService.doLoadTextModelLocked's
+      // makeRoomFor approved it (the free-RAM decision, made before any eviction).
+      llmService.loadModel(ctx.model.filePath, mmProjPath, { override: ctx.override, memoryGateApproved: true }),
       {
         timeoutMs: ctx.timeoutMs,
         message:
@@ -385,7 +387,9 @@ export async function checkImageModelCanLoad(
       key: 'image',
       type: 'image',
       modelId: model.id,
-      sizeMB: Math.round(estimateImageModelRamBytes(model) / (1024 * 1024)),
+      // The load peak (x1.1 once; sd.cpp: no generation compute, which the generation gate checks
+      // against live free RAM), see imageModelResidencyMB.
+      sizeMB: imageModelResidencyMB(model).peakMB,
       // CoreML/ONNX image weights are dirty (jetsam-counted) memory → gate on real free RAM.
       dirtyMemory: true,
     },

@@ -11,33 +11,41 @@ import { Resident, ResidentType } from './policy';
 interface FitSpec {
   key: string;
   sizeMB: number;
+  liveMB?: number;
   dirtyMemory?: boolean;
 }
 
 interface EvictionPlanLike {
   fits: boolean;
   evict: Array<{ key: string }>;
+  liveRoomMB?: number;
 }
+
+const liveSuffix = (liveMB?: number): string => (liveMB == null ? '' : `/live${liveMB}`);
 
 /**
  * The primary fit-decision trace: the exact numbers behind every fit decision.
- * budgetForSpec already folds in the live os_proc budget under dirty pressure, so
- * there's one owner of the memory math - planEviction enforces it. Also logs the raw
- * os_proc figures (available/total) so a refusal is explainable.
+ * capacityForSpec gives the physical budget and, when the load is live-gated, the live
+ * free RAM + headroom; planEviction enforces both. Also logs the raw free/total RAM so a
+ * refusal is explainable.
  */
 export function formatMakeRoomForLine(args: {
   spec: FitSpec;
   budgetMB: number;
   availMB: number;
   totalMB: number;
-  residents: Array<Pick<Resident, 'key' | 'sizeMB' | 'pinned'> & { type?: ResidentType }>;
+  residents: Array<Pick<Resident, 'key' | 'sizeMB' | 'pinned'> & { type?: ResidentType; liveMB?: number }>;
   plan: EvictionPlanLike;
+  live?: { availableMB: number; headroomMB: number };
 }): string {
-  const { spec, budgetMB, availMB, totalMB, residents, plan } = args;
+  const { spec, budgetMB, availMB, totalMB, residents, plan, live } = args;
+  const liveText = live
+    ? ` liveMB=${spec.liveMB ?? spec.sizeMB} headroomMB=${live.headroomMB} liveRoomMB=${Math.round(plan.liveRoomMB ?? 0)}`
+    : ' live=off';
   return `[MEM-SM] makeRoomFor ${spec.key} sizeMB=${
     spec.sizeMB
-  } dirty=${!!spec.dirtyMemory} budgetMB=${budgetMB} os_procAvailMB=${availMB} totalMB=${totalMB} residents=[${residents
-    .map(r => `${r.key}:${r.sizeMB}${r.pinned ? '(pinned)' : ''}`)
+  } dirty=${!!spec.dirtyMemory} budgetMB=${budgetMB}${liveText} os_procAvailMB=${availMB} totalMB=${totalMB} residents=[${residents
+    .map(r => `${r.key}:${r.sizeMB}${liveSuffix(r.liveMB)}${r.pinned ? '(pinned)' : ''}`)
     .join(',')}] fits=${plan.fits} evict=[${plan.evict
     .map(e => e.key)
     .join(',')}]`;

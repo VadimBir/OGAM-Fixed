@@ -3,12 +3,12 @@
  *
  * Decides which on-device models stay in RAM. A phone can't hold every model
  * at once, so before loading a model we evict others to fit a RAM budget:
- *  - text and image generation models are mutually exclusive — loading one
- *    evicts the other (each plus its working set is too heavy to keep both);
+ *  - text and image generation models co-reside when both fit; when the incoming
+ *    one does not, the lower-priority / least-recently-used one is evicted;
  *  - speech (whisper) and TTS are small co-resident sidecars: they stay warm
  *    alongside whichever generation model is loaded and loading one never evicts
  *    anything; they're evicted only as a last resort when a heavy generation
- *    model can't otherwise fit (only text↔image are mutually exclusive);
+ *    model can't otherwise fit;
  *  - pinned models (e.g. the ~100MB SMOL classifier) are never evicted;
  *  - when an incoming generation model doesn't fit, evict least-recently-used
  *    (non-sidecar, non-pinned) residents until it does.
@@ -27,8 +27,11 @@ export interface Resident {
   type: ResidentType;
   /** The downloaded-model id behind the slot, when the owner registered one (text). */
   modelId?: string;
-  /** Approximate resident memory cost in MB. */
+  /** Resident memory cost in MB (resident bytes: no peak factor, no transient compute). */
   sizeMB: number;
+  /** Part of sizeMB that consumes live free RAM; absent = all of it. Smaller for a text model whose
+   *  mmapped weights are reclaimable page cache (memoryBudget.textMemoryFootprint). */
+  liveMB?: number;
   /** Pinned residents are never evicted (e.g. the classifier). */
   pinned?: boolean;
   /** True for dirty-memory models (CoreML/ONNX image): their working set can't be
@@ -42,7 +45,12 @@ export interface Resident {
 export interface IncomingModel {
   key: string;
   type: ResidentType;
+  /** The downloaded-model id; a resident in the same slot with another id is being replaced. */
+  modelId?: string;
+  /** Peak MB of the load (the one place the peak factor applies). */
   sizeMB: number;
+  /** Part of sizeMB that consumes live free RAM; absent = all of it. */
+  liveMB?: number;
   /** True for real committed RAM that cannot page (CoreML/ONNX image, LiteRT); a clean
    *  (mmap GGUF) incoming pages in and only competes for the physical-RAM ceiling. */
   dirtyMemory?: boolean;
@@ -51,10 +59,26 @@ export interface IncomingModel {
 export interface EvictionPlan {
   /** Residents to unload, in eviction order. */
   evict: Resident[];
-  /** Whether the incoming model fits the budget after eviction. */
+  /** Whether the incoming model fits the budget after eviction (physical AND live). */
   fits: boolean;
   freedMB: number;
+  /** Physical room left for the incoming model after the planned evictions. */
+  physicalRoomMB: number;
+  /** Live room left (free RAM - headroom + what the evictions release); undefined = not live-gated. */
+  liveRoomMB?: number;
+  /** MB the incoming model is charged physically (0 when the same model is already resident). */
+  incomingMB: number;
+  /** MB the incoming model is charged against live free RAM. */
+  incomingLiveMB: number;
 }
+
+/** Live free RAM a load may use: the reading and the headroom that must stay free. */
+export interface LiveRam {
+  availableMB: number;
+  headroomMB: number;
+}
+
+const liveOf = (r: { sizeMB: number; liveMB?: number }): number => r.liveMB ?? r.sizeMB;
 
 // Speech (whisper), TTS, and the RAG/MCP embedding model are small sidecars.
 const SIDECAR_TYPES = new Set<ResidentType>(['whisper', 'tts', 'embedding']);
@@ -115,36 +139,59 @@ export function computeBudgetMB(
 }
 
 /**
- * Plan which residents to evict so `incoming` fits within `budgetMB`.
- * Never evicts pinned residents or the incoming model itself.
+ * Plan which residents to evict so `incoming` fits. Never evicts pinned residents or the incoming
+ * model itself. Two checks, both must hold:
+ *  - physical: kept residents (resident MB) + the incoming peak <= `budgetMB`;
+ *  - live (when `opts.live`): the incoming live peak <= free RAM - headroom + the live MB that the
+ *    evictions (and a replaced model in the same slot) release.
  *
- * `opts.singleModel` (aggressive / "Load Anyway" mode): keep ONE model at a time —
- * evict EVERY evictable resident (still honoring pinned + in-use veto) rather than
- * co-residing whatever fits. This is the extreme-mode intent: give the one model the
- * maximum RAM instead of sharing it, so a big model has the best chance to load/run.
- *
- * (max-params disabled below: four clear positional inputs — residents, incoming,
- * budget, options — reads clearer than an options-object wrapper on this hot pure fn.)
+ * `opts.singleModel` (conservative mode, or a "Load Anyway" that does not fit): keep ONE model at a
+ * time - evict EVERY evictable resident (still honoring pinned + in-use veto).
  */
-// eslint-disable-next-line max-params
 export function planEviction(
   current: Resident[],
   incoming: IncomingModel,
   budgetMB: number,
-  opts?: { singleModel?: boolean },
+  opts?: { singleModel?: boolean; live?: LiveRam },
 ): EvictionPlan {
   const evict: Resident[] = [];
   const isEvicted = (r: Resident) => evict.some(e => e.key === r.key);
-  const alreadyResident = current.some(r => r.key === incoming.key);
+  // Same slot, same model: nothing new is allocated. Same slot, another model: the loader unloads
+  // the resident first, so it is not counted and its live RAM is credited.
+  const sameSlot = current.filter(r => r.key === incoming.key);
+  const alreadyResident = sameSlot.some(
+    r => !incoming.modelId || !r.modelId || r.modelId === incoming.modelId,
+  );
+  const replacedLiveMB = alreadyResident ? 0 : sameSlot.reduce((sum, r) => sum + liveOf(r), 0);
 
   const usedMB = () =>
     current
       .filter(r => r.key !== incoming.key && !isEvicted(r))
       .reduce((sum, r) => sum + r.sizeMB, 0);
-  const incomingCostMB = alreadyResident ? 0 : incoming.sizeMB;
+  const incomingMB = alreadyResident ? 0 : incoming.sizeMB;
+  const incomingLiveMB = alreadyResident ? 0 : liveOf(incoming);
+  const physicalRoom = () => budgetMB - usedMB();
+  const liveRoom = () =>
+    opts?.live
+      ? opts.live.availableMB - opts.live.headroomMB + replacedLiveMB +
+        evict.reduce((sum, r) => sum + liveOf(r), 0)
+      : undefined;
+  const fits = () => {
+    const live = liveRoom();
+    return incomingMB <= physicalRoom() && (live === undefined || incomingLiveMB <= live);
+  };
+  const result = (): EvictionPlan => ({
+    evict,
+    fits: fits(),
+    freedMB: evict.reduce((sum, r) => sum + r.sizeMB, 0),
+    physicalRoomMB: physicalRoom(),
+    liveRoomMB: liveRoom(),
+    incomingMB,
+    incomingLiveMB,
+  });
 
   if (opts?.singleModel) {
-    // Extreme mode: evict everything evictable (no co-residency). selectEvictionVictim
+    // One model at a time: evict everything evictable (no co-residency). selectEvictionVictim
     // still skips pinned + in-use (canEvict veto) residents, so the classifier and a
     // playing TTS survive; every other model is unloaded to free the most RAM.
     for (let victim = selectEvictionVictim(current, incoming, isEvicted);
@@ -152,11 +199,7 @@ export function planEviction(
       victim = selectEvictionVictim(current, incoming, isEvicted)) {
       evict.push(victim);
     }
-    return {
-      evict,
-      fits: usedMB() + incomingCostMB <= budgetMB,
-      freedMB: evict.reduce((sum, r) => sum + r.sizeMB, 0),
-    };
+    return result();
   }
 
   // Smart routing (balanced): KEEP as many models co-resident as the budget allows;
@@ -170,15 +213,10 @@ export function planEviction(
   //   - A sidecar load (mic/speaker) never evicts a heavier generation model —
   //     that would break an in-flight answer — so it may only reclaim from peer
   //     sidecars; if that's not enough it reports fits=false and the caller bails.
-  while (usedMB() + incomingCostMB > budgetMB) {
+  while (!fits()) {
     const victim = selectEvictionVictim(current, incoming, isEvicted);
     if (!victim) break; // nothing evictable left → fits stays false, caller bails
     evict.push(victim);
   }
-
-  return {
-    evict,
-    fits: usedMB() + incomingCostMB <= budgetMB,
-    freedMB: evict.reduce((sum, r) => sum + r.sizeMB, 0),
-  };
+  return result();
 }

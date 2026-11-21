@@ -242,7 +242,7 @@ describe('Load Anyway override chain (UI helper → service → residency)', () 
     expect(overridePrompts).toHaveLength(1);
   });
 
-  it('session memory: after a Load-Anyway succeeds for a model, re-loading the SAME model skips the gate entirely (no second prompt)', async () => {
+  it('Load Anyway covers that one load: re-loading the SAME model after an eviction is gated (and prompts) again', async () => {
     registerCleanVictim();
     useAppStore.setState({ downloadedModels: [bigGguf()] });
 
@@ -252,23 +252,21 @@ describe('Load Anyway override chain (UI helper → service → residency)', () 
     mockLlmService.isModelLoaded.mockReturnValue(true);
     await first.tapLoadAnyway();
     expect(getAppState().activeModelId).toBe('big-gguf');
-    expect(modelResidencyManager.hasSessionOverride('big-gguf')).toBe(true);
 
     // Simulate the model later being evicted (RAM pressure) so a reload is a real load.
     mockLlmService.isModelLoaded.mockReturnValue(false);
+    modelResidencyManager.release('text');
+    registerCleanVictim();
     mockLlmService.loadModel.mockClear();
 
-    // Second run: the session override is remembered → NO "Insufficient Memory" prompt,
-    // it just loads. The user is not re-interrogated every swap.
+    // Second run: nothing was remembered, so the gate runs again: the user is asked again and
+    // nothing loads (or is evicted) without a fresh Load Anyway.
     const second = driveLoad('big-gguf');
     await second.start();
-    mockLlmService.isModelLoaded.mockReturnValue(true);
     await flushPromises();
 
-    expect(second.alerts.some(a => a.title === 'Insufficient Memory')).toBe(
-      false,
-    );
-    expect(mockLlmService.loadModel).toHaveBeenCalledTimes(1);
-    expect(getAppState().activeModelId).toBe('big-gguf');
+    expect(second.alerts.some(a => a.title === 'Insufficient Memory')).toBe(true);
+    expect(mockLlmService.loadModel).not.toHaveBeenCalled();
+    expect(modelResidencyManager.isResident('whisper')).toBe(true);
   });
 });

@@ -405,7 +405,7 @@ class ImageGenerationService {
           ...engineOptions,
           // img2img: forward a reference image + the configurable denoise strength from settings
           // (per-request override wins). Dormant for plain txt2img (no initImage) — the native
-          // body only becomes img2img when init_img is present.
+          // body only becomes img2img when `image` is present (LocalDreamModule.kt).
           ...(params.initImage
             ? {
                 initImage: params.initImage,

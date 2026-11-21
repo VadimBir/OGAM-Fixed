@@ -128,8 +128,6 @@ export type AppSettings = {
   textLoras?: TextLora[];
   /** Per-request LoRA scales for the user's llama-server, keyed by its API root (textLoraRemote). */
   remoteTextLoras?: Record<string, RemoteTextLoraScale[]>;
-  /** Civitai search: include NSFW models and previews. Unset = off (store-safe default). */
-  civitaiShowNsfw?: boolean;
   /** sd.cpp: weight type converted to at load (the file is not rewritten); 'auto' keeps the file's. */
   imageSdWeightType?: SdWeightType;
   /** sd.cpp: flash attention in the UNet (streams attention scores instead of materialising them). */

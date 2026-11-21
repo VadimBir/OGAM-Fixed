@@ -1,7 +1,14 @@
 import React from 'react';
 import { View, Text, Switch, TouchableOpacity } from 'react-native';
 import RNFS from 'react-native-fs';
+import { pick, types, isErrorWithCode, errorCodes } from '@react-native-documents/picker';
 import { SliderSetting } from './SliderSetting';
+import { CustomAlert, showAlert, hideAlert, initialAlertState, type AlertState } from './CustomAlert';
+import { importSdCheckpointOrLora } from '../screens/ModelsScreen/importSdCheckpoint';
+import { getErrorMessage } from '../screens/ModelsScreen/importHelpers';
+import { isSdCppCandidateFileName } from '../services/sdCppModelDetection';
+import { textSafetensorsRefusal } from '../services/textLora';
+import { isPickerStuck } from '../utils/pickerErrorUtils';
 import { useTheme, useThemedStyles } from '../theme';
 import type { ThemeColors } from '../theme';
 import { useAppStore } from '../stores';
@@ -32,6 +39,11 @@ const createStyles = (colors: ThemeColors) => ({
   remove: { color: colors.error, fontSize: 12, marginRight: 10 },
   estimate: { color: colors.text, fontSize: 12, marginTop: 8, fontVariant: ['tabular-nums' as const] },
   warning: { color: colors.error, fontSize: 12, marginTop: 2 },
+  button: {
+    marginTop: 10, paddingVertical: 8, paddingHorizontal: 12, borderRadius: 8,
+    borderWidth: 1, borderColor: colors.border, alignItems: 'center' as const,
+  },
+  buttonText: { color: colors.primary, fontSize: 14 },
 });
 type Styles = ReturnType<typeof createStyles>;
 
@@ -91,6 +103,72 @@ function loraMemoryNote(weightType: SdWeightType): string {
     : `With ${weightType} weights, LoRAs are applied at run time: each enabled LoRA stays in RAM (about its file size, not in the RAM estimate above) and every step does extra work.`;
 }
 
+/**
+ * Picks one .safetensors/.ckpt and runs the SAME import as Models → Import (importSdCheckpointOrLora:
+ * the header decides LoRA vs checkpoint; a checkpoint is registered as an sd.cpp model, a text-weights
+ * file is refused). Busy/progress on the button, result in an alert.
+ */
+const ImportLoraButton: React.FC<{ styles: Styles }> = ({ styles }) => {
+  const { addDownloadedImageModel, activeImageModelId, setActiveImageModelId } = useAppStore();
+  const [busy, setBusy] = React.useState(false);
+  const [progress, setProgress] = React.useState<{ fraction: number; fileName: string } | null>(null);
+  const [alertState, setAlertState] = React.useState<AlertState>(initialAlertState);
+  const pickingRef = React.useRef(false);
+
+  const handleImport = async () => {
+    if (pickingRef.current) return;
+    pickingRef.current = true;
+    setBusy(true);
+    try {
+      const [file] = await pick({ type: [types.allFiles], allowMultiSelection: false });
+      if (!file) return;
+      const name = (file.name?.trim() || decodeURIComponent(file.uri.split('/').pop() ?? '') || 'unknown').split('/').pop() || 'unknown';
+      if (!isSdCppCandidateFileName(name)) {
+        setAlertState(showAlert('Invalid File', 'Pick a Stable Diffusion LoRA (.safetensors). A .safetensors/.ckpt checkpoint is imported as a model.'));
+        return;
+      }
+      setProgress({ fraction: 0, fileName: name });
+      const textRefusal = name.toLowerCase().endsWith('.safetensors') ? await textSafetensorsRefusal(file.uri) : null;
+      if (textRefusal) {
+        setAlertState(showAlert('Convert to GGUF first', textRefusal));
+        return;
+      }
+      await importSdCheckpointOrLora(
+        { uri: file.uri, name, size: file.size },
+        { addDownloadedImageModel, activeImageModelId, setActiveImageModelId, setImportProgress: setProgress, setAlertState },
+      );
+    } catch (error: unknown) {
+      if (isErrorWithCode(error) && error.code === errorCodes.OPERATION_CANCELED) return;
+      if (isPickerStuck(error)) {
+        setAlertState(showAlert('File Picker Unavailable', "The file picker isn't responding. Please close and reopen the app, then try again."));
+        return;
+      }
+      setAlertState(showAlert('Import Failed', getErrorMessage(error)));
+    } finally {
+      pickingRef.current = false;
+      setBusy(false);
+      setProgress(null);
+    }
+  };
+
+  return (
+    <>
+      <TouchableOpacity style={styles.button} disabled={busy} onPress={handleImport} testID="image-lora-import">
+        <Text style={styles.buttonText}>
+          {busy ? (progress ? `Importing ${progress.fileName} ${Math.round(progress.fraction * 100)}%` : 'Working...') : 'Import LoRA (.safetensors)'}
+        </Text>
+      </TouchableOpacity>
+      <CustomAlert
+        visible={alertState.visible}
+        title={alertState.title}
+        message={alertState.message}
+        buttons={alertState.buttons}
+        onClose={() => setAlertState(hideAlert())}
+      />
+    </>
+  );
+};
+
 const LoraList: React.FC<{ model: ONNXImageModel; styles: Styles }> = ({ model, styles }) => {
   const { colors } = useTheme();
   const { settings, updateSettings } = useAppStore();
@@ -108,7 +186,7 @@ const LoraList: React.FC<{ model: ONNXImageModel; styles: Styles }> = ({ model, 
       <Text style={styles.label}>LoRA</Text>
       <Text style={styles.desc}>
         {loras.length === 0
-          ? 'Import an SD LoRA .safetensors from Models → Import; it is detected automatically.'
+          ? 'No LoRAs yet. Tap "Import LoRA (.safetensors)" below to add an SD LoRA; its base model is detected automatically.'
           : `Enabled LoRAs apply to every generation with this ${sdFamilyLabel(model.sdFamily)} checkpoint. ${loraMemoryNote(settings.imageSdWeightType ?? 'auto')}`}
       </Text>
       {loras.map(lora => {
@@ -148,6 +226,7 @@ const LoraList: React.FC<{ model: ONNXImageModel; styles: Styles }> = ({ model, 
         </View>
         );
       })}
+      <ImportLoraButton styles={styles} />
     </View>
   );
 };
@@ -261,9 +340,11 @@ export const ImageEngineSettings: React.FC<{ compact?: boolean }> = ({ compact }
           <Text style={styles.label}>LoRA</Text>
           <Text style={styles.desc} testID="lora-engine-note">
             {loraCount > 0
-              ? `LoRA needs the sd.cpp (GPU) engine. Your ${loraCount} LoRA${loraCount === 1 ? ' is' : 's are'} not applied with this model; select a .safetensors checkpoint to use ${loraCount === 1 ? 'it' : 'them'}.`
-              : 'LoRA needs the sd.cpp (GPU) engine (a .safetensors checkpoint).'}
+              ? `LoRA needs the sd.cpp (GPU) engine. Your ${loraCount} LoRA${loraCount === 1 ? ' is' : 's are'} not applied with this model; select a .safetensors checkpoint to use ${loraCount === 1 ? 'it' : 'them'}. LoRAs do not apply to NPU models: merge the LoRA into the checkpoint on a PC before NPU conversion.`
+              : 'LoRA needs the sd.cpp (GPU) engine (a .safetensors checkpoint). LoRAs do not apply to NPU models: merge the LoRA into the checkpoint on a PC before NPU conversion.'}
           </Text>
+          {/* Import works on every engine: the LoRA is kept and applies once a GPU checkpoint is selected. */}
+          <ImportLoraButton styles={styles} />
         </View>
       </>
     );

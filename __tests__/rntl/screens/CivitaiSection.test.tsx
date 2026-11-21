@@ -68,22 +68,23 @@ beforeEach(() => {
   useDownloadStore.setState({ downloads: {}, downloadIdIndex: {} } as any);
   useAppStore.setState(s => ({
     downloadedImageModels: [],
-    settings: { ...s.settings, civitaiShowNsfw: undefined, imageLoras: [] },
+    settings: { ...s.settings, imageLoras: [] },
   }));
 });
 
 describe('CivitaiSection', () => {
-  it('searches SD 1.5 checkpoints with NSFW off on open and renders a result card', async () => {
-    const { getByText, getByTestId } = render(<CivitaiSection setAlertState={jest.fn()} />);
+  it('searches SD 1.5 checkpoints on open with no NSFW filter and renders a result card', async () => {
+    const { getByText, getByTestId, queryByTestId } = render(<CivitaiSection setAlertState={jest.fn()} />);
     await waitFor(() => expect(getByTestId('civitai-result-0')).toBeTruthy());
     expect(mockSearch).toHaveBeenCalledWith(expect.objectContaining({
-      query: '', type: 'Checkpoint', family: 'sd1', showNsfw: false, cursor: null,
+      query: '', type: 'Checkpoint', family: 'sd1', cursor: null,
     }));
+    expect(mockSearch.mock.calls[0][0]).not.toHaveProperty('showNsfw');
     expect(getByText(/DreamShaper/)).toBeTruthy();
     expect(getByText(/SD 1\.5 · 2\.0 GB · Checkpoint · fp16/)).toBeTruthy();
     expect(getByTestId('civitai-thumb-0').props.source).toEqual({ uri: 'https://image.civitai.com/a.jpeg' });
     expect(getByText(/on the GPU \(Vulkan\) in this build/)).toBeTruthy();
-    expect(getByTestId('civitai-nsfw-switch').props.value).toBe(false);
+    expect(queryByTestId('civitai-nsfw-switch')).toBeNull();
   });
 
   it('runs a typed search on submit', async () => {
@@ -144,14 +145,6 @@ describe('CivitaiSection', () => {
     expect(server.props.accessibilityState).toEqual({ disabled: true });
     expect(server.props.onPress).toBeUndefined();
     expect(getAllByText(SERVER_DOWNLOAD_UNAVAILABLE).length).toBe(1);
-  });
-
-  it('persists the NSFW toggle and re-searches with it', async () => {
-    const { getByTestId } = render(<CivitaiSection setAlertState={jest.fn()} />);
-    await waitFor(() => expect(mockSearch).toHaveBeenCalledTimes(1));
-    fireEvent(getByTestId('civitai-nsfw-switch'), 'valueChange', true);
-    expect(useAppStore.getState().settings.civitaiShowNsfw).toBe(true);
-    await waitFor(() => expect(mockSearch).toHaveBeenLastCalledWith(expect.objectContaining({ showNsfw: true })));
   });
 
   it('hides checkpoints too large for the RAM budget and says how many were hidden', async () => {

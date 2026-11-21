@@ -147,21 +147,12 @@ describe('Chat <-> Home text-model selection parity (OD3)', () => {
     await activeModelService.syncWithNativeState();
   });
 
-  /** Sanity: with the image model co-resident, the predictive pre-check REJECTS
-   *  the text model (the divergence exists). */
-  it('the predictive checkMemoryForModel rejects the text model while an image model is resident (the divergence)', async () => {
-    await makeImageResident();
-    const text = createDownloadedModel({ id: 'txt', engine: 'llama' as any, fileSize: TEXT_FILE_BYTES });
-    useAppStore.setState({
-      ...useAppStore.getState(),
-      downloadedModels: [text],
-    });
-
-    const check = await activeModelService.checkMemoryForModel('txt', 'text');
-    expect(check.canLoad).toBe(false);
-    expect(check.severity).toBe('critical');
-    // It counted the resident image model — that's why it over-counts and blocks.
-    expect(check.currentlyLoadedMemoryGB).toBeGreaterThan(0);
+  /** The divergent predictive pre-check (checkMemoryForModel, which added the resident image
+   *  model's estimate and rejected) had no callers and was removed: the residency gate in the
+   *  loader is the only memory decision, on both paths. */
+  it('there is no predictive pre-check left to diverge from the loader gate', () => {
+    expect((activeModelService as any).checkMemoryForModel).toBeUndefined();
+    expect((activeModelService as any).checkMemoryForDualModel).toBeUndefined();
   });
 
   /**

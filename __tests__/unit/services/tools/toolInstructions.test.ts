@@ -115,21 +115,19 @@ describe('tool schemas (native paths: llama Jinja, LiteRT, OpenAI, Ollama)', () 
         function: {
           name: 'generate_image',
           description:
-            'Make an image and show it in the chat. Call it at once when the user asks to draw, paint, ' +
-            'render or create a picture, photo, logo or artwork: do not ask first and do not describe the ' +
-            'image in text instead. Only prompt is needed; leave the other arguments out unless the user ' +
-            'asked for them (the app settings are used). After the result, reply with one short sentence.' +
+            'Draw a picture and show it in the chat. Call it at once when the user asks for an image; do not ' +
+            'describe one in text. Only prompt is required; add other arguments only if the user gave them.' +
             ' Example arguments: {"prompt":"a red fox in a snowy forest, golden hour"}',
           parameters: {
             type: 'object',
             properties: {
               prompt: { type: 'string', description: 'English description: subject, setting, style, lighting.' },
-              width: { type: 'integer', description: 'Optional. Pixels, 64-512, multiple of 64. Default: app setting.' },
-              height: { type: 'integer', description: 'Optional. Pixels, 64-512, multiple of 64. Default: app setting.' },
-              steps: { type: 'integer', description: 'Optional. 1-50; more = slower, finer. Default: app setting.' },
-              guidance: { type: 'number', description: 'Optional. How strictly to follow the prompt, 1-20. Default: app setting.' },
-              seed: { type: 'integer', description: 'Optional. Same seed = same image. Default: random.' },
-              negative_prompt: { type: 'string', description: 'Optional. Things to leave out, e.g. "blurry, text".' },
+              width: { type: 'integer', description: 'Pixels, 64-512, multiple of 64.' },
+              height: { type: 'integer', description: 'Pixels, 64-512, multiple of 64.' },
+              steps: { type: 'integer', description: '1-50.' },
+              guidance: { type: 'number', description: 'CFG, 1-20.' },
+              seed: { type: 'integer', description: 'Same seed = same image.' },
+              negative_prompt: { type: 'string', description: 'Things to leave out.' },
             },
             required: ['prompt'],
           },

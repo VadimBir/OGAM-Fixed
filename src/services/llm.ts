@@ -14,7 +14,11 @@ import {
   validateModelFile, checkMemoryForModel, safeCompletion, resolveSafeContext,
   describeGpuFallback, isTruncatedResult, modelMaxContextFromMetadata,
 } from './llmHelpers';
-import { awaitMemoryReclaim, effectiveAvailableMB, preloadSafetyMarginMB } from './memoryBudget';
+import {
+  awaitMemoryReclaim, effectiveAvailableMB, liveRamMarginMB, textMemoryFootprint, textWeightsReclaimable,
+  type TextMemoryFootprint,
+} from './memoryBudget';
+import { textOverheadMultiplier } from './activeModelService/types';
 import { modelResidencyManager } from './modelResidency';
 import { hardwareService } from './hardware';
 import { formatLlamaMessages, buildOAIMessages } from './llmMessages';
@@ -71,7 +75,8 @@ class LLMService {
   private hashString(value: string): string { return hashString(value); }
   private ensureSessionCacheDir(): Promise<void> { return ensureSessionCacheDir(this.sessionCacheDir); }
   private getSessionPath(promptHash: string): string { return getSessionPath(this.sessionCacheDir, promptHash); }
-  private async validateAndPrepareModel(modelPath: string, override: boolean = false): Promise<{ fileSize: number; memCheck: Awaited<ReturnType<typeof checkMemoryForModel>>; params: ReturnType<typeof buildModelParams> }> {
+  private async validateAndPrepareModel(modelPath: string, opts: { override?: boolean; memoryGateApproved?: boolean; mmProjPath?: string } = {}): Promise<{ fileSize: number; memCheck: Awaited<ReturnType<typeof checkMemoryForModel>>; params: ReturnType<typeof buildModelParams> }> {
+    const { override = false, memoryGateApproved = false, mmProjPath } = opts;
     logger.log(`[LLM] validateAndPrepareModel: ${modelPath}`);
     if (!await RNFS.exists(modelPath)) throw new Error(`Model file not found at: ${modelPath}`);
     const validation = await validateModelFile(modelPath);
@@ -104,42 +109,56 @@ class LLMService {
     if (modelMaxContext && (settings.contextLength || 0) > modelMaxContext) {
       logger.log(`[LLM] Context clamped ${settings.contextLength} -> ${modelMaxContext} (model trained context)`);
     }
-    logger.log(`[LLM] Resolved params: threads=${params.nThreads}, batch=${params.nBatch}, ctx=${params.ctxLen}, gpuLayers=${params.nGpuLayers}, ubatch=${params.nUbatch}, mmap=${(params.baseParams as { use_mmap?: boolean }).use_mmap}`);
+    const useMmap = (params.baseParams as { use_mmap?: boolean }).use_mmap !== false;
+    logger.log(`[LLM] Resolved params: threads=${params.nThreads}, batch=${params.nBatch}, ctx=${params.ctxLen}, gpuLayers=${params.nGpuLayers}, ubatch=${params.nUbatch}, mmap=${useMmap}`);
     if (params.flashAttnWarning) logger.warn(`[LLM] Flash attention: ${params.flashAttnWarning}`);
-    // Use the EFFECTIVE cache type, not the raw setting: an unset setting resolves in
-    // buildModelParams (q8_0, or f16 with flash attention off off-Android), so keying off
-    // settings.cacheType alone could pick the wrong KV estimate.
-    const quantizedCache = !params.usesF16Cache;
-    // Android: the gate reads LIVE available RAM (no reclaim credit) and keeps the live safety
-    // margin free (memoryBudget owns both numbers). iOS: raw reading, no extra margin (unchanged).
+    // Android: live available RAM, uncapped, minus the live margin. The margin is the residency
+    // gate's live headroom (memoryBudget owns both numbers), so this check and the gate agree.
     // Policy comes from the residency manager (the authoritative owner).
     const policy = modelResidencyManager.getLoadPolicy();
-    const safetyMarginMB = preloadSafetyMarginMB({ platform: Platform.OS, policy });
+    const safetyMarginMB = liveRamMarginMB(policy);
     const getMem = async (): Promise<{ available: number; total: number; used: number }> => {
       const raw = await hardwareService.getAppMemoryUsage();
-      const availableMB = effectiveAvailableMB(raw.available / (1024 * 1024), raw.total / (1024 * 1024), {
-        platform: Platform.OS,
-        policy,
-      });
-      return { ...raw, available: availableMB * 1024 * 1024 };
+      return { ...raw, available: effectiveAvailableMB(raw.available / (1024 * 1024)) * 1024 * 1024 };
     };
     const archBytes = await this.readArchBytes(modelPath, params, fileSize);
     // Enabled text LoRAs are copied into llama.cpp buffers (not mmapped): count their bytes as weights.
     const loraBytes = await enabledTextLoraBytes(undefined, params.loraList.map(l => l.path));
     if (loraBytes > 0) logger.log(`[LLM] Text LoRA: ${params.loraList.length} adapter(s), ${(loraBytes / 1048576).toFixed(0)}MB counted in the memory check`);
-    const weightsBytes = fileSize + loraBytes;
-    let memCheck = await checkMemoryForModel({ modelFileSize: weightsBytes, contextLength: params.ctxLen, getAvailableMemory: getMem, quantizedCache, archBytes, safetyMarginMB });
-    if (!memCheck.safe) {
+    const mmProjBytes = mmProjPath ? ((await statFile(mmProjPath))?.size ?? 0) : 0;
+    const footprint = this.textFootprint({ fileSize, mmProjBytes, loraBytes, archBytes, useMmap, inferenceBackend: settings.inferenceBackend });
+    let memCheck = await checkMemoryForModel({ requiredMB: footprint.livePeakMB, getAvailableMemory: getMem, safetyMarginMB });
+    if (!memCheck.safe && memoryGateApproved) {
+      // The residency gate approved this load before evicting anything: never evict-then-refuse.
+      logger.warn(`[LLM] Live RAM is below the estimate after the residency gate approved the load (needs ~${Math.round(memCheck.estimatedMB)}MB + ${safetyMarginMB}MB margin, ${Math.round(memCheck.availableMB)}MB free); loading`);
+    } else if (!memCheck.safe) {
       // Keep the selected context. A failed estimate asks for Load Anyway; an explicit
       // override passes the selected value to native init even when memory is tight.
-      const decision = await resolveSafeContext({ fileSize: weightsBytes, requestedCtx: params.ctxLen, quantizedCache, override, getAvailableMemory: getMem, archBytes, safetyMarginMB });
+      const decision = await resolveSafeContext({ requiredMB: footprint.livePeakMB, requestedCtx: params.ctxLen, override, getAvailableMemory: getMem, safetyMarginMB });
       memCheck = decision.memCheck;
     }
-    logger.log(`[LLM] Memory check: estimatedMB=${memCheck.estimatedMB.toFixed(0)}, availableMB=${memCheck.availableMB.toFixed(0)}, safe=${memCheck.safe}, ctx=${params.ctxLen}`);
+    logger.log(`[LLM] Memory check: estimatedMB=${memCheck.estimatedMB.toFixed(0)} (peakMB=${footprint.peakMB}), availableMB=${memCheck.availableMB.toFixed(0)}, safe=${memCheck.safe}, gateApproved=${memoryGateApproved}, ctx=${params.ctxLen}`);
     return { fileSize, memCheck, params };
   }
+  /**
+   * The text-model memory charge, from the same formula the residency gate uses
+   * (memoryBudget.textMemoryFootprint over estimateLlamaMemory's KV + compute; activeModelService/memory).
+   * Header unreadable → the same file-size heuristic as the gate (hardwareService.estimateModelRam).
+   */
+  private textFootprint(args: { fileSize: number; mmProjBytes: number; loraBytes: number; archBytes?: { kvBytes: number; computeBytes: number }; useMmap: boolean; inferenceBackend?: string }): TextMemoryFootprint {
+    const { fileSize, mmProjBytes, loraBytes, archBytes, useMmap, inferenceBackend } = args;
+    if (!archBytes) {
+      const mb = Math.ceil(hardwareService.estimateModelRam({ fileSize, mmProjFileSize: mmProjBytes }, textOverheadMultiplier(inferenceBackend)) / (1024 * 1024));
+      return { residentMB: mb, peakMB: mb, liveResidentMB: mb, livePeakMB: mb };
+    }
+    const backend = inferenceBackend ?? INFERENCE_BACKENDS.CPU;
+    return textMemoryFootprint(
+      { weightsBytes: fileSize, anonBytes: mmProjBytes + loraBytes + archBytes.kvBytes + archBytes.computeBytes },
+      textWeightsReclaimable({ useMmap, gpuLayers: backend === INFERENCE_BACKENDS.CPU ? 0 : 1 }),
+    );
+  }
   /** KV + compute bytes from the GGUF header (layers, KV heads, head dims, SWA, vocab); undefined
-   *  when the header can't be read, in which case the fit check keeps its heuristic. */
+   *  when the header can't be read, in which case the fit check uses the file-size heuristic. */
   private async readArchBytes(modelPath: string, params: ReturnType<typeof buildModelParams>, fileSize: number): Promise<{ kvBytes: number; computeBytes: number } | undefined> {
     try {
       const metadata = await loadLlamaModelInfo(modelPath) as Record<string, unknown>;
@@ -178,7 +197,12 @@ class LLMService {
     useAppStore.getState().setModelMaxContext(getModelMaxContext(context));
     logger.log(`[LLM] Model loaded, vision: ${this.supportsVision()}, tools: ${this.toolCallingSupported}, thinking: ${this.thinkingSupported}`);
   }
-  async loadModel(modelPath: string, mmProjPath?: string, opts?: { override?: boolean }): Promise<void> {
+  /**
+   * `opts.memoryGateApproved`: the caller already ran the residency gate (modelResidency makeRoomFor),
+   * which made the free-RAM decision with the same estimate BEFORE evicting anything. The check here
+   * then only logs; refusing now would evict-then-refuse. `opts.override`: "Load Anyway".
+   */
+  async loadModel(modelPath: string, mmProjPath?: string, opts?: { override?: boolean; memoryGateApproved?: boolean }): Promise<void> {
     const mutex = this.acquireContextMutex();
     try {
       await mutex.ready;
@@ -188,21 +212,29 @@ class LLMService {
         logger.log('[LLM] Releasing previous context before loading new model');
         await this.doUnloadModel();
       }
-      const { fileSize, memCheck, params } = await this.validateAndPrepareModel(modelPath, opts?.override);
+      const { fileSize, memCheck, params } = await this.validateAndPrepareModel(modelPath, { override: opts?.override, memoryGateApproved: opts?.memoryGateApproved, mmProjPath });
       if (mmProjPath && !await RNFS.exists(mmProjPath)) { logger.warn('[LLM] MMProj file not found, disabling vision support'); mmProjPath = undefined; }
       const { baseParams, nThreads, nBatch, ctxLen, nGpuLayers } = params;
       this.weightsMmapped = (baseParams as { use_mmap?: boolean }).use_mmap !== false;
       this.currentSettings = { nThreads, nBatch, contextLength: ctxLen };
       logger.log(`[LLM] Loading model: ctx=${ctxLen}, threads=${nThreads}, batch=${nBatch}, fileSize=${(fileSize / (1024 * 1024)).toFixed(0)}MB, availRAM=${memCheck.availableMB.toFixed(0)}MB`);
       if (params.loraList.length > 0) { watchLoraCpuFallback(); setTextLoraStatus({ cpuFallback: false }); }
+      // The native context once init succeeds: a failure after that (multimodal probe, capability
+      // detection) must release it, or its weights + KV stay in RAM with no owner.
+      let initialized: LlamaContext | null = null;
       try {
         const { context, gpuAttemptFailed, actualLength, attemptedGpuLayers } = await this.initConfiguredContext({ baseParams, ctxLen, nGpuLayers, fileSize });
+        initialized = context;
         // attemptedGpuLayers (post device-cap/backend resolution) is what the init actually offered the
         // GPU — the truthful layer count for the meta; nGpuLayers is the raw settings request.
         await this.applyLoadedContext({ context, actualLength, gpuAttemptFailed, nGpuLayers: attemptedGpuLayers, requestedGpuLayers: nGpuLayers, modelPath, mmProjPath });
         this.appliedLoraKey = loraListKey(params.loraList);
         if (params.loraList.length > 0) setTextLoraStatus({ lastError: null });
       } catch (error: any) {
+        if (initialized) {
+          try { await initialized.release(); } catch (e) { logger.warn('[LLM] Error releasing context after a failed load:', e); }
+          await awaitMemoryReclaim(() => Promise.resolve().then(() => hardwareService.getProcessMemory()).catch(() => null));
+        }
         this.context = null; this.currentModelPath = null; this.nativeConversationId = null; this.multimodalSupport = null;
         this.toolCallingSupported = false; this.thinkingSupported = false; this.appliedLoraKey = '';
         Object.assign(this, { gpuEnabled: false, gpuReason: '', activeGpuLayers: 0, gpuDevices: [], requestedGpuLayers: 0, gpuAttemptFailed: false });
@@ -381,6 +413,11 @@ class LLMService {
   isModelLoaded(): boolean { return this.context !== null; }
   /** Whether the loaded model's weights are file-backed (mmap) pages; false = anonymous RAM. */
   weightsAreMmapped(): boolean { return this.weightsMmapped; }
+  /** Whether the loaded model's weights are reclaimable page cache: mmapped and, on Android, with no
+   *  layer offloaded (OpenCL/HTP copy offloaded tensors into anonymous buffers). */
+  weightsAreReclaimable(): boolean {
+    return this.context !== null && textWeightsReclaimable({ useMmap: this.weightsMmapped, gpuLayers: this.activeGpuLayers });
+  }
   getLoadedModelPath(): string | null { return this.currentModelPath; }
   async generateResponse(messages: Message[], options?: { onStream?: StreamCallback; onComplete?: CompleteCallback; disableThinking?: boolean }): Promise<string> {
     const { onStream, onComplete, ...opts } = options ?? {};

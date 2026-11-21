@@ -85,7 +85,21 @@ Sources: three read-only audits (sd.cpp GPU, local-dream NPU, memory gate), 2026
 ### P6 Conversion
 - Not doable on the phone. Ship a doc and a script wrapper for PC (WSL) conversion of a Civitai SD1.5 checkpoint into an sd-qnn zip, then import that zip in the app.
 
-## Decisions needed from the user
+## User decisions (2026-11-21)
+- **D1:** the Image Studio is a bottom tab next to Chat, Models and Settings.
+- **D2:** order approved: P0, then P1, then P2. P3 is questioned: better small models come first.
+- **D3:** model size limits:
+  - at most 2 GB when chat is also in use;
+  - up to 4 GB is tolerable on the NPU;
+  - uncensored or NSFW-capable models only.
+- **D4:** `imgref` keeps 60% of the image by default (denoise 0.4).
+- **P4 confirmed:** the LLM sets the regions, with instructions per region. The default is all regions, or the LLM lists region numbers.
+- **New items:**
+  - image LoRA import button;
+  - slimmer `generate_image` tool plus a `/img` slash command with optional params;
+  - research on-device NPU without host conversion (ggml-hexagon sd.cpp) and whether the bundled local-dream core is out of date.
+
+## Decisions needed from the user (answered above)
 - D1 Studio placement: bottom tab (recommended) or a button in the chat header.
 - D2 Order: P0, then P1 + NPU img2img, then P2, then P3, then P4, then P5 (recommended); or another order.
 - D3 First newer model: SDXL on the NPU (P5a) or Klein-4B on the GPU (P5b).

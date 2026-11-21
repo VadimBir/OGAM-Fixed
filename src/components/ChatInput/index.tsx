@@ -8,6 +8,7 @@ import { VoiceRecordButton, type VoiceRecordInteractionMode } from '../VoiceReco
 import { RecordingHint } from './RecordingHint';
 import { ComposerIconsRow } from './ComposerIconsRow';
 import { triggerHaptic } from '../../utils/haptics';
+import { parseImageSlashCommand } from '../../utils/imageSlashCommand';
 import logger from '../../utils/logger';
 import { CustomAlert, showAlert, hideAlert, AlertState, initialAlertState } from '../CustomAlert';
 import { createStyles, PILL_ICON_SIZE, ANIM_DURATION_IN, ANIM_DURATION_OUT } from './styles';
@@ -260,15 +261,38 @@ export const ChatInput: React.FC<ChatInputProps> = ({
 
   const canSend = (message.trim().length > 0 || attachments.length > 0) && !disabled;
 
+  /** Gate on whether an image model is DOWNLOADED, not whether it was selected on the Home screen.
+   *  If one is downloaded but not yet selected, select it (it loads lazily on the next send). Only
+   *  warn when none exist. Shared by the image-mode toggle and the `/img` command. */
+  const ensureImageModelSelected = (): boolean => {
+    if (imageModelLoaded) return true;
+    const { downloadedImageModels, setActiveImageModelId } = useAppStore.getState();
+    if (downloadedImageModels.length === 0) {
+      setAlertState(showAlert('No Image Model', 'Download an image generation model from the Models screen to enable this feature.', [{ text: 'OK' }]));
+      return false;
+    }
+    setActiveImageModelId(downloadedImageModels[0].id);
+    return true;
+  };
+
   const handleSend = () => {
     logger.log(`[COMPOSER-SM] handleSend canSend=${canSend} disabled=${disabled} hasText=${message.trim().length > 0} attachments=${attachments.length} imageMode=${imageMode}`);
     if (!canSend) return;
+    // `/img <prompt>` draws directly (the dispatcher parses the flags). The text is kept when it
+    // cannot run, so the user can fix it.
+    const slash = parseImageSlashCommand(message);
+    if (slash && !slash.prompt) {
+      setAlertState(showAlert('Add a Prompt', 'Type what to draw after /img, for example: /img a red fox in snow --steps 20', [{ text: 'OK' }]));
+      return;
+    }
+    if (slash && !ensureImageModelSelected()) return;
     triggerHaptic('impactMedium');
     const outgoingAttachments = attachments.length > 0 ? attachments : undefined;
+    const sendImageMode: ImageModeState = slash ? 'force' : imageMode;
     if (assistantEnabled) {
-      onSend(message.trim(), outgoingAttachments, imageMode, true);
+      onSend(message.trim(), outgoingAttachments, sendImageMode, true);
     } else {
-      onSend(message.trim(), outgoingAttachments, imageMode);
+      onSend(message.trim(), outgoingAttachments, sendImageMode);
     }
     if (assistantTransitionTimer.current) {
       clearTimeout(assistantTransitionTimer.current);
@@ -286,17 +310,9 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   };
 
   const handleImageModeToggle = () => {
-    // Gate on whether an image model is DOWNLOADED, not whether it was selected
-    // on the Home screen. If one is downloaded but not yet selected, select it
-    // here (it loads lazily on the next send). Only warn when none exist.
-    if (!imageModelLoaded) {
-      const { downloadedImageModels, setActiveImageModelId } = useAppStore.getState();
-      if (downloadedImageModels.length === 0) {
-        setAlertState(showAlert('No Image Model', 'Download an image generation model from the Models screen to enable this feature.', [{ text: 'OK' }]));
-        quickSettings.hide();
-        return;
-      }
-      setActiveImageModelId(downloadedImageModels[0].id);
+    if (!ensureImageModelSelected()) {
+      quickSettings.hide();
+      return;
     }
     const newMode = IMAGE_MODE_CYCLE[(IMAGE_MODE_CYCLE.indexOf(imageMode) + 1) % IMAGE_MODE_CYCLE.length];
     setImageMode(newMode);

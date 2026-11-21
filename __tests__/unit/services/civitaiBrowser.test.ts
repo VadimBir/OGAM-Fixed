@@ -54,7 +54,7 @@ function respond(body: unknown, init: { ok?: boolean; status?: number; badJson?:
   });
 }
 
-const base = { type: 'Checkpoint' as const, family: 'sd1' as const, showNsfw: false };
+const base = { type: 'Checkpoint' as const, family: 'sd1' as const };
 
 describe('civitaiBrowser', () => {
   beforeEach(() => mockFetch.mockReset());
@@ -101,20 +101,20 @@ describe('civitaiBrowser', () => {
   });
 
   describe('search URL', () => {
-    it('carries query, type, sort, nsfw=false, family base models and cursor', () => {
+    it('carries query, type, sort, family base models and cursor, and never an nsfw filter', () => {
       const url = buildCivitaiSearchUrl({ ...base, query: ' dream shaper ', cursor: 'c1' });
       expect(url.startsWith('https://civitai.com/api/v1/models?')).toBe(true);
       expect(url).toContain('types=Checkpoint');
       expect(url).toContain('query=dream%20shaper');
       expect(url).toContain('sort=Most%20Downloaded');
-      expect(url).toContain('nsfw=false');
+      expect(url).not.toContain('nsfw=');
       expect(url).toContain('baseModels=SD%201.5');
       expect(url).toContain('cursor=c1');
       expect(url).toContain('limit=20');
     });
 
-    it('omits nsfw when the user allows NSFW, and baseModels on request', () => {
-      const url = buildCivitaiSearchUrl({ ...base, type: 'LORA', family: 'sdxl', showNsfw: true }, false);
+    it('omits baseModels on request', () => {
+      const url = buildCivitaiSearchUrl({ ...base, type: 'LORA', family: 'sdxl' }, false);
       expect(url).not.toContain('nsfw=');
       expect(url).not.toContain('baseModels');
       expect(url).toContain('types=LORA');
@@ -174,7 +174,7 @@ describe('civitaiBrowser', () => {
       });
     });
 
-    it('skips other types, other families, NSFW models and items without a runnable file', async () => {
+    it('skips other types, other families and items without a runnable file, keeps NSFW models', async () => {
       respond({
         items: [
           item({ id: 2, type: 'LORA' }),
@@ -188,8 +188,9 @@ describe('civitaiBrowser', () => {
         metadata: {},
       });
       const page = await searchCivitaiModels(base);
-      expect(page.results.map(r => r.modelId)).toEqual([6]);
-      expect(page.skipped).toBe(6);
+      expect(page.results.map(r => r.modelId)).toEqual([4, 6]);
+      expect(page.results[0].nsfw).toBe(true);
+      expect(page.skipped).toBe(5);
       expect(page.nextCursor).toBeNull();
     });
 
@@ -208,19 +209,17 @@ describe('civitaiBrowser', () => {
       expect(page.results[0].previewUrl).toBeUndefined();
     });
 
-    it('hides NSFW or unrated previews with NSFW off, shows them with NSFW on', async () => {
+    it('shows the first still preview whatever its rating (no content filter)', async () => {
       const images = [
         { url: 'https://image.civitai.com/r.jpeg', nsfwLevel: 4 },
         { url: 'https://image.civitai.com/u.jpeg' },
         { url: 'https://image.civitai.com/v.mp4', nsfwLevel: 1, type: 'video' },
         { url: 'https://image.civitai.com/s.jpeg', nsfw: 'None' },
       ];
-      respond({ items: [item({}, { images })] });
-      expect((await searchCivitaiModels(base)).results[0].previewUrl).toBe('https://image.civitai.com/s.jpeg');
       respond({ items: [item({ nsfw: true }, { images })] });
-      const on = await searchCivitaiModels({ ...base, showNsfw: true });
-      expect(on.results[0].previewUrl).toBe('https://image.civitai.com/r.jpeg');
-      expect(on.results[0].nsfw).toBe(true);
+      const page = await searchCivitaiModels(base);
+      expect(page.results[0].previewUrl).toBe('https://image.civitai.com/r.jpeg');
+      expect(page.results[0].nsfw).toBe(true);
     });
 
     it('reads the cursor from metadata.nextPage when nextCursor is absent', async () => {

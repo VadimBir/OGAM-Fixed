@@ -4,7 +4,8 @@ import { liteRTService } from '../litert';
 import { loadedTextEngines } from '../engines';
 import { imageEngineRouter as onnxImageGeneratorService } from '../imageEngineRouter';
 import { sdCppLoadConfigFromSettings } from '../sdCppGenerator';
-import { estimateImageModelRamBytes, estimateSdCppModelMemory } from '../imageModelMemory';
+import { estimateImageModelRamBytes, estimateSdCppModelMemory, imageModelResidencyMB } from '../imageModelMemory';
+import { awaitMemoryReclaim, INCOMING_PEAK_FACTOR } from '../memoryBudget';
 import { hardwareService } from '../hardware';
 import { modelResidencyManager } from '../modelResidency';
 import { OverridableMemoryError, ImageModelIncompleteError } from '../modelLoadErrors';
@@ -21,16 +22,9 @@ import type { DownloadedModel, ONNXImageModel } from '../../types';
 import type {
   ActiveModelInfo,
   ResourceUsage,
-  ModelType,
-  MemoryCheckResult,
   ModelChangeListener,
 } from './types';
-import {
-  checkMemoryForModel as _checkMemoryForModel,
-  checkMemoryForDualModel as _checkMemoryForDualModel,
-  getCurrentlyLoadedMemoryGB as _getCurrentlyLoadedMemoryGB,
-  estimateTextModelMemoryMB,
-} from './memory';
+import { estimateTextModelMemory, textFootprintOf } from './memory';
 import { doLoadTextModel, doLoadImageModel, checkImageModelCanLoad } from './loaders';
 import {
   getResourceUsage as _getResourceUsage,
@@ -177,17 +171,25 @@ class ActiveModelService {
     if (!model) {
       throw new Error('Model not found');
     }
-    // Use estimated runtime RAM (file size + overhead), not just file size,
-    // so the residency budget reflects the model's real memory footprint.
-    // GPU-aware overhead: a GPU/NPU backend adds working buffers in system RAM the flat CPU 1.5× misses.
-    const textSizeMB = await estimateTextModelMemoryMB(model);
+    // One estimate (estimateLlamaMemory for GGUF; file-size heuristic otherwise) for the gate and
+    // the register. The load is charged its peak (x1.1); once loaded it is charged its resident
+    // bytes. Reclaimable mmapped weights are left out of the live free-RAM charge.
+    const textEstimate = await estimateTextModelMemory(model);
+    const incoming = textFootprintOf(textEstimate, textEstimate.predictedReclaimable);
     // LiteRT weights + KV are dirty/accelerator memory → gated on REAL free RAM (mmap GGUF
     // stays clean/physical-cap). Derived once so makeRoomFor and register agree.
     const textIsDirty = model.engine === 'litert';
-    // Residency manager is authoritative: evict other generation models to fit the budget.
+    // Residency manager is authoritative, and it makes the free-RAM decision BEFORE evicting: a
+    // load it approves is not refused afterwards (llm.ts gets memoryGateApproved), so a resident
+    // image model is never evicted for a text load that then fails its memory check.
     // Evicted unloads are the non-locking internal variants (we hold the lock), so no deadlock.
     const room = await modelResidencyManager.makeRoomFor(
-      { key: 'text', type: 'text', modelId, sizeMB: textSizeMB, dirtyMemory: textIsDirty },
+      {
+        key: 'text', type: 'text', modelId, sizeMB: incoming.peakMB,
+        // GGUF: always state the live part, so the gate checks free RAM on every platform (iOS too,
+        // where it is otherwise physical-only for clean loads) before evicting anything.
+        liveMB: model.engine === 'llama' ? incoming.livePeakMB : undefined, dirtyMemory: textIsDirty,
+      },
       { override: opts?.override },
     );
     // First refusal is OVERRIDABLE ("Load Anyway"); a refusal UNDER override is a hard limit → plain Error.
@@ -204,7 +206,7 @@ class ActiveModelService {
       modelId,
       store,
       timeoutMs,
-      override: !!opts?.override || modelResidencyManager.hasSessionOverride(modelId),
+      override: !!opts?.override,
       loadedTextModelId: this.loadedTextModelId,
       onLoaded: id => {
         this.setLoadedText(id);
@@ -212,9 +214,15 @@ class ActiveModelService {
         // A GGUF loaded with mmap OFF (shouldDisableMmap / mmapMode 'off') holds its weights in
         // anonymous RAM: register it as dirty so the dirty ceiling counts it (it was always 'clean').
         const residentDirty = textIsDirty || llmService.weightsAreMmapped?.() === false;
+        // Charged at its resident bytes, with the weights' actual mmap/offload state.
+        const resident = textFootprintOf(textEstimate, !textIsDirty && !!llmService.weightsAreReclaimable?.());
         modelResidencyManager.register(
           // isBusy: the Android trim release never drops the text model mid-generation.
-          { key: 'text', type: 'text', modelId, sizeMB: textSizeMB, dirtyMemory: residentDirty, isBusy: isTextGenerationInFlight },
+          {
+            key: 'text', type: 'text', modelId, sizeMB: resident.residentMB,
+            liveMB: model.engine === 'llama' ? resident.liveResidentMB : undefined,
+            dirtyMemory: residentDirty, isBusy: isTextGenerationInFlight,
+          },
           () => this.doUnloadTextModelLocked(true), // eviction keeps the selection
         );
       },
@@ -351,11 +359,12 @@ class ActiveModelService {
         modelResidencyManager.register(
           // dirtyMemory: a resident CoreML/ONNX image model's working set can't be paged
           // out like clean mmap weights — its presence must gate other loads on live
-          // os_proc RAM (budgetForSpec dirty-pressure), or a sidecar stacks onto its
+          // os_proc RAM (capacityForSpec dirty-pressure), or a sidecar stacks onto its
           // generation spike and jetsams the app. Without this flag the resident-dirty
           // arm of the gate is a no-op.
           // isBusy: the trim / post-generation release never drops it mid-generation.
-          { key: 'image', type: 'image', dirtyMemory: true, sizeMB: Math.round(estimateImageModelRamBytes(model) / (1024 * 1024)), isBusy: isImageGenerationInFlight },
+          // sizeMB: resident bytes (no x1.1, no generation compute), see imageModelResidencyMB.
+          { key: 'image', type: 'image', modelId: id, dirtyMemory: true, sizeMB: imageModelResidencyMB(model).residentMB, isBusy: isImageGenerationInFlight },
           () => this.doUnloadImageModelLocked(true), // eviction keeps the selection
         );
       },
@@ -386,19 +395,37 @@ class ActiveModelService {
       await this.imageLoadPromise;
     }
     const store = useAppStore.getState();
+    // "Loaded" (isModelLoaded) means alive AND ready on local-dream (LocalDreamModule.kt
+    // isModelLoaded); a server process that is alive but not ready yet (starting, or flagged
+    // not-ready after a failed request) still holds its RAM. Its model path stays set from start
+    // until stopServer, so a set path also means a process to stop.
     const isNativeLoaded = await onnxImageGeneratorService.isModelLoaded();
+    const nativePath = isNativeLoaded ? null : await onnxImageGeneratorService.getLoadedModelPath().catch(() => null);
+    const nativeHoldsMemory = isNativeLoaded || nativePath != null;
     if (
       !store.activeImageModelId &&
       !this.loadedImageModelId &&
-      !isNativeLoaded
+      !nativeHoldsMemory
     ) {
       return;
     }
     this.loadingState.image = true;
     this.notifyListeners();
     try {
-      if (isNativeLoaded) {
+      if (nativeHoldsMemory) {
+        // Like the text unload (llm.ts doUnloadModel): the unload is done when the memory is back,
+        // so the next load never allocates on top of the outgoing image model. The baseline is read
+        // BEFORE the unload: local-dream's unloadModel resolves only after its server process has
+        // exited (LocalDreamModule.kt stopServer), so a reading taken after it never sees the drop.
+        const readMemory = () => Promise.resolve().then(() => hardwareService.getProcessMemory()).catch(() => null);
+        const baseline = await readMemory();
+        const residentMB = modelResidencyManager.getResidents().find(r => r.key === 'image')?.sizeMB;
         await onnxImageGeneratorService.unloadModel();
+        // A small model frees less than the default 200MB: wait for half its resident size instead.
+        await awaitMemoryReclaim(readMemory, {
+          baseline,
+          minDropMB: residentMB ? Math.max(1, Math.min(200, Math.round(residentMB / 2))) : undefined,
+        });
       }
       this.loadedImageModelId = null;
       this.loadedImageModelThreads = null;
@@ -449,9 +476,9 @@ class ActiveModelService {
     const fullMB = Math.round(estimateImageModelRamBytes(model) / (1024 * 1024));
     if (!this.imageWeightsMaterialized || model.backend !== 'sdcpp') return fullMB;
     const est = estimateSdCppModelMemory(model);
-    // totalMB = (weights + loadBuffer + max(compute) + overhead) * safety, so subtracting the
-    // resident part at the same 1.1 safety factor leaves the compute + overhead still to come.
-    return Math.max(0, Math.round(est.totalMB - (est.weightsMB + est.loadBufferMB) * 1.1));
+    // Resident now: weights + LoRA + overhead (est.residentMB). Still to come: the larger compute
+    // buffer, charged once with the incoming peak factor.
+    return Math.ceil(Math.max(est.unetComputeMB, est.vaeComputeMB) * INCOMING_PEAK_FACTOR);
   }
 
   /** A local image generation finished on the loaded model: its weights are now in RAM. */
@@ -532,23 +559,6 @@ class ActiveModelService {
   }
   async getResourceUsage(): Promise<ResourceUsage> {
     return _getResourceUsage();
-  }
-  private getIds() {
-    return { loadedTextModelId: this.loadedTextModelId, loadedImageModelId: this.loadedImageModelId };
-  }
-  private getLists() {
-    const s = useAppStore.getState();
-    return { downloadedModels: s.downloadedModels, downloadedImageModels: s.downloadedImageModels };
-  }
-  private getCurrentlyLoadedMemoryGB(): Promise<number> {
-    return _getCurrentlyLoadedMemoryGB(this.getIds(), this.getLists());
-  }
-  async checkMemoryForModel(modelId: string, modelType: ModelType): Promise<MemoryCheckResult> {
-    // Same policy + session-override source as the residency gate so pre-check and gate agree.
-    return _checkMemoryForModel({ modelId, modelType, ids: this.getIds(), lists: this.getLists(), policy: modelResidencyManager.getLoadPolicy(), sessionOverride: modelResidencyManager.hasSessionOverride(modelId) });
-  }
-  async checkMemoryForDualModel(textModelId: string | null, imageModelId: string | null): Promise<MemoryCheckResult> {
-    return _checkMemoryForDualModel({ textModelId, imageModelId, lists: this.getLists() });
   }
   async clearTextModelCache(): Promise<void> {
     if (llmService.isModelLoaded()) {

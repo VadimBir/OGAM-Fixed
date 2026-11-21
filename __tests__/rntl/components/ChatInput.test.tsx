@@ -1187,6 +1187,71 @@ describe('ChatInput', () => {
     });
   });
 
+  describe('/img slash command', () => {
+    const typeAndSend = (result: ReturnType<typeof render>, text: string) => {
+      fireEvent.changeText(result.getByTestId('chat-input'), text);
+      fireEvent.press(result.getByTestId('send-button'));
+    };
+
+    it('sends the raw command as a forced image turn (the dispatcher parses the flags)', () => {
+      const onSend = jest.fn();
+      const result = render(<ChatInput {...defaultProps} onSend={onSend} imageModelLoaded />);
+      typeAndSend(result, '/img a red fox --steps 20');
+      expect(onSend).toHaveBeenCalledWith('/img a red fox --steps 20', undefined, 'force');
+      expect(result.getByTestId('chat-input').props.value).toBe('');
+    });
+
+    it('forces the image turn even when image mode is disabled', () => {
+      const onSend = jest.fn();
+      const result = render(<ChatInput {...defaultProps} onSend={onSend} imageModelLoaded />);
+      pressImageModeToggle(result); // auto -> force
+      pressImageModeToggle(result); // force -> disabled
+      typeAndSend(result, '/image a red fox');
+      expect(onSend).toHaveBeenCalledWith('/image a red fox', undefined, 'force');
+    });
+
+    it('shows the existing No Image Model alert and keeps the text when no image model is downloaded', () => {
+      const onSend = jest.fn();
+      const result = render(<ChatInput {...defaultProps} onSend={onSend} imageModelLoaded={false} />);
+      typeAndSend(result, '/img a red fox');
+      expect(result.getByText('No Image Model')).toBeTruthy();
+      expect(onSend).not.toHaveBeenCalled();
+      expect(result.getByTestId('chat-input').props.value).toBe('/img a red fox');
+    });
+
+    it('selects the first downloaded image model, then sends', () => {
+      const setActiveImageModelId = jest.fn();
+      mockUseAppStore.mockReturnValue({
+        settings: { thinkingEnabled: false },
+        updateSettings: jest.fn(),
+        downloadedModels: [],
+        activeModelId: null,
+        downloadedImageModels: [{ id: 'img-1' }],
+        setActiveImageModelId,
+      });
+      const onSend = jest.fn();
+      const result = render(<ChatInput {...defaultProps} onSend={onSend} imageModelLoaded={false} />);
+      typeAndSend(result, '/img a red fox');
+      expect(setActiveImageModelId).toHaveBeenCalledWith('img-1');
+      expect(onSend).toHaveBeenCalledWith('/img a red fox', undefined, 'force');
+    });
+
+    it('asks for a prompt when the command has none', () => {
+      const onSend = jest.fn();
+      const result = render(<ChatInput {...defaultProps} onSend={onSend} imageModelLoaded />);
+      typeAndSend(result, '/img --steps 20');
+      expect(result.getByText('Add a Prompt')).toBeTruthy();
+      expect(onSend).not.toHaveBeenCalled();
+    });
+
+    it('leaves ordinary text and lookalikes on the normal route', () => {
+      const onSend = jest.fn();
+      const result = render(<ChatInput {...defaultProps} onSend={onSend} imageModelLoaded />);
+      typeAndSend(result, '/imagine a red fox');
+      expect(onSend).toHaveBeenCalledWith('/imagine a red fox', undefined, 'auto');
+    });
+  });
+
   describe('queue indicator with queuedTexts', () => {
     it('shows queue count and preview text', () => {
       const { getByTestId, getByText } = render(

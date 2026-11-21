@@ -51,6 +51,9 @@ import { estimateImageModelRamBytes } from '../../../src/services/imageModelMemo
 import { useAppStore } from '../../../src/stores';
 import { setDeviceMemory, resetDeviceMemory } from '../../harness/deviceMemory';
 import { createDownloadedModel, createONNXImageModel } from '../../utils/factories';
+import { hardwareService } from '../../../src/services/hardware';
+import { estimateTextModelMemory, textFootprintOf } from '../../../src/services/activeModelService/memory';
+import { OverridableMemoryError } from '../../../src/services/modelLoadErrors';
 
 const GB = 1024 ** 3;
 const llm = llmService as jest.Mocked<typeof llmService>;
@@ -261,3 +264,83 @@ describe('raceNativeLoad — a load that finishes after its timeout is released'
     expect(releaseOrphan).not.toHaveBeenCalled();
   });
 });
+
+describe('memory gate: the free-RAM decision happens before any eviction (never evict-then-refuse)', () => {
+  const { loadLlamaModelInfo } = require('llama.rn');
+  const llamaMeta = {
+    'general.architecture': 'llama', 'llama.block_count': 32, 'llama.attention.head_count': 32,
+    'llama.attention.head_count_kv': 8, 'llama.embedding_length': 4096, 'llama.vocab_size': 32000,
+  };
+  beforeEach(() => (loadLlamaModelInfo as jest.Mock).mockResolvedValue(llamaMeta));
+  afterEach(() => (loadLlamaModelInfo as jest.Mock).mockResolvedValue({}));
+
+  function seedImageResident(sizeMB: number): jest.Mock {
+    ams.loadedImageModelId = 'sd';
+    useAppStore.setState({ activeImageModelId: 'sd' } as any);
+    const unload = jest.fn(async () => { await ams.doUnloadImageModelLocked(true); });
+    modelResidencyManager.register({ key: 'image', type: 'image', modelId: 'sd', sizeMB, dirtyMemory: true }, unload, 1);
+    return unload;
+  }
+
+  it('a text load the gate refuses evicts nothing and never reaches llm.ts', async () => {
+    useAppStore.setState({ settings: { ...useAppStore.getState().settings, inferenceBackend: 'cpu', mmapMode: 'off' } } as any);
+    setDeviceMemory({ platform: 'android', totalGB: 12, availGB: 2 });
+    const unloadImage = seedImageResident(600);
+    // Weights in anonymous RAM (mmap off): ~4.4GB live, more than 2048 - 1024 + 600 even after evicting the image.
+    await expect(activeModelService.loadTextModel('gguf')).rejects.toBeInstanceOf(OverridableMemoryError);
+    expect(unloadImage).not.toHaveBeenCalled();
+    expect(router.unloadModel).not.toHaveBeenCalled();
+    expect(llm.loadModel).not.toHaveBeenCalled();
+    expect(modelResidencyManager.isResident('image')).toBe(true);
+  });
+
+  it('a text load the gate approves reaches llm.ts with memoryGateApproved, and is registered at its resident bytes', async () => {
+    useAppStore.setState({ settings: { ...useAppStore.getState().settings, inferenceBackend: 'cpu', mmapMode: 'on' } } as any);
+    setDeviceMemory({ platform: 'android', totalGB: 12, availGB: 6 });
+    seedImageResident(600);
+    llm.loadModel.mockImplementation(async () => { llm.isModelLoaded.mockReturnValue(true); });
+
+    await activeModelService.loadTextModel('gguf');
+
+    expect(llm.loadModel).toHaveBeenCalledWith(gguf.filePath, undefined, { override: false, memoryGateApproved: true });
+    // Both fit: the image stays resident next to the text model.
+    expect(modelResidencyManager.isResident('image')).toBe(true);
+    const est = await estimateTextModelMemory(gguf);
+    const resident = modelResidencyManager.getResidents().find(r => r.key === 'text');
+    expect(resident?.sizeMB).toBe(textFootprintOf(est, false).residentMB);
+    expect(resident!.sizeMB).toBeLessThan(textFootprintOf(est, false).peakMB);
+    llm.loadModel.mockImplementation(async () => {});
+  });
+});
+
+describe('image unload: local-dream process and memory return', () => {
+  it('stops a local-dream server that is alive but not ready (isModelLoaded=false, model path set)', async () => {
+    router.isModelLoaded.mockResolvedValue(false);
+    router.getLoadedModelPath.mockResolvedValueOnce('/models/sd');
+    await activeModelService.unloadImageModel(true);
+    expect(router.unloadModel).toHaveBeenCalledTimes(1);
+  });
+
+  it('nothing alive and nothing selected: no native call', async () => {
+    router.isModelLoaded.mockResolvedValue(false);
+    router.getLoadedModelPath.mockResolvedValueOnce(null);
+    await activeModelService.unloadImageModel(true);
+    expect(router.unloadModel).not.toHaveBeenCalled();
+  });
+
+  it('reads the memory baseline BEFORE the unload and returns once the drop is seen', async () => {
+    router.isModelLoaded.mockResolvedValue(true);
+    ams.loadedImageModelId = 'sd';
+    modelResidencyManager.register({ key: 'image', type: 'image', sizeMB: 2000, dirtyMemory: true }, async () => {});
+    const readings = [{ availableMB: 4000, footprintMB: 6000, limitMB: 10000 }, { availableMB: 7000, footprintMB: 3000, limitMB: 10000 }];
+    let i = 0;
+    const getProcessMemory = jest.spyOn(hardwareService, 'getProcessMemory').mockImplementation(async () => readings[Math.min(i++, 1)]);
+
+    await activeModelService.unloadImageModel(true);
+
+    expect(getProcessMemory).toHaveBeenCalledTimes(2);
+    expect(getProcessMemory.mock.invocationCallOrder[0]).toBeLessThan(router.unloadModel.mock.invocationCallOrder[0]);
+    expect(getProcessMemory.mock.invocationCallOrder[1]).toBeGreaterThan(router.unloadModel.mock.invocationCallOrder[0]);
+  });
+});
+

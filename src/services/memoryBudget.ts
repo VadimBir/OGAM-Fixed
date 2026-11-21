@@ -81,37 +81,74 @@ export function liveRamMarginMB(policy: LoadPolicy = 'balanced'): number {
 }
 
 /**
- * Extra margin (MB) the text pre-load gate (checkMemoryForModel) adds on top of its fixed
- * 200MB headroom. Android: the live-RAM margin, because the gate now reads live available
- * RAM (see effectiveAvailableMB). iOS: 0 (its gate is unchanged).
+ * Available RAM (MB) a model load may count on RIGHT NOW: the live OS reading, never capped.
+ *
+ * Android previously returned max(live, physical budget) - a "reclaim credit" that assumed the
+ * low-memory killer would free background apps fast enough; the load filled RAM faster than the
+ * system reclaimed it and the app was killed. It was then capped at the physical budget (70% of
+ * RAM on 12GB), which under-reported free RAM on a roomy phone and refused loads that fit. The
+ * live reading is now used as is; the caller keeps the live safety margin (liveRamMarginMB) free,
+ * and the physical cap is checked separately by the residency gate.
  */
-export function preloadSafetyMarginMB(
-  opts: { platform?: Plat; policy?: LoadPolicy } = {},
-): number {
-  const { platform = Platform.OS, policy = 'balanced' } = opts;
-  return platform === 'android' ? liveRamMarginMB(policy) : 0;
+export function effectiveAvailableMB(realAvailMB: number): number {
+  return Math.max(0, realAvailMB);
 }
 
 /**
- * Available RAM (MB) a model load may count on RIGHT NOW.
- *
- * `realAvailMB` is the live OS reading. Android previously returned
- * max(live, physical budget) - a "reclaim credit" that assumed the low-memory killer would
- * free background apps fast enough for a foreground load. On a 12GB phone at 75% used that
- * credited ~8.4GB while ~3GB was free, the load filled RAM faster than the system reclaimed
- * it, and the app itself was killed. Android now uses the live reading, capped at the
- * physical budget; callers add the live safety margin (preloadSafetyMarginMB). A refusal
- * stays overridable through "Load Anyway". iOS: the raw reading, unchanged.
+ * Factor applied ONCE, to the peak of the model being loaded. Models already resident are charged
+ * at their resident bytes (no factor, no transient compute), so two co-resident models are never
+ * padded twice.
  */
-export function effectiveAvailableMB(
-  realAvailMB: number,
-  totalRamMB: number,
-  opts: { platform?: Plat; policy?: LoadPolicy } = {},
-): number {
-  const { platform = Platform.OS, policy = 'balanced' } = opts;
-  return platform === 'android'
-    ? Math.max(0, Math.min(realAvailMB, modelMemoryBudgetMB(totalRamMB, platform, policy)))
-    : realAvailMB;
+export const INCOMING_PEAK_FACTOR = 1.1;
+
+/**
+ * A GGUF text model's memory, split by what the OS can reclaim:
+ *  - weightsBytes: the GGUF tensors;
+ *  - anonBytes: mmproj + text LoRA + KV cache + compute buffers (anonymous RAM, never reclaimable).
+ * Both come from estimateLlamaMemory (KV, compute) and the file sizes.
+ */
+export interface TextMemoryParts {
+  weightsBytes: number;
+  anonBytes: number;
+}
+
+/** MB charged for a text model: physical (all bytes) and live (bytes that consume free RAM). */
+export interface TextMemoryFootprint {
+  /** Resident bytes, no factor: what an already-loaded model holds. */
+  residentMB: number;
+  /** residentMB x INCOMING_PEAK_FACTOR: what a load of this model is charged. */
+  peakMB: number;
+  /** Part of residentMB that consumes live free RAM. */
+  liveResidentMB: number;
+  /** Part of peakMB that consumes live free RAM. */
+  livePeakMB: number;
+}
+
+/**
+ * Whether a loaded GGUF's weights are reclaimable file-backed pages. They are when llama.cpp maps
+ * the file (use_mmap) and keeps the tensors there: on Android only with no layer offloaded (the
+ * CPU backend; OpenCL/HTP copy offloaded tensors into anonymous buffers); on iOS Metal maps the
+ * same pages (see modelResidency getBudgetMB).
+ */
+export function textWeightsReclaimable(opts: { useMmap: boolean; gpuLayers: number; platform?: Plat }): boolean {
+  const { useMmap, gpuLayers, platform = Platform.OS } = opts;
+  return useMmap && (platform !== 'android' || gpuLayers === 0);
+}
+
+/**
+ * The one text-model memory formula used by the residency gate, the register and the llm.ts check.
+ * Reclaimable (mmapped) weights are left out of the live charge; they still count physically.
+ */
+export function textMemoryFootprint(parts: TextMemoryParts, weightsReclaimable: boolean): TextMemoryFootprint {
+  const MiB = 1024 * 1024;
+  const resident = parts.weightsBytes + parts.anonBytes;
+  const live = weightsReclaimable ? parts.anonBytes : resident;
+  return {
+    residentMB: Math.ceil(resident / MiB),
+    peakMB: Math.ceil((resident * INCOMING_PEAK_FACTOR) / MiB),
+    liveResidentMB: Math.ceil(live / MiB),
+    livePeakMB: Math.ceil((live * INCOMING_PEAK_FACTOR) / MiB),
+  };
 }
 
 /** OS/app reserve (MB) that is never committed to models, by policy. */
@@ -179,8 +216,8 @@ export function fileExceedsBudget(sizeBytes: number, ramGB: number): boolean {
 }
 
 /**
- * Block until a just-released native model's memory is reclaimed (process footprint drops by
- * ~minDropMB) or a bounded timeout — so the NEXT model load never allocates on top of the outgoing
+ * Block until a just-released native model's memory is reclaimed (the memory reading drops by
+ * ~minDropMB: iOS process footprint, Android system-wide used RAM) or a bounded timeout — so the NEXT model load never allocates on top of the outgoing
  * model. The native context.release() returns before the OS frees the weights + GPU/HTP buffers;
  * without this barrier a reload stacked BOTH models' memory at once and OOM'd under pressure
  * (device 2026-07-14: a reload with ~2GB free ground to 0 tok/s then the process was killed).
@@ -189,12 +226,26 @@ export function fileExceedsBudget(sizeBytes: number, ramGB: number): boolean {
  */
 export async function awaitMemoryReclaim(
   getProcessMemory: () => Promise<{ footprintMB: number } | null>,
-  opts: { timeoutMs?: number; minDropMB?: number; intervalMs?: number; sleep?: (ms: number) => Promise<void> } = {},
+  opts: {
+    timeoutMs?: number;
+    minDropMB?: number;
+    intervalMs?: number;
+    sleep?: (ms: number) => Promise<void>;
+    /** Reading taken BEFORE the release started. Needed when the release call itself returns only
+     *  after the memory is back (local-dream waits for its server process to exit): a baseline read
+     *  after it would never see the drop. Absent = read now. */
+    baseline?: { footprintMB: number } | null;
+  } = {},
 ): Promise<void> {
   const { timeoutMs = 2500, minDropMB = 200, intervalMs = 120 } = opts;
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
-  const before = await getProcessMemory();
+  const before = opts.baseline !== undefined ? opts.baseline : await getProcessMemory();
   if (!before) { await sleep(250); return; }
+  if (opts.baseline !== undefined) {
+    // Baseline from before the release: the memory may already be back (no wait needed).
+    const now = await getProcessMemory();
+    if (!now || before.footprintMB - now.footprintMB >= minDropMB) return;
+  }
   let waited = 0;
   while (waited < timeoutMs) {
     await sleep(intervalMs);

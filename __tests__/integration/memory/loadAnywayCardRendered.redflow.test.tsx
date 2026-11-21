@@ -10,12 +10,12 @@
  * threw a plain Error; loadModelWithOverride only offers "Load Anyway" for an OverridableMemoryError,
  * so a plain Error fell to the dead-end "Failed to load model" alert.
  *
- * The intersection reproduced (numbers pinned from the live [MEM-SM] trace, not guessed): Aggressive
- * mode → residency makeRoomFor ADMITS (sizeMB 5376 < budget 10813, fits=true); then resolveSafeContext
- * REFUSES because the model's weight estimate (6144MB, from the 5GB on-disk file) exceeds the raw
- * available snapshot (5120MB). That refusal — signature "it needs ~XMB but only YMB is available" — is
- * the device error and the fix site. So the test can ONLY pass when THAT gate refuses (it asserts the
- * signature), never false-greening on the residency gate.
+ * Since the memory-gate unification (one text estimate, free-RAM decision BEFORE any eviction), the
+ * refusal comes from the residency gate (makeRoomFor), never from llm.ts after the gate admitted the load
+ * (that path could evict a resident model and then refuse). On iOS a GGUF load now states its live part,
+ * so the gate checks it against the raw available RAM (5120MB here) and refuses with the same
+ * "it needs ~XMB" signature, as an OverridableMemoryError. "Load Anyway" forces that one load; llm.ts then
+ * only logs its own reading (memoryGateApproved).
  *
  * RED on HEAD (fix reverted): plain Error → the alert reads "Failed to load model", no "Load Anyway".
  */
@@ -31,10 +31,8 @@ jest.mock('@react-navigation/native', () => ({
 
 describe('memory refusal shows "Load Anyway" on the rendered alert, not a dead-end (red-flow)', () => {
   it('tapping send when the pre-load context gate refuses surfaces a "Load Anyway" override the user can tap', async () => {
-    // Pinned to iOS ON PURPOSE: on Android the live residency gate now refuses this cell FIRST
-    // (textPreloadGateReclaimAware), so only iOS isolates the pre-load gate this test targets: residency
-    // admits (3.5GB record, physical budget); resolveSafeContext refuses on the raw 5GB on-disk weight
-    // estimate. deferInitialLoad → first send triggers the real lazy load.
+    // iOS: the residency gate's live check (raw available, no reclaim credit) refuses this load.
+    // deferInitialLoad → first send triggers the real lazy load.
     const h = await setupChatScreen({
       engine: 'llama',
       platform: 'ios',
@@ -49,9 +47,9 @@ describe('memory refusal shows "Load Anyway" on the rendered alert, not a dead-e
     const { startLoadPolicySync } = require('../../../src/services/loadPolicySync');
      
 
-    // BOUNDARY: the ACTUAL on-disk model file is 5GB — resolveSafeContext sizes the model from the real
-    // file (RNFS.stat), so its weight estimate (6144MB) exceeds the 5120MB raw-available snapshot and it
-    // refuses. (The harness seeds a 500MB placeholder; a real 5GB download is the device reality.)
+    // BOUNDARY: the ACTUAL on-disk model file is 5GB (the harness seeds a 500MB placeholder; a real 5GB
+    // download is the device reality). llm.ts sizes it from the real file but, after the gate's decision,
+    // only logs it (no second refusal).
     h.boundary.fs!.seedFile('/docs/models/ggml-small.gguf', Math.round(5 * GB));
 
     h.render();
@@ -66,13 +64,12 @@ describe('memory refusal shows "Load Anyway" on the rendered alert, not a dead-e
     // Precondition: no refusal surface yet.
     expect(h.view!.queryByText('Load Anyway')).toBeNull();
 
-    // GESTURE: the real first-send lazy load → residency admits → resolveSafeContext refuses.
+    // GESTURE: the real first-send lazy load → the residency gate refuses (before evicting anything).
     h.boundary.llama!.scriptCompletion({ text: 'Paris.' });
     await h.tapSend('What is the capital of France?');
 
-    // TERMINAL ARTIFACT: the override alert offers "Load Anyway", AND its body carries resolveSafeContext's
-    // signature ("it needs ~") so this can only pass when THAT gate (the fix site) refuses — no false-green
-    // on the residency gate. RED on HEAD: plain Error → dead-end "Failed to load model", no "Load Anyway".
+    // TERMINAL ARTIFACT: the override alert offers "Load Anyway", AND its body states needed vs free MB
+    // ("it needs ~"). RED if the refusal is a plain Error: dead-end "Failed to load model", no "Load Anyway".
     await h.rtl.waitFor(() => {
       expect(h.view!.queryByText('Load Anyway')).not.toBeNull();
     }, { timeout: 20000 });

@@ -50,7 +50,6 @@ export interface CivitaiSearchParams {
   query?: string;
   type: CivitaiModelType;
   family: CivitaiFamily;
-  showNsfw: boolean;
   sort?: CivitaiSort;
   cursor?: string | null;
   limit?: number;
@@ -168,30 +167,21 @@ export function pickRunnableFile(files: unknown): CivitaiFile | null {
   return runnable.find(f => f.primary) ?? [...runnable].sort((a, b) => a.sizeBytes - b.sizeBytes)[0];
 }
 
-/** Image is safe to show with NSFW off: nsfwLevel 1 (PG) or nsfw false/"None". Unknown = not safe. */
-function isSafeImage(img: Record<string, any>): boolean {
-  const level = num(img.nsfwLevel);
-  if (level !== null) return level <= 1;
-  if (typeof img.nsfw === 'boolean') return !img.nsfw;
-  if (typeof img.nsfw === 'string') return img.nsfw.toLowerCase() === 'none';
-  return false;
-}
-
-function pickPreview(images: unknown, showNsfw: boolean): string | undefined {
+/** First still image (https, not a video). No content filter: every rating is shown. */
+function pickPreview(images: unknown): string | undefined {
   if (!Array.isArray(images)) return undefined;
   for (const raw of images) {
     const img = rec(raw);
     const url = str(img?.url);
     if (!img || !url || !/^https:\/\//i.test(url)) continue;
     if (img.type === 'video' || /\.(mp4|webm)(\?|$)/i.test(url)) continue;
-    if (!showNsfw && !isSafeImage(img)) continue;
     return url;
   }
   return undefined;
 }
 
 /** One result per item: its newest version (first listed) of the requested family with a runnable file. */
-export function parseCivitaiItem(raw: unknown, params: Pick<CivitaiSearchParams, 'type' | 'family' | 'showNsfw'>): CivitaiResult | null {
+export function parseCivitaiItem(raw: unknown, params: Pick<CivitaiSearchParams, 'type' | 'family'>): CivitaiResult | null {
   const item = rec(raw);
   if (!item) return null;
   const modelId = num(item.id);
@@ -199,7 +189,6 @@ export function parseCivitaiItem(raw: unknown, params: Pick<CivitaiSearchParams,
   if (modelId === null || !name) return null;
   if (item.type !== params.type) return null;
   const nsfw = item.nsfw === true;
-  if (nsfw && !params.showNsfw) return null;
   if (!Array.isArray(item.modelVersions)) return null;
   for (const rawVersion of item.modelVersions) {
     const v = rec(rawVersion);
@@ -221,7 +210,7 @@ export function parseCivitaiItem(raw: unknown, params: Pick<CivitaiSearchParams,
       family,
       creator: str(rec(item.creator)?.username) ?? undefined,
       nsfw,
-      previewUrl: pickPreview(v.images, params.showNsfw),
+      previewUrl: pickPreview(v.images),
       downloadCount: num(stats?.downloadCount) ?? undefined,
       file,
     };
@@ -248,9 +237,8 @@ export function buildCivitaiSearchUrl(params: CivitaiSearchParams, includeBaseMo
   add('sort', params.sort ?? 'Most Downloaded');
   const query = params.query?.trim();
   if (query) add('query', query);
-  // nsfw=false: Civitai hides NSFW models; omitted (not "true") when the user allows NSFW,
-  // because nsfw=true would restrict results to NSFW only.
-  if (!params.showNsfw) add('nsfw', 'false');
+  // No `nsfw` param: Civitai then returns every rating (nsfw=false would hide NSFW models,
+  // nsfw=true would return NSFW only). The app applies no content filter.
   if (includeBaseModels) for (const base of FAMILY_BASE_MODELS[params.family]) add('baseModels', base);
   if (params.cursor) add('cursor', params.cursor);
   return `${CIVITAI_API_BASE}?${q.join('&')}`;

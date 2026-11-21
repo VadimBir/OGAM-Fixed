@@ -28,6 +28,8 @@ import {
   stopAllTextEngines,
 } from '../../services/engines';
 import { needsVisionRepair } from '../../utils/visionRepair';
+import { parseImageSlashCommand } from '../../utils/imageSlashCommand';
+import { resolveImageToolRequest, type ImageToolRequest } from '../../services/tools/imageTool';
 import { ensureDefaultClassifier } from '../../services/classifierProvisioning';
 import { abortPreload } from '../../services/modelPreloader';
 import { modelResidencyManager } from '../../services/modelResidency';
@@ -487,6 +489,8 @@ export type ImageGenCall = {
   conversationId: string;
   skipUserMessage?: boolean;
   attachments?: MediaAttachment[]; // kept on the user message (e.g. a voice note)
+  /** One-image overrides from `/img --w N ...` (already bounded); absent keys = app settings. */
+  overrides?: ImageToolRequest['params'];
 };
 export async function handleImageGenerationFn(
   deps: Pick<
@@ -499,7 +503,7 @@ export async function handleImageGenerationFn(
   >,
   call: ImageGenCall,
 ): Promise<void> {
-  const { prompt, conversationId, skipUserMessage = false, attachments } = call;
+  const { prompt, conversationId, skipUserMessage = false, attachments, overrides } = call;
   if (!deps.activeImageModel) {
     deps.setAlertState(showAlert('Error', 'No image model loaded.'));
     return;
@@ -519,11 +523,13 @@ export async function handleImageGenerationFn(
   // change stale (the off-by-one the user hit: change steps → next gen still used the old value).
   // The service reads imageSteps/imageGuidanceScale FRESH from useAppStore.getState() at gen time,
   // exactly as it already does for width/height (which is why size applied immediately and these
-  // didn't). Passing nothing here makes all four tunables read from the one fresh source.
+  // didn't). Passing nothing here makes all four tunables read from the one fresh source. A `/img`
+  // flag is an explicit per-image request, not a settings snapshot, so it is passed and wins.
   await imageGenerationService.generateImage({
     prompt,
     conversationId,
     previewInterval: 2,
+    ...overrides,
   });
   // Image gen finishes outside generationService — release any queued messages.
   generationService.drainQueue();
@@ -1046,6 +1052,8 @@ async function dispatchResolvedTurn(
     /** Attachments carried on the user message (kept on the image user message, e.g. a voice note). */
     attachments?: MediaAttachment[];
     conversationId: string;
+    /** `/img` flag overrides for this one image. */
+    imageOverrides?: ImageToolRequest['params'];
     /** True on resend: the user message already exists in history, so the image path must not re-add it. */
     imageSkipsUserMessage: boolean;
     /** Called when the text route needs a text model (image-only device) but none could be provisioned —
@@ -1061,6 +1069,7 @@ async function dispatchResolvedTurn(
       conversationId: opts.conversationId,
       attachments: opts.attachments,
       skipUserMessage: opts.imageSkipsUserMessage,
+      overrides: opts.imageOverrides,
     });
     return { handled: true };
   }
@@ -1103,7 +1112,13 @@ export async function dispatchGenerationFn(
   call: DispatchCall,
   startTextGeneration: (convId: string, messageText: string, assistantEnabled?: boolean) => Promise<void>,
 ): Promise<void> {
-  const { text, attachments, conversationId, imageMode = 'auto', assistantEnabled } = call;
+  const { attachments, conversationId, imageMode = 'auto', assistantEnabled } = call;
+  // `/img <prompt> [--w N ...]` (alias /image): an explicit image turn, like a slash command. It skips
+  // the route rule (no classifier, no LLM), and its flags are bounded by the generate_image tool's own
+  // rules. Parsed HERE, not in the composer, so a queued command keeps its flags until drain.
+  const slash = parseImageSlashCommand(call.text);
+  const slashCommand = slash?.prompt ? slash : null;
+  const text = slashCommand ? slashCommand.prompt : call.text;
   const messageTextForRoute = appendAttachmentText(text, attachments);
   // [ROUTE-SM]: confirms the turn reached the router (esp. the voice path) + the
   // final routed destination — so a "pipeline never triggered" is visible in logs.
@@ -1114,16 +1129,23 @@ export async function dispatchGenerationFn(
     )}" imageMode=${imageMode} hasImageModel=${!!deps.activeImageModel}`,
   );
   // ONE decision seam (resolveTurnKind); a NEW turn has no recorded kind so the route rule decides.
-  const kind = await resolveTurnKind(deps, {
-    text: messageTextForRoute,
-    forceImageMode: imageMode === 'force',
-    imageEnabled: imageMode !== 'disabled',
-  });
+  const kind: TurnKind = slashCommand
+    ? 'image'
+    : await resolveTurnKind(deps, {
+        text: messageTextForRoute,
+        forceImageMode: imageMode === 'force',
+        imageEnabled: imageMode !== 'disabled',
+      });
+  // Engine null: no sampler flag exists, and the engine is only consulted for a sampler.
+  const imageOverrides = slashCommand
+    ? resolveImageToolRequest(slashCommand.args, null).params
+    : undefined;
   // ONE post-decision dispatch seam, shared with resend (image-model guard + text-provision path).
   const result = await dispatchResolvedTurn(deps, kind, {
     text,
     attachments,
     conversationId,
+    imageOverrides,
     imageSkipsUserMessage: false,
     onTextModelUnavailable: () => {
       deps.setPendingMessage?.(text, attachments);

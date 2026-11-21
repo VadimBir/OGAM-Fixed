@@ -156,6 +156,41 @@ describe('LLMService', () => {
       expect(initLlama).not.toHaveBeenCalled();
     });
 
+    it('never refuses after the residency gate approved the load (memoryGateApproved): no evict-then-refuse', async () => {
+      // Same tight memory as F4. The residency gate (makeRoomFor) already made the free-RAM decision
+      // before evicting anything; a refusal here would strand the user with the evicted model gone.
+      const { hardwareService } = require('../../../src/services/hardware');
+      mockedRNFS.exists.mockResolvedValue(true);
+      mockedRNFS.stat.mockResolvedValue({ size: 6 * 1024 * 1024 * 1024 } as any);
+      const ctx = createMockLlamaContext();
+      mockedInitLlama.mockResolvedValue(ctx as any);
+      jest.spyOn(hardwareService, 'getAppMemoryUsage').mockResolvedValue({
+        used: 6 * 1024 * 1024 * 1024,
+        available: 2 * 1024 * 1024 * 1024,
+        total: 8 * 1024 * 1024 * 1024,
+      });
+      useAppStore.setState({
+        settings: { ...useAppStore.getState().settings, contextLength: 4096, cacheType: 'q8_0' },
+      });
+
+      await expect(
+        llmService.loadModel('/models/huge.gguf', undefined, { memoryGateApproved: true }),
+      ).resolves.toBeUndefined();
+      expect(initLlama).toHaveBeenCalled();
+      expect(llmService.isModelLoaded()).toBe(true);
+    });
+
+    it('releases the native context when the load fails after init (no orphaned weights + KV)', async () => {
+      mockedRNFS.exists.mockResolvedValue(true);
+      const ctx = createMockLlamaContext();
+      mockedInitLlama.mockResolvedValue(ctx as any);
+      jest.spyOn(llmService as any, 'applyLoadedContext').mockRejectedValueOnce(new Error('capability probe failed'));
+
+      await expect(llmService.loadModel('/models/test.gguf')).rejects.toThrow('capability probe failed');
+      expect(ctx.release).toHaveBeenCalledTimes(1);
+      expect(llmService.isModelLoaded()).toBe(false);
+    });
+
     it('skips loading if same model already loaded', async () => {
       mockedRNFS.exists.mockResolvedValue(true);
       const ctx = createMockLlamaContext();

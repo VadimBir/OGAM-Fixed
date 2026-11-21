@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { View, Text, TextInput, TouchableOpacity, ScrollView, Image, Switch, StyleSheet, Linking } from 'react-native';
+import { View, Text, TextInput, TouchableOpacity, ScrollView, Image, StyleSheet, Linking } from 'react-native';
 import Icon from 'react-native-vector-icons/Feather';
 import { LoadingDots } from '../../components/LoadingDots';
 import { useTheme, useThemedStyles } from '../../theme';
@@ -261,10 +261,6 @@ export const CivitaiSection: React.FC<{ setAlertState: (s: AlertState) => void }
           <Chips options={FAMILY_OPTIONS} value={vm.family} onChange={vm.setFamily} testPrefix="civitai-family" />
         </View>
 
-        <View style={local.row}>
-          <Text style={local.label}>Show NSFW models</Text>
-          <Switch value={vm.showNsfw} onValueChange={vm.setShowNsfw} testID="civitai-nsfw-switch" />
-        </View>
         <ApiKeyRow vm={vm} local={local} />
 
         {vm.loading && (
@@ -290,7 +286,7 @@ export const CivitaiSection: React.FC<{ setAlertState: (s: AlertState) => void }
         )}
         {!vm.loading && vm.hiddenCount > 0 && (
           <Text style={local.note} testID="civitai-hidden-count">
-            {vm.hiddenCount} hidden: no SafeTensor file, another base model, NSFW, or too large for this phone's RAM.
+            {vm.hiddenCount} hidden: no SafeTensor file, another base model, or too large for this phone's RAM.
           </Text>
         )}
         {!vm.loading && vm.nextCursor && (

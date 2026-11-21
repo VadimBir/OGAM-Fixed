@@ -10,53 +10,71 @@ import {
   memoryReserveMB,
   effectiveAvailableMB,
   liveRamMarginMB,
-  preloadSafetyMarginMB,
   LIVE_RAM_MARGIN_MB,
   AGGRESSIVE_LIVE_RAM_MARGIN_MB,
   MEMORY_RESERVE_MB,
   AGGRESSIVE_RESERVE_MB,
   awaitMemoryReclaim,
+  textMemoryFootprint,
+  textWeightsReclaimable,
+  INCOMING_PEAK_FACTOR,
 } from '../../../src/services/memoryBudget';
 
 const GB = 1024;
 
 describe('effectiveAvailableMB — live availability (single owner)', () => {
-  const TOTAL_12GB = 12 * GB;
-
   it('Android 12GB with 3GB free: the gate sees the LIVE 3072MB, not a 70%-of-RAM credit', () => {
     // The owner's device: 12GB, ~75% used by other apps. The old reclaim credit returned
     // max(3072, 0.70*12288=8602) = 8602MB and admitted loads the phone could not hold.
-    expect(effectiveAvailableMB(3 * GB, TOTAL_12GB, { platform: 'android' })).toBe(3 * GB);
-    expect(effectiveAvailableMB(3 * GB, TOTAL_12GB, { platform: 'android', policy: 'aggressive' })).toBe(3 * GB);
+    expect(effectiveAvailableMB(3 * GB)).toBe(3 * GB);
   });
 
-  it('Android: caps a generous live reading at the physical budget', () => {
-    expect(effectiveAvailableMB(11000, TOTAL_12GB, { platform: 'android' }))
-      .toBe(modelMemoryBudgetMB(TOTAL_12GB, 'android'));
+  it('never caps free RAM at the 70% physical budget (a roomy phone reports its real free RAM)', () => {
+    // Before: min(11000, 0.70 x 12288 = 8602) = 8602. The reserve/margin protects the system.
+    expect(effectiveAvailableMB(11000)).toBe(11000);
+    expect(effectiveAvailableMB(11000)).toBeGreaterThan(modelMemoryBudgetMB(12 * GB, 'android'));
   });
 
-  it('Android: never negative', () => {
-    expect(effectiveAvailableMB(-5, TOTAL_12GB, { platform: 'android' })).toBe(0);
-  });
-
-  it('iOS: returns the raw availMem unchanged', () => {
-    expect(effectiveAvailableMB(4590, 11297, { platform: 'ios' })).toBe(4590);
+  it('never negative', () => {
+    expect(effectiveAvailableMB(-5)).toBe(0);
   });
 });
 
 describe('live safety margin', () => {
-  it('Android: the pre-load gate keeps 1024MB (balanced) / 512MB (aggressive) of live RAM free', () => {
+  it('the live gates keep 1024MB (balanced) / 512MB (aggressive) of live RAM free', () => {
     expect(LIVE_RAM_MARGIN_MB).toBe(1024);
     expect(AGGRESSIVE_LIVE_RAM_MARGIN_MB).toBe(512);
     expect(liveRamMarginMB()).toBe(1024);
     expect(liveRamMarginMB('aggressive')).toBe(512);
-    expect(preloadSafetyMarginMB({ platform: 'android' })).toBe(1024);
-    expect(preloadSafetyMarginMB({ platform: 'android', policy: 'aggressive' })).toBe(512);
+  });
+});
+
+describe('textMemoryFootprint — one text estimate, x1.1 once', () => {
+  const MiB = 1024 * 1024;
+  const parts = { weightsBytes: 4000 * MiB, anonBytes: 1000 * MiB };
+
+  it('resident = weights + anonymous bytes, no factor; peak = resident x 1.1', () => {
+    const f = textMemoryFootprint(parts, false);
+    expect(INCOMING_PEAK_FACTOR).toBe(1.1);
+    expect(f.residentMB).toBe(5000);
+    expect(f.peakMB).toBe(5500);
+    expect(f.liveResidentMB).toBe(5000);
+    expect(f.livePeakMB).toBe(5500);
   });
 
-  it('iOS: no extra pre-load margin (gate unchanged)', () => {
-    expect(preloadSafetyMarginMB({ platform: 'ios' })).toBe(0);
-    expect(preloadSafetyMarginMB({ platform: 'ios', policy: 'aggressive' })).toBe(0);
+  it('reclaimable mmapped weights are left out of the live charge only', () => {
+    const f = textMemoryFootprint(parts, true);
+    expect(f.residentMB).toBe(5000);
+    expect(f.peakMB).toBe(5500);
+    expect(f.liveResidentMB).toBe(1000);
+    expect(f.livePeakMB).toBe(1100);
+  });
+
+  it('Android: mmapped weights are reclaimable only on the CPU backend (no offloaded layer)', () => {
+    expect(textWeightsReclaimable({ useMmap: true, gpuLayers: 0, platform: 'android' })).toBe(true);
+    expect(textWeightsReclaimable({ useMmap: true, gpuLayers: 99, platform: 'android' })).toBe(false);
+    expect(textWeightsReclaimable({ useMmap: false, gpuLayers: 0, platform: 'android' })).toBe(false);
+    expect(textWeightsReclaimable({ useMmap: true, gpuLayers: 99, platform: 'ios' })).toBe(true);
   });
 });
 
@@ -166,5 +184,24 @@ describe('awaitMemoryReclaim — unload does not return until native memory is f
     await awaitMemoryReclaim(getProcessMemory, { sleep });
     expect(getProcessMemory).toHaveBeenCalledTimes(1); // read once, saw null, bailed to the fixed wait
     expect(sleep).toHaveBeenCalledWith(250);
+  });
+});
+
+describe('awaitMemoryReclaim with a pre-release baseline', () => {
+  const noSleep = jest.fn(async () => {});
+
+  it('returns at once when the memory was already back when the release returned', async () => {
+    const getProcessMemory = jest.fn(async () => ({ footprintMB: 1000 }));
+    await awaitMemoryReclaim(getProcessMemory, { baseline: { footprintMB: 4000 }, sleep: noSleep });
+    expect(getProcessMemory).toHaveBeenCalledTimes(1);
+    expect(noSleep).not.toHaveBeenCalled();
+  });
+
+  it('keeps polling from the baseline when the drop has not happened yet', async () => {
+    const readings = [{ footprintMB: 4000 }, { footprintMB: 3950 }, { footprintMB: 3000 }];
+    let i = 0;
+    const getProcessMemory = jest.fn(async () => readings[Math.min(i++, readings.length - 1)]);
+    await awaitMemoryReclaim(getProcessMemory, { baseline: { footprintMB: 4000 }, sleep: noSleep, minDropMB: 200 });
+    expect(getProcessMemory).toHaveBeenCalledTimes(3);
   });
 });

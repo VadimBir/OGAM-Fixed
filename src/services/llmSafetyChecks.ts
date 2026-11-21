@@ -94,38 +94,19 @@ export async function validateModelFile(
 }
 
 /**
- * Check whether the device has enough available memory to safely load a model.
- * Returns the estimated RAM needed and whether it's safe to proceed.
- *
- * Uses a 1.2x multiplier on file size as a conservative estimate of runtime RAM.
- * Context window KV cache adds additional memory proportional to context length.
+ * Live free-RAM check for a text-model load. `requiredMB` is the live part of the load's peak from
+ * the ONE text estimate the residency gate also uses (memoryBudget.textMemoryFootprint over
+ * estimateLlamaMemory: weights unless mmapped-reclaimable + mmproj + LoRA + KV + compute, x1.1).
+ * Safe when free RAM keeps `safetyMarginMB` (the gate's live headroom) after the load.
  */
-/**
- * KV cache scales with both context length AND model size (layers × hidden dim).
- * We don't know the architecture before load, so approximate the per-1024-token KV
- * cost as a fraction of the model's resident weights — ~6% for an f16 cache, ~3%
- * for a quantized (q8_0/q4) cache. For a ~4 GB 7-8B model at 4096 ctx this yields
- * ~1 GB (f16) / ~0.5 GB (quant), the right order of magnitude. The previous estimate
- * (~2 MB at any size) was ~1000x too low, so the guard never caught oversized loads.
- */
-const KV_FRACTION_PER_1K_F16 = 0.06;
-const KV_FRACTION_PER_1K_QUANT = 0.03;
-
 export interface MemoryCheckArgs {
-  modelFileSize: number;
-  contextLength: number;
+  requiredMB: number;
   getAvailableMemory: () => Promise<{ available: number; total: number }>;
-  quantizedCache?: boolean;
-  /** KV + compute bytes from the model's own GGUF metadata (llamaMemoryEstimate). When present it
-   *  replaces the fraction-of-weights heuristic, which over-counts GQA models and under-counts
-   *  wide-KV ones (Qwen3-1.7B at 8K q8: heuristic ~300 MB vs 476 MB real) and omitted compute. */
-  archBytes?: { kvBytes: number; computeBytes: number };
-  /** Extra live-RAM margin (MB) kept free on top of the fixed 200MB headroom. Android passes the
-   *  live safety margin (memoryBudget.preloadSafetyMarginMB) because its gate reads live RAM; 0 elsewhere. */
+  /** Live-RAM margin (MB) kept free after the load (memoryBudget.liveRamMarginMB). */
   safetyMarginMB?: number;
 }
 
-/** " + NMB safety margin" when a live margin applies; empty (unchanged wording) otherwise. */
+/** " + NMB safety margin" when a live margin applies; empty otherwise. */
 function marginClause(safetyMarginMB: number): string {
   return safetyMarginMB > 0 ? ` + ${Math.round(safetyMarginMB)}MB safety margin` : '';
 }
@@ -138,35 +119,18 @@ export async function checkMemoryForModel(
   estimatedMB: number;
   availableMB: number;
 }> {
-  const { modelFileSize, contextLength, getAvailableMemory, quantizedCache, archBytes } =
-    args;
+  const { requiredMB, getAvailableMemory } = args;
   const safetyMarginMB = Math.max(0, args.safetyMarginMB ?? 0);
+  const estimatedMB = Math.max(0, requiredMB);
   try {
     const { available, total } = await getAvailableMemory();
     const availableMB = available / (1024 * 1024);
     const totalMB = total / (1024 * 1024);
-    // Model weights in RAM (~1x file size for mmap, up to 1.2x without)
-    const modelMB = (modelFileSize * 1.2) / (1024 * 1024);
-    // KV cache estimate: a fraction of the model weights per 1024 tokens (see above).
-    const kvFractionPer1k = quantizedCache
-      ? KV_FRACTION_PER_1K_QUANT
-      : KV_FRACTION_PER_1K_F16;
-    const kvCacheMB = archBytes
-      ? archBytes.kvBytes / (1024 * 1024)
-      : (contextLength / 1024) * modelMB * kvFractionPer1k;
-    const computeMB = archBytes ? archBytes.computeBytes / (1024 * 1024) : 0;
-    const estimatedMB = modelMB + kvCacheMB + computeMB;
-    // Require at least 200MB headroom after model load for OS and app
-    const MIN_HEADROOM_MB = 200;
-    const safe = availableMB > estimatedMB + MIN_HEADROOM_MB + safetyMarginMB;
-    // [MEM-SM] the pre-load fit decision — kept (surfaces the exact "it needs ~X but only Y" call
-    // on-device AND in tests via DEBUG_LOGS=1). This is the gate the qwythos refusal came from.
+    const safe = estimatedMB + safetyMarginMB <= availableMB;
+    // [MEM-SM] the pre-load fit decision: the exact "it needs ~X but only Y" call, on device
+    // and in tests (DEBUG_LOGS=1).
     logger.log(
-      `[MEM-SM] checkMemoryForModel modelMB=${Math.round(
-        modelMB,
-      )} kvMB=${Math.round(kvCacheMB)} computeMB=${Math.round(computeMB)} src=${archBytes ? 'gguf' : 'heuristic'} estMB=${Math.round(
-        estimatedMB,
-      )} availMB=${Math.round(availableMB)} marginMB=${safetyMarginMB} ctx=${contextLength} safe=${safe}`,
+      `[MEM-SM] checkMemoryForModel estMB=${Math.round(estimatedMB)} availMB=${Math.round(availableMB)} marginMB=${safetyMarginMB} safe=${safe}`,
     );
     if (!safe) {
       return {
@@ -192,34 +156,17 @@ export async function checkMemoryForModel(
 
 /** Check the selected context without changing it. A memory refusal can be overridden by the user. */
 export async function resolveSafeContext(args: {
-  fileSize: number;
+  requiredMB: number;
   requestedCtx: number;
-  quantizedCache: boolean;
   override?: boolean;
   getAvailableMemory: () => Promise<{ available: number; total: number }>;
-  archBytes?: { kvBytes: number; computeBytes: number };
   safetyMarginMB?: number;
 }): Promise<{
   ctxLen: number;
   memCheck: Awaited<ReturnType<typeof checkMemoryForModel>>;
 }> {
-  const {
-    fileSize,
-    requestedCtx,
-    quantizedCache,
-    override = false,
-    getAvailableMemory: getMem,
-    archBytes,
-    safetyMarginMB,
-  } = args;
-  const memCheck = await checkMemoryForModel({
-    modelFileSize: fileSize,
-    contextLength: requestedCtx,
-    getAvailableMemory: getMem,
-    quantizedCache,
-    archBytes,
-    safetyMarginMB,
-  });
+  const { requiredMB, requestedCtx, override = false, getAvailableMemory, safetyMarginMB } = args;
+  const memCheck = await checkMemoryForModel({ requiredMB, getAvailableMemory, safetyMarginMB });
   if (!memCheck.safe && !override) {
     throw new OverridableMemoryError(
       `Not enough memory to load this model at ${requestedCtx.toLocaleString()} context tokens: it needs ~${Math.round(memCheck.estimatedMB)}MB${marginClause(safetyMarginMB ?? 0)} but only ${Math.round(memCheck.availableMB)}MB is available. Close other apps or choose a smaller model.`,

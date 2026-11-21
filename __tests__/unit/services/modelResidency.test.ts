@@ -13,6 +13,8 @@ import {
 } from '../../../src/services/modelResidency/policy';
 import { modelResidencyManager } from '../../../src/services/modelResidency';
 import { hardwareService } from '../../../src/services/hardware';
+import { estimateSdCppMemory } from '../../../src/services/sdCppMemory';
+import { textMemoryFootprint } from '../../../src/services/memoryBudget';
 
 const R = (
   key: string,
@@ -941,7 +943,7 @@ describe('ModelResidencyManager', () => {
     });
   });
 
-  describe('session override memory (approve Load Anyway once per model)', () => {
+  describe('Load Anyway covers one load only (no session memory)', () => {
     beforeEach(() => {
       modelResidencyManager._reset();
     });
@@ -954,40 +956,27 @@ describe('ModelResidencyManager', () => {
       sizeMB: 2000,
     };
 
-    it('remembers an explicit override so the SAME model auto-overrides next time (no re-prompt)', async () => {
+    it('a later load of the SAME model is gated again (the approval is not remembered)', async () => {
       modelResidencyManager.setBudgetOverrideMB(1000); // 2000MB model can never fit the budget
       jest
         .spyOn(hardwareService, 'refreshMemoryInfo')
         .mockResolvedValue(undefined as never);
 
-      // Fails-before: without override the oversized model is refused.
-      expect((await modelResidencyManager.makeRoomFor(tooBig)).fits).toBe(
-        false,
-      );
-      expect(modelResidencyManager.hasSessionOverride('org/big-model')).toBe(
-        false,
-      );
-
-      // User taps "Load Anyway" once → forced load, and it's remembered for the session.
+      expect((await modelResidencyManager.makeRoomFor(tooBig)).fits).toBe(false);
+      // User taps "Load Anyway" → that one load is forced.
       expect(
-        (await modelResidencyManager.makeRoomFor(tooBig, { override: true }))
-          .fits,
+        (await modelResidencyManager.makeRoomFor(tooBig, { override: true })).fits,
       ).toBe(true);
-      expect(modelResidencyManager.hasSessionOverride('org/big-model')).toBe(
-        true,
-      );
-
-      // Passes-after: a later load of the SAME model (no override flag) auto-overrides.
-      expect((await modelResidencyManager.makeRoomFor(tooBig)).fits).toBe(true);
+      // The next load without the flag is planned normally: refused again.
+      expect((await modelResidencyManager.makeRoomFor(tooBig)).fits).toBe(false);
     });
 
-    it('does NOT leak the override to a different model', async () => {
+    it('an override for one model does not leak to a different model', async () => {
       modelResidencyManager.setBudgetOverrideMB(1000);
       jest
         .spyOn(hardwareService, 'refreshMemoryInfo')
         .mockResolvedValue(undefined as never);
       await modelResidencyManager.makeRoomFor(tooBig, { override: true });
-      // A different oversized model is still gated (its own approval required).
       const other = {
         key: 'text',
         type: 'text' as const,
@@ -997,19 +986,20 @@ describe('ModelResidencyManager', () => {
       expect((await modelResidencyManager.makeRoomFor(other)).fits).toBe(false);
     });
 
-    it('_reset clears session overrides (relaunch asks again)', async () => {
-      modelResidencyManager.setBudgetOverrideMB(1000);
+    it('a later image load after a forced text load keeps the text model when both fit', async () => {
+      // Before: the forced load put the text model on a session list, and every later load ran
+      // single-model, evicting the text model for an image that fits beside it.
+      modelResidencyManager.setBudgetOverrideMB(3000);
       jest
         .spyOn(hardwareService, 'refreshMemoryInfo')
         .mockResolvedValue(undefined as never);
-      await modelResidencyManager.makeRoomFor(tooBig, { override: true });
-      expect(modelResidencyManager.hasSessionOverride('org/big-model')).toBe(
-        true,
-      );
-      modelResidencyManager._reset();
-      expect(modelResidencyManager.hasSessionOverride('org/big-model')).toBe(
-        false,
-      );
+      await modelResidencyManager.makeRoomFor({ ...tooBig, sizeMB: 2500 }, { override: true });
+      const unloadText = jest.fn().mockResolvedValue(undefined);
+      modelResidencyManager.register({ key: 'text', type: 'text', modelId: 'org/big-model', sizeMB: 2000 }, unloadText, 1);
+      const room = await modelResidencyManager.makeRoomFor({ key: 'image', type: 'image', modelId: 'img', sizeMB: 900 });
+      expect(room.fits).toBe(true);
+      expect(room.evicted).toEqual([]);
+      expect(unloadText).not.toHaveBeenCalled();
     });
   });
 
@@ -1215,9 +1205,9 @@ describe('ModelResidencyManager', () => {
       expect(modelResidencyManager.isResident('image')).toBe(false);
     });
 
-    it('override keeps ONE model at a time — evicts a co-resident even when it would fit', async () => {
-      // Extreme mode is single-model by design: even though 500 + 1000 fits in 2000,
-      // override evicts the co-resident so the incoming model gets the whole budget.
+    it('override that fits evicts nothing: a co-resident that fits stays loaded', async () => {
+      // "Load Anyway" covers the one load and never evicts models that would otherwise fit:
+      // 500 + 1000 fits in 2000, so the image stays.
       modelResidencyManager.setBudgetOverrideMB(2000);
       jest
         .spyOn(hardwareService, 'refreshMemoryInfo')
@@ -1233,8 +1223,8 @@ describe('ModelResidencyManager', () => {
         { override: true },
       );
       expect(fits).toBe(true);
-      expect(evicted).toContain('image'); // single-model: co-resident evicted
-      expect(unloadImg).toHaveBeenCalledTimes(1);
+      expect(evicted).toEqual([]);
+      expect(unloadImg).not.toHaveBeenCalled();
     });
 
     it('aggressive holds a leaner dirty headroom so a dirty load the balanced guard refuses is allowed', async () => {
@@ -1273,3 +1263,127 @@ describe('ModelResidencyManager', () => {
     });
   });
 });
+
+/**
+ * The audited S26 Ultra case (Balanced, 12GB phone reporting ~11300MB, cap 0.70 x 11300 = 7910MB):
+ * a resident GGUF text model + an SD1.5 fp16 sd.cpp image model. Before: both charged at their PEAK
+ * (x1.1 each) and the image also with its VAE compute buffer: 6045 + 2895 = 8940 > 7910, so the image
+ * load evicted the text model (and the post-image reload evicted the image). After: the resident text
+ * model at its resident bytes (5495), the incoming image at its load peak (x1.1 once, no compute): 7840.
+ */
+describe('memory-gate unification: resident bytes for residents, x1.1 once for the incoming peak', () => {
+  const MiB = 1024 * 1024;
+  const TOTAL_MB = 11300;
+  // SD1.5 fp16 (2134e6 B = 2.0 B/param): weights 2035MB, tiled VAE 500MB, overhead 96MB.
+  const sd15 = estimateSdCppMemory({ fileSizeBytes: 2134e6, family: 'sd1', width: 512, height: 512, flashAttn: true, vaeTiling: true });
+  // Text model whose resident bytes are 5495MB (weights 4500 + mmproj/KV/compute 995).
+  const text = textMemoryFootprint({ weightsBytes: 4500 * MiB, anonBytes: 995 * MiB }, true);
+  const originalOS = Platform.OS;
+
+  beforeEach(() => {
+    modelResidencyManager._reset();
+    modelResidencyManager.setLoadPolicy('balanced');
+    Platform.OS = 'android';
+    jest.spyOn(hardwareService, 'refreshMemoryInfo').mockResolvedValue(undefined as never);
+    jest.spyOn(hardwareService, 'getTotalMemoryGB').mockReturnValue(TOTAL_MB / 1024);
+    jest.spyOn(hardwareService, 'getAvailableMemoryGB').mockReturnValue(6);
+  });
+  afterEach(() => {
+    Platform.OS = originalOS;
+    jest.restoreAllMocks();
+  });
+
+  it('the example numbers: old peaks 6045 + 2895 = 8940 > 7910; new 5495 resident + 2345 load peak = 7840', () => {
+    expect(Math.round(computeBudgetMB(TOTAL_MB))).toBe(7910);
+    expect(text.residentMB).toBe(5495);
+    expect(text.peakMB).toBe(6045);
+    expect(sd15.totalMB).toBe(2895);
+    expect(sd15.residentMB).toBe(2131);
+    expect(sd15.loadPeakMB).toBe(2345);
+    expect(text.peakMB + sd15.totalMB).toBeGreaterThan(7910);
+    expect(text.residentMB + sd15.loadPeakMB).toBeLessThanOrEqual(7910);
+    // The resident truth (both resident) is 7626.
+    expect(text.residentMB + sd15.residentMB).toBe(7626);
+  });
+
+  it('loading the image next to the resident text model fits in Balanced and evicts nothing', async () => {
+    const unloadText = jest.fn().mockResolvedValue(undefined);
+    modelResidencyManager.register(
+      { key: 'text', type: 'text', modelId: 'gguf', sizeMB: text.residentMB, liveMB: text.liveResidentMB },
+      unloadText,
+      1,
+    );
+    const room = await modelResidencyManager.makeRoomFor({
+      key: 'image', type: 'image', modelId: 'sd15', sizeMB: sd15.loadPeakMB, dirtyMemory: true,
+    });
+    expect(room).toEqual({ evicted: [], fits: true });
+    expect(unloadText).not.toHaveBeenCalled();
+  });
+
+  it('the old charge (text peak + image generation peak) did not fit: the text model was evicted', async () => {
+    const unloadText = jest.fn().mockResolvedValue(undefined);
+    modelResidencyManager.register({ key: 'text', type: 'text', modelId: 'gguf', sizeMB: text.peakMB }, unloadText, 1);
+    const room = await modelResidencyManager.makeRoomFor({
+      key: 'image', type: 'image', modelId: 'sd15', sizeMB: sd15.totalMB, dirtyMemory: true,
+    });
+    expect(room.evicted).toEqual(['text']);
+    expect(unloadText).toHaveBeenCalledTimes(1);
+  });
+
+  it('with both resident, the generation gate keeps the text model (physical 7626 <= 7910, compute fits live RAM)', async () => {
+    modelResidencyManager.register({ key: 'text', type: 'text', sizeMB: text.residentMB, liveMB: text.liveResidentMB }, jest.fn(), 1);
+    modelResidencyManager.register({ key: 'image', type: 'image', sizeMB: sd15.residentMB, dirtyMemory: true }, jest.fn(), 2);
+    const pendingComputeMB = Math.ceil(Math.max(sd15.unetComputeMB, sd15.vaeComputeMB) * 1.1);
+    await expect(modelResidencyManager.canKeepOthersDuringGeneration('image', pendingComputeMB)).resolves.toBe(true);
+  });
+
+  it('Android mmapped CPU weights: only the anonymous part is charged against free RAM', async () => {
+    // 2.5GB free: the full text peak (6045) would never pass the live check; its live part (1095) does.
+    jest.spyOn(hardwareService, 'getAvailableMemoryGB').mockReturnValue(2.5);
+    const live = await modelResidencyManager.makeRoomFor({
+      key: 'text', type: 'text', modelId: 'gguf', sizeMB: text.peakMB, liveMB: text.livePeakMB,
+    });
+    expect(text.livePeakMB).toBe(1095);
+    expect(live.fits).toBe(true);
+    const anonymous = await modelResidencyManager.makeRoomFor({
+      key: 'text', type: 'text', modelId: 'gguf-2', sizeMB: text.peakMB,
+    });
+    expect(anonymous.fits).toBe(false);
+    expect(anonymous.neededMB).toBe(text.peakMB);
+    expect(anonymous.availableMB).toBe(2560 - 1024);
+  });
+
+  it('a refused load evicts nothing (the free-RAM decision happens before any eviction)', async () => {
+    jest.spyOn(hardwareService, 'getAvailableMemoryGB').mockReturnValue(1.2);
+    const unloadImage = jest.fn().mockResolvedValue(undefined);
+    modelResidencyManager.register({ key: 'image', type: 'image', sizeMB: 300, dirtyMemory: true }, unloadImage, 1);
+    // Even evicting the image (300 live) leaves 1229 - 1024 + 300 = 505MB < 1095MB.
+    const room = await modelResidencyManager.makeRoomFor({
+      key: 'text', type: 'text', modelId: 'gguf', sizeMB: text.peakMB, liveMB: text.livePeakMB,
+    });
+    expect(room.fits).toBe(false);
+    expect(room.evicted).toEqual([]);
+    expect(unloadImage).not.toHaveBeenCalled();
+    expect(modelResidencyManager.isResident('image')).toBe(true);
+  });
+
+  it('a different model in the same slot is charged in full and its live RAM is credited', () => {
+    const plan = planEviction(
+      [{ key: 'text', type: 'text', modelId: 'small', sizeMB: 1000, liveMB: 400, lastUsedAt: 1 }],
+      { key: 'text', type: 'text', modelId: 'big', sizeMB: 7000, liveMB: 1300 },
+      7910,
+      { live: { availableMB: 2000, headroomMB: 1024 } },
+    );
+    expect(plan.incomingMB).toBe(7000);
+    expect(plan.liveRoomMB).toBe(2000 - 1024 + 400);
+    expect(plan.fits).toBe(true);
+    // Before: a model in the same slot was charged 0, whatever its size.
+    const huge = planEviction(
+      [{ key: 'text', type: 'text', modelId: 'small', sizeMB: 1000, lastUsedAt: 1 }],
+      { key: 'text', type: 'text', modelId: 'huge', sizeMB: 9000 },
+      7910,
+    );
+    expect(huge.fits).toBe(false);
+  });
+});
+

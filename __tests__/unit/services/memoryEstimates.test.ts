@@ -12,6 +12,7 @@ jest.mock('../../../src/utils/logger', () => ({ __esModule: true, default: { log
 import { estimateLlamaMemory, kvBytesPerElement } from '../../../src/services/llamaMemoryEstimate';
 import { estimateSdCppMemory } from '../../../src/services/sdCppMemory';
 import { checkMemoryForModel } from '../../../src/services/llmSafetyChecks';
+import { textMemoryFootprint } from '../../../src/services/memoryBudget';
 import { buildModelParams } from '../../../src/services/llmHelpers';
 
 const MiB = 1024 * 1024;
@@ -60,18 +61,19 @@ describe('estimateLlamaMemory (GGUF metadata)', () => {
   });
 });
 
-describe('llmSafetyChecks.checkMemoryForModel with GGUF bytes', () => {
+describe('llmSafetyChecks.checkMemoryForModel with GGUF bytes (one estimate with the residency gate)', () => {
   const mem = (availMB: number) => async () => ({ available: availMB * MiB, total: 4096 * MiB });
-  it('uses the architecture KV + compute instead of the fraction heuristic', async () => {
-    const r = await checkMemoryForModel({
-      modelFileSize: 1000 * MiB, contextLength: 8192, quantizedCache: true, getAvailableMemory: mem(4000),
-      archBytes: { kvBytes: 476 * MiB, computeBytes: 300 * MiB },
-    });
-    expect(r.estimatedMB).toBeCloseTo(1200 + 476 + 300, 0);
+  it('the llm.ts charge equals estimateLlamaMemory.totalBytes when the weights are not reclaimable', async () => {
+    const est = estimateLlamaMemory(qwen3, { ctxLen: 8192, cacheType: 'q8_0', nBatch: 512, weightsBytes: 1000 * MiB })!;
+    const f = textMemoryFootprint({ weightsBytes: 1000 * MiB, anonBytes: est.kvBytes + est.computeBytes }, false);
+    expect(f.peakMB).toBe(Math.ceil(est.totalBytes / MiB));
+    const r = await checkMemoryForModel({ requiredMB: f.livePeakMB, getAvailableMemory: mem(4000) });
+    expect(r.estimatedMB).toBe(f.peakMB);
   });
-  it('without archBytes keeps the old heuristic (unchanged behaviour)', async () => {
-    const r = await checkMemoryForModel({ modelFileSize: 1000 * MiB, contextLength: 8192, quantizedCache: true, getAvailableMemory: mem(4000) });
-    expect(r.estimatedMB).toBeCloseTo(1200 + 8 * 1200 * 0.03, 0);
+  it('no 1.2x weights factor and no fixed 200MB headroom: (1000 + 476 + 300) x 1.1 = 1954MB', async () => {
+    const f = textMemoryFootprint({ weightsBytes: 1000 * MiB, anonBytes: (476 + 300) * MiB }, false);
+    expect(f.livePeakMB).toBe(1954);
+    expect((await checkMemoryForModel({ requiredMB: f.livePeakMB, getAvailableMemory: mem(1954) })).safe).toBe(true);
   });
 });
 
